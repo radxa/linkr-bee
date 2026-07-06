@@ -16,7 +16,8 @@ const state = {
   logBytes: [],
   ansi: {
     pending: "",
-    skipNextLf: false,
+    pendingCr: false,
+    currentLine: null,
     attrs: defaultAnsiAttrs(),
   },
 };
@@ -148,20 +149,38 @@ function hasActiveStyle() {
   );
 }
 
+function currentLine() {
+  if (!state.ansi.currentLine) {
+    state.ansi.currentLine = document.createElement("div");
+    state.ansi.currentLine.className = "terminal-line";
+    elements.terminalOutput.append(state.ansi.currentLine);
+  }
+  return state.ansi.currentLine;
+}
+
+function appendLineBreak() {
+  currentLine();
+  state.ansi.currentLine = null;
+}
+
+function clearCurrentLine() {
+  currentLine().replaceChildren();
+}
+
 function appendStyledText(text) {
   if (!text) {
     return;
   }
 
   if (!hasActiveStyle()) {
-    elements.terminalOutput.append(document.createTextNode(text));
+    currentLine().append(document.createTextNode(text));
     return;
   }
 
   const span = document.createElement("span");
   applyStyle(span);
   span.textContent = text;
-  elements.terminalOutput.append(span);
+  currentLine().append(span);
 }
 
 function parseAnsiNumbers(raw) {
@@ -259,9 +278,10 @@ function applySgr(rawParams) {
 
 function clearTerminalOutput(resetAnsi) {
   elements.terminalOutput.replaceChildren();
+  state.ansi.currentLine = null;
   if (resetAnsi) {
     state.ansi.pending = "";
-    state.ansi.skipNextLf = false;
+    state.ansi.pendingCr = false;
     state.ansi.attrs = defaultAnsiAttrs();
   }
 }
@@ -271,6 +291,8 @@ function handleCsi(params, final) {
     applySgr(params);
   } else if (final === "J" && /(^|[;:])[23]($|[;:])/.test(params)) {
     clearTerminalOutput(false);
+  } else if (final === "K") {
+    clearCurrentLine();
   }
 }
 
@@ -280,6 +302,18 @@ function appendAnsiOutput(text) {
 
   for (let index = 0; index < data.length; ) {
     const char = data[index];
+
+    if (state.ansi.pendingCr) {
+      if (char === "\n") {
+        appendLineBreak();
+        state.ansi.pendingCr = false;
+        index += 1;
+        continue;
+      }
+
+      clearCurrentLine();
+      state.ansi.pendingCr = false;
+    }
 
     if (char === "\x1b") {
       const next = data[index + 1];
@@ -334,21 +368,23 @@ function appendAnsiOutput(text) {
         index += 2;
       }
     } else if (char === "\r") {
-      appendStyledText("\n");
-      state.ansi.skipNextLf = true;
-      index += 1;
-    } else if (char === "\n") {
-      if (!state.ansi.skipNextLf) {
-        appendStyledText("\n");
+      if (data[index + 1] === "\n") {
+        appendLineBreak();
+        index += 2;
+      } else if (index + 1 < data.length) {
+        clearCurrentLine();
+        index += 1;
+      } else {
+        state.ansi.pendingCr = true;
+        index += 1;
       }
-      state.ansi.skipNextLf = false;
+    } else if (char === "\n") {
+      appendLineBreak();
       index += 1;
     } else if (char === "\t") {
       appendStyledText("\t");
-      state.ansi.skipNextLf = false;
       index += 1;
     } else if (char < " ") {
-      state.ansi.skipNextLf = false;
       index += 1;
     } else {
       let end = index + 1;
@@ -360,7 +396,6 @@ function appendAnsiOutput(text) {
         end += 1;
       }
       appendStyledText(data.slice(index, end));
-      state.ansi.skipNextLf = false;
       index = end;
     }
   }
