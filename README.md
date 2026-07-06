@@ -225,6 +225,7 @@ The page can:
 - write terminal input to the RX characteristic
 - query or set UART mode with `@u?` and `@u=...`
 - adjust line ending and BLE write chunk size
+- render common ANSI SGR colors, including 16-color, 256-color, and truecolor
 - show optional local echo and debug I/O traces
 - save received bytes as a log file
 
