@@ -194,3 +194,40 @@ Useful options:
 - `--debug-io`: show BLE TX/RX byte traces
 - `--log-file <path>`: append raw BLE RX bytes to a file
 - `--ble-write-size <n>`: override the auto-detected BLE write chunk size
+
+## Web Bluetooth terminal
+
+The browser terminal is an additional option, not a replacement for the Python
+terminal.  It uses the same BLE GATT/NUS service, RX write characteristic, TX
+notify characteristic, and UART control commands.
+
+Serve it from localhost:
+
+```sh
+tools/serve_web.sh
+```
+
+Then open:
+
+```text
+http://127.0.0.1:8765/
+```
+
+Use Chrome or another Chromium browser with Web Bluetooth support.  Web
+Bluetooth requires a secure context, so use `localhost` or HTTPS.  Device
+selection must be triggered from the page's `Connect` button; browsers do not
+allow a web page to scan and connect silently.
+
+The page can:
+
+- connect to `Linkr BLE UART`
+- subscribe to TX notifications
+- write terminal input to the RX characteristic
+- query or set UART mode with `@u?` and `@u=...`
+- adjust line ending and BLE write chunk size
+- show optional local echo and debug I/O traces
+- save received bytes as a log file
+
+This is useful for quick access on a machine that already has Chrome, but the
+Python terminal remains the better choice for raw keyboard terminal behavior,
+automation, loopback tests, and packaged offline use.

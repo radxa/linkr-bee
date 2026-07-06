@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Linkr BLE Terminal</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div>
+          <h1>Linkr BLE Terminal</h1>
+          <p id="supportText" class="support-text">Checking Web Bluetooth...</p>
+        </div>
+        <div class="status-strip" aria-live="polite">
+          <span id="statusDot" class="status-dot"></span>
+          <span id="statusText">Disconnected</span>
+        </div>
+      </header>
+
+      <section class="toolbar" aria-label="Connection controls">
+        <button id="connectButton" type="button">Connect</button>
+        <button id="disconnectButton" type="button" disabled>Disconnect</button>
+        <button id="queryButton" type="button" disabled>Query UART</button>
+        <button id="clearButton" type="button">Clear</button>
+        <button id="saveButton" type="button">Save Log</button>
+      </section>
+
+      <section class="settings" aria-label="Terminal settings">
+        <label>
+          UART
+          <input id="uartInput" type="text" value="115200,8,n,1,n" spellcheck="false" />
+        </label>
+        <button id="setUartButton" type="button" disabled>Set UART</button>
+
+        <label>
+          Enter
+          <select id="enterSelect">
+            <option value="raw">Raw</option>
+            <option value="cr">CR</option>
+            <option value="lf">LF</option>
+            <option value="crlf">CRLF</option>
+          </select>
+        </label>
+
+        <label>
+          Chunk
+          <input id="chunkInput" type="number" min="1" max="244" value="244" />
+        </label>
+
+        <label class="check-label">
+          <input id="localEchoInput" type="checkbox" />
+          Local echo
+        </label>
+
+        <label class="check-label">
+          <input id="debugInput" type="checkbox" />
+          Debug I/O
+        </label>
+      </section>
+
+      <section class="terminal-wrap" aria-label="Serial output">
+        <pre id="terminalOutput" class="terminal-output" tabindex="0"></pre>
+      </section>
+
+      <section class="input-row" aria-label="Serial input">
+        <input
+          id="terminalInput"
+          type="text"
+          autocomplete="off"
+          autocapitalize="off"
+          spellcheck="false"
+          placeholder="Type text and press Enter"
+          disabled
+        />
+        <button id="sendButton" type="button" disabled>Send</button>
+        <button id="breakButton" type="button" disabled>Ctrl-C</button>
+      </section>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
