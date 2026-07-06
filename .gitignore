@@ -1,0 +1,16 @@
+# Build outputs
+build/
+dist/
+*.spec
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Local logs and captures
+*.log
+sbc-console*.txt
+sbc-console*.log
+
+# macOS
+.DS_Store

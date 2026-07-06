@@ -1,0 +1,5 @@
+/ {
+	chosen {
+		zephyr,linkr-ble-uart = &uart0;
+	};
+};

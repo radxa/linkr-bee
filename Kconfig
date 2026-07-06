@@ -1,0 +1,175 @@
+menu "Linkr BLE bridge"
+
+config LINKR_BLE_BRIDGE_UART_RX_CHUNK
+	int "Maximum UART bytes sent in one BLE notification"
+	default 128
+	range 20 244
+	help
+	  UART data is accumulated up to this many bytes before it is sent over
+	  the Nordic UART Service TX characteristic.
+
+config LINKR_BLE_BRIDGE_UART_IDLE_MS
+	int "UART idle flush timeout in milliseconds"
+	default 8
+	range 1 100
+	help
+	  Flush a partially-filled UART RX packet after this idle period.
+
+config LINKR_BLE_BRIDGE_UART_RX_BUFFER_SIZE
+	int "UART RX buffering before BLE transmission"
+	default 16384
+	range 256 32767
+	help
+	  Bytes buffered from the bridge UART interrupt handler while BLE
+	  notifications are being sent. Larger values reduce dropped boot-log
+	  bytes when the SBC emits a burst faster than BLE can transmit.
+
+config LINKR_BLE_BRIDGE_BLE_TO_UART_QUEUE_DEPTH
+	int "BLE to UART packet queue depth"
+	default 8
+	range 1 32
+	help
+	  Number of BLE RX packets that can wait for UART transmission.
+
+config LINKR_BLE_BRIDGE_UART_BAUD_RATE
+	int "UART baud rate"
+	default 115200
+	range 300 3000000
+	help
+	  Default bridge UART baud rate. Typical SBC console values are 115200,
+	  1500000, 921600, and 1000000.
+
+choice LINKR_BLE_BRIDGE_UART_DATA_BITS
+	prompt "UART data bits"
+	default LINKR_BLE_BRIDGE_UART_DATA_BITS_8
+
+config LINKR_BLE_BRIDGE_UART_DATA_BITS_5
+	bool "5 data bits"
+
+config LINKR_BLE_BRIDGE_UART_DATA_BITS_6
+	bool "6 data bits"
+
+config LINKR_BLE_BRIDGE_UART_DATA_BITS_7
+	bool "7 data bits"
+
+config LINKR_BLE_BRIDGE_UART_DATA_BITS_8
+	bool "8 data bits"
+
+endchoice
+
+choice LINKR_BLE_BRIDGE_UART_PARITY
+	prompt "UART parity"
+	default LINKR_BLE_BRIDGE_UART_PARITY_NONE
+
+config LINKR_BLE_BRIDGE_UART_PARITY_NONE
+	bool "None"
+
+config LINKR_BLE_BRIDGE_UART_PARITY_ODD
+	bool "Odd"
+
+config LINKR_BLE_BRIDGE_UART_PARITY_EVEN
+	bool "Even"
+
+endchoice
+
+choice LINKR_BLE_BRIDGE_UART_STOP_BITS
+	prompt "UART stop bits"
+	default LINKR_BLE_BRIDGE_UART_STOP_BITS_1
+
+config LINKR_BLE_BRIDGE_UART_STOP_BITS_1
+	bool "1 stop bit"
+
+config LINKR_BLE_BRIDGE_UART_STOP_BITS_2
+	bool "2 stop bits"
+
+endchoice
+
+choice LINKR_BLE_BRIDGE_UART_FLOW_CONTROL
+	prompt "UART flow control"
+	default LINKR_BLE_BRIDGE_UART_FLOW_CONTROL_NONE
+
+config LINKR_BLE_BRIDGE_UART_FLOW_CONTROL_NONE
+	bool "None"
+
+config LINKR_BLE_BRIDGE_UART_FLOW_CONTROL_RTS_CTS
+	bool "RTS/CTS"
+	help
+	  Requires board pinctrl and wiring support. ESP32-C3 Super Mini overlay
+	  only wires RX/TX, so leave this disabled for that board.
+
+endchoice
+
+config LINKR_BLE_BRIDGE_CONTROL_COMMANDS
+	bool "Enable BLE control commands"
+	default y
+	help
+	  Treat BLE RX writes starting with "@linkr " as bridge control commands
+	  instead of forwarding them to UART. Supported commands include:
+	  "@linkr uart?" and "@linkr uart=<baud>,<data>,<parity>,<stop>,<flow>".
+
+config LINKR_BLE_BRIDGE_TEST_UART_ECHO
+	bool "Echo received UART bytes back to UART"
+	help
+	  Enable a simple UART loopback test. Every byte received from the
+	  bridge UART is immediately transmitted back on the same UART, while
+	  normal UART-to-BLE forwarding still runs when BLE notifications are
+	  subscribed.
+
+config LINKR_BLE_BRIDGE_TEST_UART_TX
+	bool "Periodically transmit a UART test frame"
+	help
+	  Enable a periodic UART transmit test frame. This is useful for checking
+	  the physical UART TX path without connecting a BLE central.
+
+config LINKR_BLE_BRIDGE_TEST_UART_TX_INTERVAL_MS
+	int "UART test frame interval in milliseconds"
+	default 1000
+	range 10 60000
+	depends on LINKR_BLE_BRIDGE_TEST_UART_TX
+
+config LINKR_BLE_BRIDGE_TEST_UART_TX_PAYLOAD
+	string "UART test frame payload"
+	default "linkr-ble-uart-test\r\n"
+	depends on LINKR_BLE_BRIDGE_TEST_UART_TX
+
+config LINKR_BLE_BRIDGE_TEST_BLE_ECHO
+	bool "Echo BLE RX writes back as BLE TX notifications"
+	help
+	  Enable a BLE-only self-test. Data written to the Nordic UART Service RX
+	  characteristic is immediately sent back through the TX notification
+	  characteristic. This bypasses the physical UART path.
+
+config LINKR_BLE_BRIDGE_TEST_BLE_DIAG_MARKER
+	bool "Write BLE diagnostic state to flash"
+	depends on FLASH
+	help
+	  Persist BLE connection, notification, RX write, and echo result counters
+	  into a flash marker so they can be read back with esptool.
+
+config LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY
+	bool "Verify UART TX to RX loopback"
+	help
+	  Enable a hardware UART loopback self-test. The firmware periodically
+	  transmits a test frame and verifies that the same bytes are received
+	  back on the bridge UART. Use this with UART TX and RX physically shorted.
+
+config LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_INTERVAL_MS
+	int "UART loopback verify interval in milliseconds"
+	default 1000
+	range 100 60000
+	depends on LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY
+
+config LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_TIMEOUT_MS
+	int "UART loopback receive timeout in milliseconds"
+	default 200
+	range 10 5000
+	depends on LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY
+
+config LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_PAYLOAD
+	string "UART loopback verify payload"
+	default "linkr-loopback-test"
+	depends on LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY
+
+endmenu
+
+source "Kconfig.zephyr"
