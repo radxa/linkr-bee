@@ -17,6 +17,7 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -44,6 +45,7 @@
 #define MAX_PATH_LEN    256
 #define MAX_UUID_LEN    40
 #define MAX_NAME_LEN    128
+#define BLE_MAX_NUS_PAYLOAD 244
 
 struct options {
     const char *name;
@@ -56,6 +58,7 @@ struct options {
     double loopback_timeout;
     bool no_terminal;
     int ble_write_size;
+    bool write_response;
     const char *enter;
     bool local_echo;
     bool line_mode;
@@ -80,7 +83,7 @@ struct app_state {
     uint8_t tx_buf[TX_BUF_SIZE];
     size_t tx_head;
     size_t tx_count;
-    bool tx_done;
+    _Atomic bool tx_done;
 
     /* notification -> stdout/log queue */
     pthread_mutex_t rx_lock;
@@ -92,6 +95,7 @@ struct app_state {
     FILE *log_file;
     struct termios saved_tio;
     bool tio_saved;
+    pthread_mutex_t stdout_lock;
 };
 
 static struct app_state g_state;
@@ -405,7 +409,7 @@ static void normalize_name_prefix(const char *name, char *out, size_t out_len)
 static bool iter_uuid_array_contains(DBusMessageIter *iter, const char *uuid)
 {
     DBusMessageIter value, uuids;
-    char want[40];
+    char want[MAX_UUID_LEN];
 
     strip_dashes(uuid, want, sizeof(want));
 
@@ -421,7 +425,7 @@ static bool iter_uuid_array_contains(DBusMessageIter *iter, const char *uuid)
     dbus_message_iter_recurse(iter, &uuids);
     while (dbus_message_iter_get_arg_type(&uuids) == DBUS_TYPE_STRING) {
         const char *u;
-        char got[40];
+        char got[MAX_UUID_LEN];
 
         dbus_message_iter_get_basic(&uuids, &u);
         strip_dashes(u, got, sizeof(got));
@@ -607,6 +611,9 @@ static bool find_device(DBusConnection *conn, struct options *opt,
         if (match->found) {
             break;
         }
+        /* Pump D-Bus so BlueZ InterfacesAdded/PropertiesChanged signals are
+         * dispatched, keeping the managed-objects cache fresh. */
+        dbus_connection_read_write_dispatch(conn, 0);
         usleep(200000);
         clock_gettime(CLOCK_MONOTONIC, &now);
         elapsed = (now.tv_sec - start.tv_sec) +
@@ -769,9 +776,9 @@ static bool discover_characteristics(DBusConnection *conn)
 {
     DBusMessage *reply;
     DBusMessageIter iter, arr;
-    char nus_dbus_uuid[40];
-    char rx_dbus_uuid[40];
-    char tx_dbus_uuid[40];
+    char nus_dbus_uuid[MAX_UUID_LEN];
+    char rx_dbus_uuid[MAX_UUID_LEN];
+    char tx_dbus_uuid[MAX_UUID_LEN];
 
     hex_uuid_to_dbus(NUS_SERVICE, nus_dbus_uuid, sizeof(nus_dbus_uuid));
     hex_uuid_to_dbus(NUS_RX_UUID, rx_dbus_uuid, sizeof(rx_dbus_uuid));
@@ -780,71 +787,88 @@ static bool discover_characteristics(DBusConnection *conn)
     g_state.rx_path[0] = '\0';
     g_state.tx_path[0] = '\0';
 
-    /* BlueZ needs a short delay before GATT cache is ready after connect. */
-    usleep(500000);
+    /* BlueZ discovers GATT services asynchronously after Connect; retry until
+     * the NUS characteristics appear or we time out (5s). */
+    {
+        struct timespec dstart, dnow;
+        double delapsed = 0;
 
-    reply = call_sync(conn, BLUEZ_BUS, "/", DBUS_OM_IFACE, "GetManagedObjects", NULL);
-    if (!reply) {
-        return false;
-    }
+        clock_gettime(CLOCK_MONOTONIC, &dstart);
+        while (!(g_state.rx_path[0] && g_state.tx_path[0]) && delapsed < 5.0) {
+            reply = call_sync(conn, BLUEZ_BUS, "/", DBUS_OM_IFACE,
+                              "GetManagedObjects", NULL);
+            if (reply) {
+                dbus_message_iter_init(reply, &iter);
+                dbus_message_iter_recurse(&iter, &arr);
+                while (dbus_message_iter_get_arg_type(&arr) == DBUS_TYPE_DICT_ENTRY) {
+                    DBusMessageIter entry, ifaces;
+                    const char *path;
 
-    dbus_message_iter_init(reply, &iter);
-    dbus_message_iter_recurse(&iter, &arr);
-    while (dbus_message_iter_get_arg_type(&arr) == DBUS_TYPE_DICT_ENTRY) {
-        DBusMessageIter entry, ifaces;
-        const char *path;
-
-        dbus_message_iter_recurse(&arr, &entry);
-        iter_get_basic(&entry, DBUS_TYPE_OBJECT_PATH, &path);
-        dbus_message_iter_next(&entry);
-        if (strncmp(path, g_state.device_path, strlen(g_state.device_path)) != 0) {
-            dbus_message_iter_next(&arr);
-            continue;
-        }
-        dbus_message_iter_recurse(&entry, &ifaces);
-
-        while (dbus_message_iter_get_arg_type(&ifaces) == DBUS_TYPE_DICT_ENTRY) {
-            DBusMessageIter iface_entry, props;
-            const char *iface;
-
-            dbus_message_iter_recurse(&ifaces, &iface_entry);
-            iter_get_basic(&iface_entry, DBUS_TYPE_STRING, &iface);
-            dbus_message_iter_next(&iface_entry);
-            dbus_message_iter_recurse(&iface_entry, &props);
-
-            if (strcmp(iface, CHAR_IFACE) == 0) {
-                DBusMessageIter prop_entry;
-                const char *uuid = NULL;
-
-                dbus_message_iter_recurse(&props, &prop_entry);
-                while (dbus_message_iter_get_arg_type(&prop_entry) == DBUS_TYPE_DICT_ENTRY) {
-                    DBusMessageIter kv;
-                    const char *key;
-
-                    dbus_message_iter_recurse(&prop_entry, &kv);
-                    iter_get_basic(&kv, DBUS_TYPE_STRING, &key);
-                    dbus_message_iter_next(&kv);
-
-                    if (strcmp(key, "UUID") == 0) {
-                        uuid = iter_get_string(&kv);
+                    dbus_message_iter_recurse(&arr, &entry);
+                    iter_get_basic(&entry, DBUS_TYPE_OBJECT_PATH, &path);
+                    dbus_message_iter_next(&entry);
+                    if (strncmp(path, g_state.device_path, strlen(g_state.device_path)) != 0 ||
+                        (path[strlen(g_state.device_path)] != '/' &&
+                         path[strlen(g_state.device_path)] != '\0')) {
+                        dbus_message_iter_next(&arr);
+                        continue;
                     }
-                    dbus_message_iter_next(&prop_entry);
+                    dbus_message_iter_recurse(&entry, &ifaces);
+
+                    while (dbus_message_iter_get_arg_type(&ifaces) == DBUS_TYPE_DICT_ENTRY) {
+                        DBusMessageIter iface_entry, props;
+                        const char *iface;
+
+                        dbus_message_iter_recurse(&ifaces, &iface_entry);
+                        iter_get_basic(&iface_entry, DBUS_TYPE_STRING, &iface);
+                        dbus_message_iter_next(&iface_entry);
+                        dbus_message_iter_recurse(&iface_entry, &props);
+
+                        if (strcmp(iface, CHAR_IFACE) == 0) {
+                            DBusMessageIter prop_entry;
+                            const char *uuid = NULL;
+
+                            dbus_message_iter_recurse(&props, &prop_entry);
+                            while (dbus_message_iter_get_arg_type(&prop_entry) == DBUS_TYPE_DICT_ENTRY) {
+                                DBusMessageIter kv;
+                                const char *key;
+
+                                dbus_message_iter_recurse(&prop_entry, &kv);
+                                iter_get_basic(&kv, DBUS_TYPE_STRING, &key);
+                                dbus_message_iter_next(&kv);
+
+                                if (strcmp(key, "UUID") == 0) {
+                                    uuid = iter_get_string(&kv);
+                                }
+                                dbus_message_iter_next(&prop_entry);
+                            }
+
+                            if (uuid) {
+                                if (strcasecmp(uuid, rx_dbus_uuid) == 0) {
+                                    strncpy(g_state.rx_path, path, sizeof(g_state.rx_path) - 1);
+                                } else if (strcasecmp(uuid, tx_dbus_uuid) == 0) {
+                                    strncpy(g_state.tx_path, path, sizeof(g_state.tx_path) - 1);
+                                }
+                            }
+                        }
+                        dbus_message_iter_next(&ifaces);
+                    }
+                    dbus_message_iter_next(&arr);
                 }
 
-                if (uuid) {
-                    if (strcasecmp(uuid, rx_dbus_uuid) == 0) {
-                        strncpy(g_state.rx_path, path, sizeof(g_state.rx_path) - 1);
-                    } else if (strcasecmp(uuid, tx_dbus_uuid) == 0) {
-                        strncpy(g_state.tx_path, path, sizeof(g_state.tx_path) - 1);
-                    }
-                }
+                dbus_message_unref(reply);
             }
-            dbus_message_iter_next(&ifaces);
-        }
-        dbus_message_iter_next(&arr);
-    }
 
-    dbus_message_unref(reply);
+            if (g_state.rx_path[0] && g_state.tx_path[0]) {
+                break;
+            }
+
+            usleep(300000);
+            clock_gettime(CLOCK_MONOTONIC, &dnow);
+            delapsed = (dnow.tv_sec - dstart.tv_sec) +
+                       (dnow.tv_nsec - dstart.tv_nsec) / 1e9;
+        }
+    }
 
     if (!g_state.rx_path[0] || !g_state.tx_path[0]) {
         msg("NUS RX/TX characteristics not found");
@@ -854,6 +878,68 @@ static bool discover_characteristics(DBusConnection *conn)
     msg("NUS RX: %s", g_state.rx_path);
     msg("NUS TX: %s", g_state.tx_path);
     return true;
+}
+
+static int read_device_mtu(DBusConnection *conn)
+{
+    DBusMessage *msg, *reply;
+    DBusMessageIter args, variant;
+    DBusError err;
+    const char *iface = DEVICE_IFACE;
+    const char *prop = "MTU";
+    dbus_uint16_t v = 0;
+
+    dbus_error_init(&err);
+    msg = dbus_message_new_method_call(BLUEZ_BUS, g_state.device_path,
+                                       DBUS_PROP_IFACE, "Get");
+    if (!msg) {
+        return 0;
+    }
+
+    dbus_message_iter_init_append(msg, &args);
+    dbus_message_iter_append_basic(&args, DBUS_TYPE_STRING, &iface);
+    dbus_message_iter_append_basic(&args, DBUS_TYPE_STRING, &prop);
+
+    reply = dbus_connection_send_with_reply_and_block(conn, msg, 3000, &err);
+    dbus_message_unref(msg);
+
+    if (dbus_error_is_set(&err)) {
+        dbus_error_free(&err);
+        return 0;
+    }
+    if (!reply) {
+        return 0;
+    }
+
+    if (dbus_message_iter_init(reply, &args) &&
+        dbus_message_iter_get_arg_type(&args) == DBUS_TYPE_VARIANT) {
+        dbus_message_iter_recurse(&args, &variant);
+        if (dbus_message_iter_get_arg_type(&variant) == DBUS_TYPE_UINT16) {
+            dbus_message_iter_get_basic(&variant, &v);
+        }
+    }
+    dbus_message_unref(reply);
+    return (int)v;
+}
+
+static void configure_write_chunk(void)
+{
+    int mtu = read_device_mtu(g_state.conn);
+
+    if (mtu >= 23) {
+        g_state.mtu_write_size = mtu - 3;
+        if (g_state.mtu_write_size > 244) {
+            g_state.mtu_write_size = 244;
+        }
+        if (g_state.mtu_write_size < 20) {
+            g_state.mtu_write_size = 20;
+        }
+        msg("Negotiated ATT MTU %d -> write chunk %d bytes",
+            mtu, g_state.mtu_write_size);
+    } else {
+        g_state.mtu_write_size = 20;
+        msg("ATT MTU unknown; using write chunk 20 bytes");
+    }
 }
 
 /* ------------------------------------------------------------------------ */
@@ -903,7 +989,7 @@ static DBusHandlerResult filter_signals(DBusConnection *conn,
         dbus_message_iter_next(&kv);
 
         if (strcmp(key, "Value") == 0) {
-            uint8_t data[256];
+            uint8_t data[BLE_MAX_NUS_PAYLOAD];
             size_t len = iter_copy_byte_array(&kv, data, sizeof(data));
 
             if (len > 0) {
@@ -1031,7 +1117,7 @@ static bool write_with_mtu(DBusConnection *conn, const uint8_t *data, size_t len
         if (opt->debug_io) {
             msg("TX %zu bytes", n);
         }
-        if (!write_chunk(conn, data + offset, n, opt->ble_write_size > 0)) {
+        if (!write_chunk(conn, data + offset, n, opt->write_response)) {
             msg("BLE write failed at offset %zu", offset);
             return false;
         }
@@ -1073,6 +1159,30 @@ static void restore_terminal(void)
     }
 }
 
+static void tx_enqueue(const uint8_t *data, size_t len)
+{
+    size_t cap = sizeof(g_state.tx_buf);
+
+    pthread_mutex_lock(&g_state.tx_lock);
+    size_t i = 0;
+    while (i < len && !g_state.tx_done) {
+        /* Block instead of dropping bytes when the ring buffer is full. */
+        while (g_state.tx_count >= cap && !g_state.tx_done) {
+            pthread_cond_wait(&g_state.tx_cond, &g_state.tx_lock);
+        }
+        if (g_state.tx_done) {
+            break;
+        }
+        while (i < len && g_state.tx_count < cap) {
+            g_state.tx_buf[(g_state.tx_head + g_state.tx_count) % cap] = data[i];
+            g_state.tx_count++;
+            i++;
+        }
+    }
+    pthread_cond_signal(&g_state.tx_cond);
+    pthread_mutex_unlock(&g_state.tx_lock);
+}
+
 static void *stdin_thread(void *arg)
 {
     struct options *opt = arg;
@@ -1081,12 +1191,18 @@ static void *stdin_thread(void *arg)
     const uint8_t *escape = (const uint8_t *)opt->escape;
     size_t escape_len = strlen(opt->escape);
 
+    if (escape_len > 1) {
+        msg("warning: multi-byte escape may be missed across read boundaries");
+    }
+
     if (!opt->line_mode) {
         set_raw_mode(fd);
     }
 
     while (!g_state.tx_done) {
         ssize_t n;
+        uint8_t translated[2048];
+        size_t tlen;
 
         if (opt->line_mode) {
             if (fgets((char *)buf, sizeof(buf), stdin) == NULL) {
@@ -1100,14 +1216,14 @@ static void *stdin_thread(void *arg)
             }
         }
 
-        uint8_t translated[2048];
-        size_t tlen;
         normalize_enter(buf, (size_t)n, opt->enter, translated, &tlen,
                         sizeof(translated));
 
         if (opt->local_echo) {
+            pthread_mutex_lock(&g_state.stdout_lock);
             fwrite(translated, 1, tlen, stdout);
             fflush(stdout);
+            pthread_mutex_unlock(&g_state.stdout_lock);
         }
 
         /* Check for escape sequence. */
@@ -1115,13 +1231,7 @@ static void *stdin_thread(void *arg)
             for (size_t i = 0; i + escape_len <= tlen; i++) {
                 if (memcmp(translated + i, escape, escape_len) == 0) {
                     if (i > 0) {
-                        pthread_mutex_lock(&g_state.tx_lock);
-                        for (size_t k = 0; k < i && g_state.tx_count < sizeof(g_state.tx_buf) - 1; k++) {
-                            g_state.tx_buf[(g_state.tx_head + g_state.tx_count) % sizeof(g_state.tx_buf)] = translated[k];
-                            g_state.tx_count++;
-                        }
-                        pthread_cond_signal(&g_state.tx_cond);
-                        pthread_mutex_unlock(&g_state.tx_lock);
+                        tx_enqueue(translated, i);
                     }
                     g_state.tx_done = true;
                     pthread_cond_signal(&g_state.tx_cond);
@@ -1130,13 +1240,7 @@ static void *stdin_thread(void *arg)
             }
         }
 
-        pthread_mutex_lock(&g_state.tx_lock);
-        for (size_t i = 0; i < tlen && g_state.tx_count < sizeof(g_state.tx_buf) - 1; i++) {
-            g_state.tx_buf[(g_state.tx_head + g_state.tx_count) % sizeof(g_state.tx_buf)] = translated[i];
-            g_state.tx_count++;
-        }
-        pthread_cond_signal(&g_state.tx_cond);
-        pthread_mutex_unlock(&g_state.tx_lock);
+        tx_enqueue(translated, tlen);
     }
 
 done:
@@ -1165,6 +1269,10 @@ static size_t tx_dequeue(uint8_t *out, size_t max, long timeout_ms)
         out[i] = g_state.tx_buf[g_state.tx_head];
         g_state.tx_head = (g_state.tx_head + 1) % sizeof(g_state.tx_buf);
         g_state.tx_count--;
+    }
+    if (n > 0) {
+        /* Wake the producer if it was blocked waiting for space. */
+        pthread_cond_signal(&g_state.tx_cond);
     }
     pthread_mutex_unlock(&g_state.tx_lock);
     return n;
@@ -1244,8 +1352,10 @@ static void emit_rx(const uint8_t *data, size_t len, struct options *opt)
         msg("RX %zu bytes", len);
     }
 
+    pthread_mutex_lock(&g_state.stdout_lock);
     fwrite(data, 1, len, stdout);
     fflush(stdout);
+    pthread_mutex_unlock(&g_state.stdout_lock);
 
     if (g_state.log_file) {
         fwrite(data, 1, len, g_state.log_file);
@@ -1295,19 +1405,30 @@ static bool do_loopback_test(DBusConnection *conn, struct options *opt)
     const char *payload = opt->loopback_test;
     size_t payload_len = strlen(payload);
     struct timespec start, now;
-    uint8_t acc[512];
+    size_t acc_cap = payload_len * 4;
+    uint8_t *acc;
     size_t acc_len = 0;
+
+    if (acc_cap < 512) {
+        acc_cap = 512;
+    }
+    acc = malloc(acc_cap);
+    if (!acc) {
+        msg("loopback: out of memory");
+        return false;
+    }
 
     drain_notifications(opt);
     msg("loopback -> %s", payload);
 
     if (!write_with_mtu(conn, (const uint8_t *)payload, payload_len, opt)) {
+        free(acc);
         return false;
     }
 
     clock_gettime(CLOCK_MONOTONIC, &start);
     while (acc_len < payload_len) {
-        uint8_t buf[256];
+        uint8_t buf[BLE_MAX_NUS_PAYLOAD];
         size_t len;
         double elapsed;
 
@@ -1323,19 +1444,21 @@ static bool do_loopback_test(DBusConnection *conn, struct options *opt)
             continue;
         }
 
-        if (acc_len + len > sizeof(acc)) {
-            len = sizeof(acc) - acc_len;
+        if (acc_len + len > acc_cap) {
+            len = acc_cap - acc_len;
         }
         memcpy(acc + acc_len, buf, len);
         acc_len += len;
 
         if (memmem(acc, acc_len, payload, payload_len) != NULL) {
             msg("loopback PASS");
+            free(acc);
             return true;
         }
     }
 
     msg("loopback FAIL");
+    free(acc);
     return false;
 }
 
@@ -1419,6 +1542,7 @@ static void usage(const char *prog)
             "  --loopback-timeout SEC   loopback timeout (default: 3.0)\n"
             "  --no-terminal         connect, run commands, exit\n"
             "  --ble-write-size N    max bytes per BLE write (0=auto)\n"
+            "  --write-response      use GATT write-with-response (default: without)\n"
             "  --enter MODE          raw|cr|lf|crlf (default: raw)\n"
             "  --local-echo          echo typed bytes locally\n"
             "  --line-mode           send one visible line at a time\n"
@@ -1465,6 +1589,8 @@ static void parse_args(int argc, char **argv, struct options *opt)
             opt->no_terminal = true;
         } else if (strcmp(a, "--ble-write-size") == 0 && i + 1 < argc) {
             opt->ble_write_size = atoi(argv[++i]);
+        } else if (strcmp(a, "--write-response") == 0) {
+            opt->write_response = true;
         } else if (strcmp(a, "--enter") == 0 && i + 1 < argc) {
             opt->enter = argv[++i];
         } else if (strcmp(a, "--local-echo") == 0) {
@@ -1496,10 +1622,13 @@ int main(int argc, char **argv)
     struct device_match match;
 
     memset(&g_state, 0, sizeof(g_state));
+    /* Ensure the terminal is restored even on fatal()/early exit paths. */
+    atexit(restore_terminal);
     pthread_mutex_init(&g_state.tx_lock, NULL);
     pthread_cond_init(&g_state.tx_cond, NULL);
     pthread_mutex_init(&g_state.rx_lock, NULL);
     pthread_cond_init(&g_state.rx_cond, NULL);
+    pthread_mutex_init(&g_state.stdout_lock, NULL);
 
     parse_args(argc, argv, &opt);
 
@@ -1535,15 +1664,18 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    /* Conservative default chunk size; BlueZ exposes it via MTU after
-     * MTU exchange, but for simplicity we default to 20 and let the user
-     * override with --ble-write-size. */
-    g_state.mtu_write_size = 20;
-
+    /* Start notifications first so MTU exchange can complete, then read the
+     * negotiated ATT MTU from BlueZ to size BLE write chunks. Falls back to
+     * 20 bytes if the MTU property is unavailable. */
     if (!start_notifications(g_state.conn)) {
         disconnect_device(g_state.conn);
         return 1;
     }
+
+    /* Give BlueZ a moment to finish the LE Data Length / MTU exchange, then
+     * size write chunks from the negotiated ATT MTU. */
+    usleep(200000);
+    configure_write_chunk();
 
     if (opt.log_file) {
         g_state.log_file = fopen(opt.log_file, "ab");
