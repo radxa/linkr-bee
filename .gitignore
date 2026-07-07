@@ -7,6 +7,9 @@ dist/
 __pycache__/
 *.py[cod]
 
+# C reference terminal build output
+tools/linkr_ble_terminal_c
+
 # Local logs and captures
 *.log
 sbc-console*.txt

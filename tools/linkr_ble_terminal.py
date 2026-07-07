@@ -98,21 +98,41 @@ async def scan_devices(timeout: float) -> list:
     return devices
 
 
+def normalize_name_prefix(name: str) -> str:
+    name = name.strip()
+    if name.endswith("*"):
+        return name[:-1].rstrip()
+    return name
+
+
 async def find_device(name: str, address: str | None, timeout: float):
     if address:
         return address
 
-    stderr(f"Scanning for BLE device named {name!r}...")
+    prefix = normalize_name_prefix(name)
+    stderr(f"Scanning for BLE device matching {prefix + '*'}...")
     devices = await BleakScanner.discover(timeout=timeout)
     exact = [dev for dev in devices if dev.name == name]
     if exact:
         return exact[0]
 
-    partial = [dev for dev in devices if dev.name and name in dev.name]
-    if partial:
-        return partial[0]
+    prefixed = [
+        dev for dev in devices
+        if dev.name and dev.name.startswith(prefix)
+    ]
+    if prefixed:
+        if len(prefixed) > 1:
+            matches = ", ".join(
+                f"{dev.name} ({dev.address})" for dev in prefixed[:4]
+            )
+            stderr(
+                "warning: multiple Linkr BLE devices match; "
+                f"using {prefixed[0].name} ({prefixed[0].address}); "
+                f"matches: {matches}"
+            )
+        return prefixed[0]
 
-    raise RuntimeError(f"device not found: {name!r}")
+    raise RuntimeError(f"device not found matching: {prefix + '*'}")
 
 
 async def ble_write(client: BleakClient, data: bytes, cfg: TerminalConfig) -> None:
@@ -331,7 +351,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Terminal over BLE Nordic UART Service for Linkr BLE bridge"
     )
-    parser.add_argument("--name", default=DEFAULT_NAME, help="BLE device name")
+    parser.add_argument(
+        "--name",
+        default=DEFAULT_NAME,
+        help="BLE device name or prefix; default matches Linkr BLE UART*",
+    )
     parser.add_argument("--address", help="BLE address/UUID; skips name scan")
     parser.add_argument("--scan", action="store_true", help="list nearby BLE devices")
     parser.add_argument("--timeout", type=float, default=8.0, help="scan timeout seconds")

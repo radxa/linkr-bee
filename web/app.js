@@ -3,6 +3,7 @@
 const NUS_SERVICE = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
 const NUS_RX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
 const NUS_TX = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
+const BLE_DEVICE_NAME_PREFIX = "Linkr BLE UART";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -12,14 +13,11 @@ const state = {
   server: null,
   rxChar: null,
   txChar: null,
+  term: null,
+  fitAddon: null,
+  resizeObserver: null,
   connected: false,
   logBytes: [],
-  ansi: {
-    pending: "",
-    pendingCr: false,
-    currentLine: null,
-    attrs: defaultAnsiAttrs(),
-  },
 };
 
 const $ = (id) => document.getElementById(id);
@@ -45,369 +43,81 @@ const elements = {
   debugInput: $("debugInput"),
 };
 
-function defaultAnsiAttrs() {
-  return {
-    bold: false,
-    dim: false,
-    italic: false,
-    underline: false,
-    inverse: false,
-    fg: null,
-    bg: null,
-  };
-}
-
-function basicAnsiColor(index) {
-  const colors = [
-    "#000000",
-    "#cd3131",
-    "#0dbc79",
-    "#e5e510",
-    "#2472c8",
-    "#bc3fbc",
-    "#11a8cd",
-    "#e5e5e5",
-    "#666666",
-    "#f14c4c",
-    "#23d18b",
-    "#f5f543",
-    "#3b8eea",
-    "#d670d6",
-    "#29b8db",
-    "#ffffff",
-  ];
-  return colors[index] || null;
-}
-
-function color256(index) {
-  if (!Number.isInteger(index) || index < 0 || index > 255) {
-    return null;
-  }
-  if (index < 16) {
-    return basicAnsiColor(index);
-  }
-  if (index >= 232) {
-    const level = 8 + (index - 232) * 10;
-    return `rgb(${level}, ${level}, ${level})`;
-  }
-
-  const levels = [0, 95, 135, 175, 215, 255];
-  const cube = index - 16;
-  const r = levels[Math.floor(cube / 36)];
-  const g = levels[Math.floor((cube % 36) / 6)];
-  const b = levels[cube % 6];
-  return `rgb(${r}, ${g}, ${b})`;
-}
-
-function rgbColor(r, g, b) {
-  const valid = [r, g, b].every(
-    (value) => Number.isInteger(value) && value >= 0 && value <= 255,
-  );
-  return valid ? `rgb(${r}, ${g}, ${b})` : null;
-}
-
-function applyStyle(span) {
-  const attrs = state.ansi.attrs;
-  let fg = attrs.fg;
-  let bg = attrs.bg;
-
-  if (attrs.inverse) {
-    fg = attrs.bg || "#07090c";
-    bg = attrs.fg || "#d8f3dc";
-  }
-
-  if (fg) {
-    span.style.color = fg;
-  }
-  if (bg) {
-    span.style.backgroundColor = bg;
-  }
-  if (attrs.bold) {
-    span.style.fontWeight = "700";
-  }
-  if (attrs.dim) {
-    span.style.opacity = "0.65";
-  }
-  if (attrs.italic) {
-    span.style.fontStyle = "italic";
-  }
-  if (attrs.underline) {
-    span.style.textDecoration = "underline";
-  }
-}
-
-function hasActiveStyle() {
-  const attrs = state.ansi.attrs;
-  return (
-    attrs.bold ||
-    attrs.dim ||
-    attrs.italic ||
-    attrs.underline ||
-    attrs.inverse ||
-    attrs.fg ||
-    attrs.bg
-  );
-}
-
-function currentLine() {
-  if (!state.ansi.currentLine) {
-    state.ansi.currentLine = document.createElement("div");
-    state.ansi.currentLine.className = "terminal-line";
-    elements.terminalOutput.append(state.ansi.currentLine);
-  }
-  return state.ansi.currentLine;
-}
-
-function appendLineBreak() {
-  currentLine();
-  state.ansi.currentLine = null;
-}
-
-function clearCurrentLine() {
-  currentLine().replaceChildren();
-}
-
-function appendStyledText(text) {
-  if (!text) {
+function fitTerminal() {
+  if (!state.fitAddon) {
     return;
   }
 
-  if (!hasActiveStyle()) {
-    currentLine().append(document.createTextNode(text));
+  try {
+    state.fitAddon.fit();
+  } catch (_error) {
+    // The fit addon can throw while the terminal container is hidden/resizing.
+  }
+}
+
+function initTerminal() {
+  if (!globalThis.Terminal || !globalThis.FitAddon) {
+    elements.supportText.textContent =
+      "xterm.js failed to load; check network access to jsDelivr";
+    return false;
+  }
+
+  state.term = new globalThis.Terminal({
+    cursorBlink: true,
+    fontFamily:
+      'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace',
+    fontSize: 13,
+    lineHeight: 1,
+    scrollback: 10000,
+    tabStopWidth: 8,
+    theme: {
+      background: "#07090c",
+      foreground: "#d8f3dc",
+      cursor: "#d8f3dc",
+      selectionBackground: "#315a42",
+    },
+  });
+  state.fitAddon = new globalThis.FitAddon.FitAddon();
+  state.term.loadAddon(state.fitAddon);
+  state.term.open(elements.terminalOutput);
+  fitTerminal();
+
+  window.addEventListener("resize", fitTerminal);
+  if (globalThis.ResizeObserver) {
+    state.resizeObserver = new ResizeObserver(fitTerminal);
+    state.resizeObserver.observe(elements.terminalOutput);
+  }
+
+  return true;
+}
+
+function clearTerminalOutput(resetTerminal) {
+  if (!state.term) {
+    elements.terminalOutput.replaceChildren();
     return;
   }
 
-  const span = document.createElement("span");
-  applyStyle(span);
-  span.textContent = text;
-  currentLine().append(span);
-}
-
-function parseAnsiNumbers(raw) {
-  if (!raw) {
-    return [0];
+  if (resetTerminal) {
+    state.term.reset();
   }
-
-  return raw
-    .split(/[;:]/)
-    .filter((part) => part !== "")
-    .map((part) => Number.parseInt(part, 10))
-    .filter((value) => Number.isFinite(value));
+  state.term.clear();
+  fitTerminal();
 }
 
-function applySgr(rawParams) {
-  const params = parseAnsiNumbers(rawParams);
-  if (params.length === 0) {
-    state.ansi.attrs = defaultAnsiAttrs();
+function appendOutput(data) {
+  if (!state.term) {
+    const text =
+      data instanceof Uint8Array ? decoder.decode(data) : String(data);
+    elements.terminalOutput.append(document.createTextNode(text));
+    elements.terminalOutput.scrollTop = elements.terminalOutput.scrollHeight;
     return;
   }
 
-  for (let index = 0; index < params.length; ) {
-    const code = params[index];
-
-    if (code === 0) {
-      state.ansi.attrs = defaultAnsiAttrs();
-      index += 1;
-    } else if (code === 1) {
-      state.ansi.attrs.bold = true;
-      index += 1;
-    } else if (code === 2) {
-      state.ansi.attrs.dim = true;
-      index += 1;
-    } else if (code === 3) {
-      state.ansi.attrs.italic = true;
-      index += 1;
-    } else if (code === 4) {
-      state.ansi.attrs.underline = true;
-      index += 1;
-    } else if (code === 7) {
-      state.ansi.attrs.inverse = true;
-      index += 1;
-    } else if (code === 22) {
-      state.ansi.attrs.bold = false;
-      state.ansi.attrs.dim = false;
-      index += 1;
-    } else if (code === 23) {
-      state.ansi.attrs.italic = false;
-      index += 1;
-    } else if (code === 24) {
-      state.ansi.attrs.underline = false;
-      index += 1;
-    } else if (code === 27) {
-      state.ansi.attrs.inverse = false;
-      index += 1;
-    } else if (code === 39) {
-      state.ansi.attrs.fg = null;
-      index += 1;
-    } else if (code === 49) {
-      state.ansi.attrs.bg = null;
-      index += 1;
-    } else if (code >= 30 && code <= 37) {
-      state.ansi.attrs.fg = basicAnsiColor(code - 30);
-      index += 1;
-    } else if (code >= 40 && code <= 47) {
-      state.ansi.attrs.bg = basicAnsiColor(code - 40);
-      index += 1;
-    } else if (code >= 90 && code <= 97) {
-      state.ansi.attrs.fg = basicAnsiColor(code - 90 + 8);
-      index += 1;
-    } else if (code >= 100 && code <= 107) {
-      state.ansi.attrs.bg = basicAnsiColor(code - 100 + 8);
-      index += 1;
-    } else if ((code === 38 || code === 48) && params[index + 1] === 5) {
-      const color = color256(params[index + 2]);
-      if (color) {
-        state.ansi.attrs[code === 38 ? "fg" : "bg"] = color;
-      }
-      index += 3;
-    } else if ((code === 38 || code === 48) && params[index + 1] === 2) {
-      const color = rgbColor(
-        params[index + 2],
-        params[index + 3],
-        params[index + 4],
-      );
-      if (color) {
-        state.ansi.attrs[code === 38 ? "fg" : "bg"] = color;
-      }
-      index += 5;
-    } else {
-      index += 1;
-    }
-  }
-}
-
-function clearTerminalOutput(resetAnsi) {
-  elements.terminalOutput.replaceChildren();
-  state.ansi.currentLine = null;
-  if (resetAnsi) {
-    state.ansi.pending = "";
-    state.ansi.pendingCr = false;
-    state.ansi.attrs = defaultAnsiAttrs();
-  }
-}
-
-function handleCsi(params, final) {
-  if (final === "m") {
-    applySgr(params);
-  } else if (final === "J" && /(^|[;:])[23]($|[;:])/.test(params)) {
-    clearTerminalOutput(false);
-  } else if (final === "K") {
-    clearCurrentLine();
-  }
-}
-
-function appendAnsiOutput(text) {
-  const data = state.ansi.pending + text;
-  state.ansi.pending = "";
-
-  for (let index = 0; index < data.length; ) {
-    const char = data[index];
-
-    if (state.ansi.pendingCr) {
-      if (char === "\n") {
-        appendLineBreak();
-        state.ansi.pendingCr = false;
-        index += 1;
-        continue;
-      }
-
-      clearCurrentLine();
-      state.ansi.pendingCr = false;
-    }
-
-    if (char === "\x1b") {
-      const next = data[index + 1];
-      if (!next) {
-        state.ansi.pending = data.slice(index);
-        break;
-      }
-
-      if (next === "[") {
-        let end = index + 2;
-        while (end < data.length) {
-          const code = data.charCodeAt(end);
-          if (code >= 0x40 && code <= 0x7e) {
-            break;
-          }
-          end += 1;
-        }
-
-        if (end >= data.length) {
-          state.ansi.pending = data.slice(index);
-          break;
-        }
-
-        handleCsi(data.slice(index + 2, end), data[end]);
-        index = end + 1;
-      } else if (next === "]") {
-        const belEnd = data.indexOf("\x07", index + 2);
-        const stEnd = data.indexOf("\x1b\\", index + 2);
-        let end = -1;
-        let extra = 1;
-
-        if (belEnd !== -1 && (stEnd === -1 || belEnd < stEnd)) {
-          end = belEnd;
-        } else if (stEnd !== -1) {
-          end = stEnd;
-          extra = 2;
-        }
-
-        if (end === -1) {
-          state.ansi.pending = data.slice(index);
-          break;
-        }
-
-        index = end + extra;
-      } else if ("()*+-. /".includes(next)) {
-        if (!data[index + 2]) {
-          state.ansi.pending = data.slice(index);
-          break;
-        }
-        index += 3;
-      } else {
-        index += 2;
-      }
-    } else if (char === "\r") {
-      if (data[index + 1] === "\n") {
-        appendLineBreak();
-        index += 2;
-      } else if (index + 1 < data.length) {
-        clearCurrentLine();
-        index += 1;
-      } else {
-        state.ansi.pendingCr = true;
-        index += 1;
-      }
-    } else if (char === "\n") {
-      appendLineBreak();
-      index += 1;
-    } else if (char === "\t") {
-      appendStyledText("\t");
-      index += 1;
-    } else if (char < " ") {
-      index += 1;
-    } else {
-      let end = index + 1;
-      while (end < data.length) {
-        const code = data.charCodeAt(end);
-        if (data[end] === "\x1b" || code < 0x20) {
-          break;
-        }
-        end += 1;
-      }
-      appendStyledText(data.slice(index, end));
-      index = end;
-    }
-  }
-}
-
-function appendOutput(text) {
-  appendAnsiOutput(text);
-  elements.terminalOutput.scrollTop = elements.terminalOutput.scrollHeight;
+  state.term.write(data);
 }
 
 function appendLine(text) {
-  appendOutput(`${text}\n`);
+  appendOutput(`${text}\r\n`);
 }
 
 function debugLine(text) {
@@ -417,10 +127,12 @@ function debugLine(text) {
 }
 
 function setConnected(connected) {
+  const canConnect = Boolean(navigator.bluetooth) && Boolean(state.term);
+
   state.connected = connected;
   elements.statusDot.classList.toggle("connected", connected);
   elements.statusText.textContent = connected ? "Connected" : "Disconnected";
-  elements.connectButton.disabled = connected;
+  elements.connectButton.disabled = connected || !canConnect;
   elements.disconnectButton.disabled = !connected;
   elements.queryButton.disabled = !connected;
   elements.setUartButton.disabled = !connected;
@@ -515,7 +227,7 @@ function onNotification(event) {
   );
   state.logBytes.push(bytes);
   debugLine(`RX ${bytes.length}: ${JSON.stringify(decoder.decode(bytes))}`);
-  appendOutput(decoder.decode(bytes));
+  appendOutput(bytes);
 }
 
 function onDisconnected() {
@@ -532,9 +244,9 @@ async function connect() {
     return;
   }
 
-  appendLine("[scan] requesting Linkr BLE UART");
+  appendLine(`[scan] requesting ${BLE_DEVICE_NAME_PREFIX}*`);
   const device = await navigator.bluetooth.requestDevice({
-    filters: [{ name: "Linkr BLE UART" }, { services: [NUS_SERVICE] }],
+    filters: [{ namePrefix: BLE_DEVICE_NAME_PREFIX }],
     optionalServices: [NUS_SERVICE],
   });
 
@@ -628,10 +340,15 @@ function bind() {
 
 function init() {
   const supported = Boolean(navigator.bluetooth);
-  elements.supportText.textContent = supported
-    ? "Chrome/Chromium Web Bluetooth over HTTPS or localhost"
-    : "Web Bluetooth unavailable in this browser";
-  elements.connectButton.disabled = !supported;
+  const terminalReady = initTerminal();
+  if (!terminalReady) {
+    elements.supportText.textContent =
+      "xterm.js failed to load; check network access to jsDelivr";
+  } else {
+    elements.supportText.textContent = supported
+      ? "Chrome/Chromium Web Bluetooth over HTTPS or localhost"
+      : "Web Bluetooth unavailable in this browser";
+  }
   setConnected(false);
   bind();
 }

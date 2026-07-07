@@ -175,22 +175,19 @@ h1 {
   height: 100%;
   min-height: 260px;
   margin: 0;
-  overflow: auto;
-  padding: 12px;
-  color: #d8f3dc;
+  overflow: hidden;
+  padding: 0;
   background: var(--terminal);
-  font-family:
-    ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
-  font-size: 13px;
-  line-height: 1.25;
-  white-space: normal;
-  overflow-wrap: anywhere;
-  letter-spacing: 0;
 }
 
-.terminal-line {
-  min-height: 1.25em;
-  white-space: pre-wrap;
+.terminal-output .xterm {
+  box-sizing: border-box;
+  height: 100%;
+  padding: 10px;
+}
+
+.terminal-output .xterm-viewport {
+  background: var(--terminal);
 }
 
 #terminalInput {

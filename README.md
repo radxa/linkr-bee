@@ -3,7 +3,7 @@
 Zephyr application for an ESP32-C3 BLE serial bridge.  The first milestone is a
 plain Bluetooth LE UART window:
 
-- BLE peripheral advertising as `Linkr BLE UART`
+- BLE peripheral advertising as `Linkr BLE UART-3`
 - Nordic UART Service compatible UUIDs
 - BLE RX characteristic writes are forwarded to the selected UART
 - UART RX bytes are forwarded through BLE TX notifications
@@ -123,13 +123,100 @@ prints the negotiated write chunk size when it connects.
 ## BLE terminal
 
 `tools/linkr_ble_terminal.py` is a host-side terminal for the bridge.  It scans
-for `Linkr BLE UART`, subscribes to NUS TX notifications, and forwards local
-keyboard input to the NUS RX write characteristic.
+for devices matching the `Linkr BLE UART*` name prefix, subscribes to NUS TX
+notifications, and forwards local keyboard input to the NUS RX write
+characteristic.
 
 Install the host dependency if needed:
 
 ```sh
 python3 -m pip install bleak
+```
+
+### C terminal for Linux or Linkr Buildroot
+
+A Linux-only reference implementation written in C is provided in
+`tools/linkr_ble_terminal.c`. It talks to BlueZ over the system D-Bus using
+`libdbus-1` directly, without GLib. This keeps the userspace dependency small,
+but it still requires a working Linux BLE central stack underneath it.
+
+Runtime path:
+
+```text
+linkr_ble_terminal_c
+  -> libdbus-1
+  -> dbus-daemon --system
+  -> bluetoothd / org.bluez
+  -> hci0
+  -> AIC8800D80 BT UART/HCI
+```
+
+On a desktop Linux system with BlueZ development files installed:
+
+```sh
+cd tools && make
+./linkr_ble_terminal_c --help
+./linkr_ble_terminal_c --uart 115200,8,n,1,n
+```
+
+For Linkr Buildroot, do not expect to compile this binary on the target rootfs.
+The current Linkr image is uClibc based and does not include `gcc`, `make`,
+`pkg-config`, or `dbus/dbus.h`. Build it with the same Buildroot SDK/toolchain
+that produced the Linkr rootfs, and link against that sysroot's `libdbus-1`.
+
+Example cross build with a Buildroot staging sysroot:
+
+```sh
+cd tools
+make clean
+make \
+  CC=/path/to/buildroot-sdk/bin/arm-linux-gcc \
+  SYSROOT=/path/to/buildroot/output/staging
+```
+
+If the SDK provides a target-aware `pkg-config`, use it instead:
+
+```sh
+cd tools
+make clean
+make \
+  CC=/path/to/buildroot-sdk/bin/arm-linux-gcc \
+  PKG_CONFIG=/path/to/buildroot-sdk/bin/pkg-config
+```
+
+Minimum Linkr runtime requirements:
+
+- system D-Bus running at `/run/dbus/system_bus_socket`
+- `libdbus-1.so` in the target rootfs
+- BlueZ `bluetoothd` installed and running on the system bus
+- D-Bus name `org.bluez` visible on the system bus
+- one usable Bluetooth controller such as `/sys/class/bluetooth/hci0`
+- AIC8800D80 Bluetooth firmware loaded and attached through UART HCI
+
+The Linkr image inspected during bring-up already had `dbus-daemon` and
+`/usr/lib/libdbus-1.so`, but it did not yet have `bluetoothd`, `org.bluez`, or
+`hci0`. In that state the C terminal can start far enough to connect to D-Bus,
+then fails with `no BlueZ adapter found`.
+
+Useful target-side checks:
+
+```sh
+dbus-send --system --dest=org.freedesktop.DBus \
+  --type=method_call --print-reply / org.freedesktop.DBus.ListNames
+
+bluetoothd -n -d
+bluetoothctl list
+hciconfig -a
+ls -l /sys/class/bluetooth
+```
+
+The C terminal accepts the same Linkr BLE defaults as the Python terminal:
+
+```sh
+./linkr_ble_terminal_c --query-uart --no-terminal
+./linkr_ble_terminal_c --uart 115200,8,n,1,n
+./linkr_ble_terminal_c --loopback-test A --no-terminal
+./linkr_ble_terminal_c --scan
 ```
 
 Query the bridge UART settings and exit:
@@ -220,15 +307,16 @@ allow a web page to scan and connect silently.
 
 The page can:
 
-- connect to `Linkr BLE UART`
+- connect to devices matching the `Linkr BLE UART*` name prefix
 - subscribe to TX notifications
 - write terminal input to the RX characteristic
 - query or set UART mode with `@u?` and `@u=...`
 - adjust line ending and BLE write chunk size
-- render common ANSI SGR colors, including 16-color, 256-color, and truecolor
+- render terminal control sequences through xterm.js, including cursor movement,
+  line erasing, readline redraws, 16-color, 256-color, and truecolor SGR
 - show optional local echo and debug I/O traces
 - save received bytes as a log file
 
-This is useful for quick access on a machine that already has Chrome, but the
-Python terminal remains the better choice for raw keyboard terminal behavior,
-automation, loopback tests, and packaged offline use.
+This is useful for quick access on a machine that already has Chrome. The page
+loads xterm.js from jsDelivr, so the Python terminal remains the better choice
+for packaged offline use, automation, and loopback tests.
