@@ -43,6 +43,24 @@ For ESP32-C3 Super Mini:
 west build -b esp32c3_supermini /Users/xiangzelong/Dev/linkr-ble
 ```
 
+### Gitea Actions build
+
+The workflow in `.gitea/workflows/build.yml` builds one production firmware:
+the default WiFi + BLE configuration for `esp32c3_supermini`. It runs on pushes
+to `main`, version tags, pull requests, and manual dispatches using Zephyr
+v4.4.1 with Zephyr SDK 1.0.1.
+
+Download the `linkr-ble-esp32c3-supermini` artifact from the completed Gitea
+Actions run. Its flashable image is:
+
+```text
+linkr-ble-esp32c3-supermini.bin
+```
+
+The artifact also contains the ELF, linker map, final Kconfig, runner metadata,
+and `SHA256SUMS` for debugging and traceability. The workflow fails if the
+default WiFi, networking, Bluetooth, or binary-output configuration is absent.
+
 ## UART selection
 
 The app reads the UART from the devicetree chosen node
