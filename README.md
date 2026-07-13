@@ -494,13 +494,23 @@ The page can:
 
 - connect to devices advertising the Linkr NUS service UUID
 - subscribe to TX notifications
-- write terminal input to the RX characteristic
+- capture input directly inside xterm.js and write each keystroke to the RX
+  characteristic; remote shells therefore receive native Tab completion,
+  command-history arrows, backspace, Ctrl-C, and pasted text
 - query or set UART mode with `@u?` and `@u=...`
 - adjust line ending and BLE write chunk size
 - render terminal control sequences through xterm.js, including cursor movement,
   line erasing, readline redraws, 16-color, 256-color, and truecolor SGR
+- expand the terminal to fullscreen and automatically refit its rows and columns
+  when the viewport or control-panel width changes
 - show optional local echo and debug I/O traces
 - save received bytes as a log file
+
+After connecting, the page focuses the terminal automatically. Click or tap the
+terminal whenever it loses focus, then type directly in it; there is no separate
+line-input box. BLE writes are serialized so fast typing and paste operations do
+not start overlapping GATT writes. The on-screen `Ctrl-C` button remains
+available for touch devices.
 
 This is useful for quick access on a machine that already has Chrome. The page
 loads xterm.js from jsDelivr, so the Python terminal remains the better choice

@@ -25,8 +25,8 @@ const state = {
   fontSize: 13,
   rxBytes: 0,
   txBytes: 0,
-  inputHistory: [],
-  historyIndex: 0,
+  writeQueue: Promise.resolve(),
+  writeGeneration: 0,
   sidebarCollapsed: false,
   scanning: false,
   scanResults: [],
@@ -49,9 +49,7 @@ const elements = {
   clearButton: $("clearButton"),
   saveButton: $("saveButton"),
   terminalOutput: $("terminalOutput"),
-  terminalInput: $("terminalInput"),
-  inputClearBtn: $("inputClearBtn"),
-  sendButton: $("sendButton"),
+  terminalInputHint: $("terminalInputHint"),
   breakButton: $("breakButton"),
   uartInput: $("uartInput"),
   enterSelect: $("enterSelect"),
@@ -71,9 +69,10 @@ const elements = {
   presetChips: $("presetChips"),
   zoomInBtn: $("zoomInBtn"),
   zoomOutBtn: $("zoomOutBtn"),
-  resetZoomBtn: $("resetZoomBtn"),
+  fullscreenBtn: $("fullscreenBtn"),
   autoscrollBtn: $("autoscrollBtn"),
   copyBtn: $("copyBtn"),
+  terminalCard: $("terminalCard"),
   rxCount: $("rxCount"),
   txCount: $("txCount"),
   baudLabel: $("baudLabel"),
@@ -123,7 +122,6 @@ const I18N = {
     saveLog: "Save Log",
     set: "Set",
     off: "Off",
-    send: "Send",
     ctrlC: "Ctrl-C",
     uart: "UART",
     enterKey: "Enter key",
@@ -132,9 +130,11 @@ const I18N = {
     debugIO: "Debug I/O",
     wifi: "WiFi",
     webdav: "WebDAV",
-    serialOutput: "Serial Output",
+    serialOutput: "Serial Terminal",
+    terminalAria: "Interactive serial terminal",
     xterm: "xterm.js",
-    placeholderInput: "Type text and press Enter",
+    terminalInputHint: "Type here · Tab completes · Arrow keys browse history",
+    terminalInputDisconnected: "Connect a device to enable terminal input",
     placeholderWifi: "SSID,pass",
     placeholderWebdav: "http://host/path/ (anonymous)",
     enterRaw: "Raw",
@@ -155,10 +155,10 @@ const I18N = {
     language: "Language",
     zoomIn: "Increase font size",
     zoomOut: "Decrease font size",
-    resetZoom: "Reset font size",
+    fullscreen: "Fullscreen terminal",
+    exitFullscreen: "Exit fullscreen",
     autoScroll: "Auto-scroll",
     copy: "Copy selection",
-    clearInput: "Clear input",
     rx: "RX",
     tx: "TX",
     baud: "Baud",
@@ -198,7 +198,6 @@ const I18N = {
     saveLog: "保存日志",
     set: "设置",
     off: "关闭",
-    send: "发送",
     ctrlC: "Ctrl-C",
     uart: "UART",
     enterKey: "回车键",
@@ -207,9 +206,11 @@ const I18N = {
     debugIO: "调试 I/O",
     wifi: "WiFi",
     webdav: "WebDAV",
-    serialOutput: "串口输出",
+    serialOutput: "串口终端",
+    terminalAria: "交互式串口终端",
     xterm: "xterm.js",
-    placeholderInput: "输入文本后按回车",
+    terminalInputHint: "直接输入 · Tab 补全 · 方向键浏览历史",
+    terminalInputDisconnected: "连接设备后即可在终端内直接输入",
     placeholderWifi: "SSID,密码",
     placeholderWebdav: "http://host/path/ (匿名)",
     enterRaw: "原始",
@@ -230,10 +231,10 @@ const I18N = {
     language: "语言",
     zoomIn: "放大字体",
     zoomOut: "缩小字体",
-    resetZoom: "重置字体",
+    fullscreen: "终端全屏",
+    exitFullscreen: "退出全屏",
     autoScroll: "自动滚动",
     copy: "复制选中",
-    clearInput: "清除输入",
     rx: "收",
     tx: "发",
     baud: "波特率",
@@ -449,9 +450,13 @@ function applyLang() {
   document.querySelectorAll("[data-i18n-title]").forEach((el) => {
     el.setAttribute("title", t(el.getAttribute("data-i18n-title")));
   });
+  document.querySelectorAll("[data-i18n-aria]").forEach((el) => {
+    el.setAttribute("aria-label", t(el.getAttribute("data-i18n-aria")));
+  });
   updateToggleLabels();
   renderRefLists();
   refreshDynamicTexts();
+  updateFullscreenButton();
 }
 
 function fitTerminal() {
@@ -463,6 +468,76 @@ function fitTerminal() {
   } catch (_error) {
     // The fit addon can throw while the terminal container is hidden/resizing.
   }
+}
+
+function isTerminalFullscreen() {
+  return (
+    document.fullscreenElement === elements.terminalCard ||
+    elements.terminalCard.classList.contains("terminal-fullscreen-fallback")
+  );
+}
+
+function updateFullscreenButton() {
+  if (!elements.fullscreenBtn || !elements.terminalCard) {
+    return;
+  }
+  const active = isTerminalFullscreen();
+  const label = t(active ? "exitFullscreen" : "fullscreen");
+  elements.fullscreenBtn.classList.toggle("active", active);
+  elements.fullscreenBtn.setAttribute("aria-pressed", String(active));
+  elements.fullscreenBtn.setAttribute("aria-label", label);
+  elements.fullscreenBtn.setAttribute("title", label);
+}
+
+function refitTerminalAfterLayoutChange() {
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      fitTerminal();
+      state.term?.focus();
+    });
+  });
+}
+
+function setTerminalFallbackFullscreen(enabled) {
+  elements.terminalCard.classList.toggle(
+    "terminal-fullscreen-fallback",
+    enabled,
+  );
+  document.body.classList.toggle("terminal-fullscreen-fallback", enabled);
+  updateFullscreenButton();
+  refitTerminalAfterLayoutChange();
+}
+
+async function toggleTerminalFullscreen() {
+  if (document.fullscreenElement === elements.terminalCard) {
+    await document.exitFullscreen();
+    return;
+  }
+
+  if (elements.terminalCard.classList.contains("terminal-fullscreen-fallback")) {
+    setTerminalFallbackFullscreen(false);
+    return;
+  }
+
+  if (elements.terminalCard.requestFullscreen) {
+    try {
+      await elements.terminalCard.requestFullscreen();
+      return;
+    } catch (_error) {
+      // Some embedded browsers expose the API but reject fullscreen requests.
+    }
+  }
+
+  setTerminalFallbackFullscreen(true);
+}
+
+function onFullscreenChange() {
+  if (document.fullscreenElement === elements.terminalCard) {
+    elements.terminalCard.classList.remove("terminal-fullscreen-fallback");
+    document.body.classList.remove("terminal-fullscreen-fallback");
+  }
+  updateFullscreenButton();
+  refitTerminalAfterLayoutChange();
 }
 
 function initTerminal() {
@@ -486,6 +561,7 @@ function initTerminal() {
   state.fitAddon = new globalThis.FitAddon.FitAddon();
   state.term.loadAddon(state.fitAddon);
   state.term.open(elements.terminalOutput);
+  state.term.onData(onTerminalData);
   fitTerminal();
 
   window.addEventListener("resize", fitTerminal);
@@ -680,6 +756,7 @@ function setConnecting(connecting) {
 function setConnected(connected) {
   const canConnect = Boolean(navigator.bluetooth) && Boolean(state.term);
 
+  state.writeGeneration += 1;
   state.connected = connected;
   elements.statusDot.classList.toggle("connected", connected);
   elements.statusText.textContent = t(
@@ -698,10 +775,11 @@ function setConnected(connected) {
   elements.reconnectButton.disabled = !state.device || connected;
   elements.queryButton.disabled = !connected;
   elements.setUartButton.disabled = !connected;
-  elements.terminalInput.disabled = !connected;
-  elements.sendButton.disabled = !connected;
   elements.breakButton.disabled = !connected;
-  elements.inputClearBtn.disabled = !connected;
+  elements.terminalOutput.classList.toggle("connected", connected);
+  elements.terminalInputHint.textContent = t(
+    connected ? "terminalInputHint" : "terminalInputDisconnected",
+  );
   elements.wifiSetButton.disabled = !connected;
   elements.wifiOffButton.disabled = !connected;
   elements.wifiQueryButton.disabled = !connected;
@@ -716,6 +794,7 @@ function setConnected(connected) {
   }
   if (connected) {
     setAutoScroll(true, true);
+    state.term.focus();
   }
 }
 
@@ -779,13 +858,25 @@ async function writeBytes(bytes, sensitive = false) {
   updateCounters();
 }
 
+function enqueueBytes(bytes, sensitive = false) {
+  const generation = state.writeGeneration;
+  const operation = state.writeQueue.then(() => {
+    if (!state.connected || generation !== state.writeGeneration) {
+      return;
+    }
+    return writeBytes(bytes, sensitive);
+  });
+  state.writeQueue = operation.catch(() => {});
+  return operation;
+}
+
 async function writeText(text) {
-  await writeBytes(encoder.encode(text));
+  await enqueueBytes(encoder.encode(text));
 }
 
 function sendText(text) {
   if (!state.connected) {
-    return;
+    return Promise.resolve();
   }
   const payload = normalizeEnter(`${text}\n`);
   if (elements.localEchoInput.checked) {
@@ -794,14 +885,15 @@ function sendText(text) {
   return writeText(payload);
 }
 
-async function sendTerminalInput() {
-  const raw = elements.terminalInput.value;
-  if (!raw) {
+function onTerminalData(data) {
+  if (!state.connected || !data) {
     return;
   }
-  pushHistory(raw);
-  elements.terminalInput.value = "";
-  await sendText(raw);
+  const payload = normalizeEnter(data);
+  if (elements.localEchoInput.checked) {
+    appendOutput(payload);
+  }
+  writeText(payload).catch((error) => appendLine(`[error] ${error.message}`));
 }
 
 async function sendControl(command) {
@@ -814,17 +906,7 @@ async function sendControl(command) {
   const frame = new Uint8Array(header.length + payload.length);
   frame.set(header);
   frame.set(payload, header.length);
-  await writeBytes(frame, sensitive);
-}
-
-function pushHistory(value) {
-  if (state.inputHistory[state.inputHistory.length - 1] !== value) {
-    state.inputHistory.push(value);
-  }
-  if (state.inputHistory.length > 100) {
-    state.inputHistory.shift();
-  }
-  state.historyIndex = state.inputHistory.length;
+  await enqueueBytes(frame, sensitive);
 }
 
 function onNotification(event) {
@@ -1053,38 +1135,10 @@ function bind() {
 
   elements.saveButton.addEventListener("click", saveLog);
 
-  elements.sendButton.addEventListener("click", () => {
-    sendTerminalInput().catch((error) => appendLine(`[error] ${error.message}`));
-  });
-
   elements.breakButton.addEventListener("click", () => {
-    writeBytes(new Uint8Array([0x03])).catch((error) =>
-      appendLine(`[error] ${error.message}`),
-    );
-  });
-
-  elements.terminalInput.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") {
-      event.preventDefault();
-      sendTerminalInput().catch((error) => appendLine(`[error] ${error.message}`));
-      return;
-    }
-    if (event.key === "ArrowUp") {
-      event.preventDefault();
-      if (state.historyIndex > 0) {
-        state.historyIndex -= 1;
-        elements.terminalInput.value = state.inputHistory[state.historyIndex] || "";
-      }
-    } else if (event.key === "ArrowDown") {
-      event.preventDefault();
-      if (state.historyIndex < state.inputHistory.length - 1) {
-        state.historyIndex += 1;
-        elements.terminalInput.value = state.inputHistory[state.historyIndex] || "";
-      } else {
-        state.historyIndex = state.inputHistory.length;
-        elements.terminalInput.value = "";
-      }
-    }
+    enqueueBytes(new Uint8Array([0x03]))
+      .then(() => state.term?.focus())
+      .catch((error) => appendLine(`[error] ${error.message}`));
   });
 
   elements.wifiSetButton.addEventListener("click", () => {
@@ -1140,20 +1194,12 @@ function bind() {
     });
   }
 
-  elements.inputClearBtn.addEventListener("click", () => {
-    elements.terminalInput.value = "";
-    elements.terminalInput.focus();
-  });
-
   elements.zoomInBtn.addEventListener("click", () => changeFontSize(1));
   elements.zoomOutBtn.addEventListener("click", () => changeFontSize(-1));
-  elements.resetZoomBtn.addEventListener("click", () => {
-    state.fontSize = 13;
-    if (state.term) {
-      state.term.options.fontSize = 13;
-      fitTerminal();
-    }
-    saveSetting("linkr-font", "13");
+  elements.fullscreenBtn.addEventListener("click", () => {
+    toggleTerminalFullscreen().catch((error) =>
+      appendLine(`[error] ${error.message}`),
+    );
   });
   elements.autoscrollBtn.addEventListener("click", () => {
     setAutoScroll(!state.autoScroll, true);
@@ -1191,11 +1237,22 @@ function bind() {
     document.querySelector(".app-shell").classList.remove("sidebar-open");
   });
 
+  document.addEventListener("fullscreenchange", onFullscreenChange);
+
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
       document.querySelector(".app-shell").classList.remove("sidebar-open");
+      if (
+        elements.terminalCard.classList.contains(
+          "terminal-fullscreen-fallback",
+        )
+      ) {
+        event.preventDefault();
+        event.stopPropagation();
+        setTerminalFallbackFullscreen(false);
+      }
     }
-  });
+  }, true);
 
   elements.uartInput.addEventListener("change", () => {
     saveSetting("linkr-uart", elements.uartInput.value.trim());

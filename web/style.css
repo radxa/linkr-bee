@@ -21,6 +21,9 @@
   --terminal: #07090c;
   --input-bg: #11151b;
   --btn-hover: #2b3340;
+  --layout-gap: clamp(12px, 1vw, 20px);
+  --layout-gutter: clamp(10px, 1.25vw, 24px);
+  --sidebar-width: clamp(300px, 22vw, 420px);
 }
 
 /* ---------- Light theme ---------- */
@@ -52,13 +55,17 @@
 .top-right {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 12px;
+  min-width: 0;
+  flex-wrap: wrap;
 }
 
 .top-actions {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
 }
 
 .icon-btn {
@@ -147,13 +154,13 @@ select {
 /* ---------- Layout ---------- */
 .app-shell {
   display: grid;
-  grid-template-columns: 340px 1fr;
+  grid-template-columns: minmax(0, var(--sidebar-width)) minmax(0, 1fr);
   grid-template-rows: auto 1fr;
-  gap: 14px;
-  width: min(1280px, 100vw);
-  height: 100vh;
+  gap: var(--layout-gap);
+  width: 100%;
+  height: 100dvh;
   margin: 0 auto;
-  padding: 16px;
+  padding: var(--layout-gutter);
 }
 
 .topbar {
@@ -162,6 +169,7 @@ select {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  min-width: 0;
   padding: 12px 16px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -173,6 +181,11 @@ select {
   display: flex;
   align-items: center;
   gap: 12px;
+  min-width: 0;
+}
+
+.brand > div {
+  min-width: 0;
 }
 
 .logo {
@@ -198,6 +211,7 @@ h1 {
   margin: 3px 0 0;
   color: var(--muted);
   font-size: 12.5px;
+  overflow-wrap: anywhere;
 }
 
 /* ---------- Status pill ---------- */
@@ -248,6 +262,7 @@ h1 {
   flex-direction: column;
   gap: 14px;
   min-height: 0;
+  min-width: 0;
   overflow-y: auto;
   padding-right: 4px;
 }
@@ -390,11 +405,14 @@ select:hover {
 
 input:focus,
 select:focus,
-button:focus-visible,
-.terminal-output:focus {
+button:focus-visible {
   outline: none;
   border-color: var(--focus);
   box-shadow: 0 0 0 3px rgba(138, 180, 248, 0.18);
+}
+
+.terminal-output:focus-within {
+  box-shadow: inset 0 0 0 2px var(--focus);
 }
 
 .checks {
@@ -422,13 +440,14 @@ button:focus-visible,
   cursor: pointer;
 }
 
-/* ---------- Work panel (terminal + input) ---------- */
+/* ---------- Work panel ---------- */
 .workpanel {
   grid-column: 2;
   display: flex;
   flex-direction: column;
   gap: 14px;
   min-height: 0;
+  min-width: 0;
 }
 
 .terminal-card {
@@ -443,10 +462,38 @@ button:focus-visible,
   overflow: hidden;
 }
 
+.terminal-card:fullscreen,
+.terminal-card.terminal-fullscreen-fallback {
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.terminal-card:fullscreen {
+  background: var(--terminal);
+}
+
+.terminal-card.terminal-fullscreen-fallback {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  width: 100vw;
+  height: 100dvh;
+}
+
+body.terminal-fullscreen-fallback {
+  overflow: hidden;
+}
+
 .terminal-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 10px;
   padding: 9px 14px;
   border-bottom: 1px solid var(--line-soft);
   background: linear-gradient(180deg, #11151b, #0c0f13);
@@ -500,21 +547,34 @@ button:focus-visible,
   background: var(--terminal) !important;
 }
 
-/* ---------- Input row ---------- */
-.input-row {
+/* ---------- Integrated terminal input ---------- */
+.terminal-input-bar {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 10px;
-  padding: 12px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: linear-gradient(180deg, var(--panel-2), var(--panel));
-  box-shadow: var(--shadow);
+  min-height: 42px;
+  padding: 6px 10px 6px 14px;
+  border-top: 1px solid var(--line-soft);
+  background: var(--panel-2);
 }
 
-#terminalInput {
-  flex: 1 1 320px;
-  min-width: 160px;
+.terminal-input-hint {
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.terminal-output.connected + .terminal-input-bar .terminal-input-hint {
+  color: var(--accent-strong);
+}
+
+.terminal-break {
+  flex: 0 0 auto;
+  min-height: 30px;
+  padding: 5px 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
 }
 
 /* ---------- Responsive ---------- */
@@ -523,13 +583,19 @@ button:focus-visible,
     grid-template-columns: 1fr;
     grid-template-rows: auto auto 1fr auto;
     height: auto;
-    min-height: 100vh;
+    min-height: 100dvh;
   }
 
   .topbar {
     flex-direction: column;
     align-items: flex-start;
     gap: 10px;
+  }
+
+  .top-right {
+    width: 100%;
+    justify-content: space-between;
+    flex-wrap: wrap;
   }
 
   .controls {
@@ -552,8 +618,18 @@ button:focus-visible,
     grid-template-columns: 1fr;
   }
 
-  #terminalInput {
+  .terminal-input-bar {
+    align-items: flex-start;
+  }
+
+  .terminal-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .term-tools {
     width: 100%;
+    justify-content: flex-start;
   }
 }
 
@@ -706,12 +782,11 @@ body,
 .topbar,
 .card,
 .terminal-card,
-.input-row,
+.terminal-input-bar,
 .statusbar,
 .controls,
 .btn,
 .icon-btn,
-.input-clear,
 .preset-chip,
 .term-tool {
   transition: background-color 0.25s ease, border-color 0.25s ease,
@@ -771,11 +846,12 @@ body,
   align-items: center;
   gap: 6px;
   flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .term-tool {
-  min-width: 30px;
-  height: 26px;
+  min-width: 32px;
+  height: 32px;
   padding: 0 8px;
   display: inline-flex;
   align-items: center;
@@ -788,6 +864,28 @@ body,
   font-weight: 600;
   cursor: pointer;
   transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.fullscreen-icon {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+#fullscreenBtn .icon-collapse {
+  display: none;
+}
+
+#fullscreenBtn.active .icon-expand {
+  display: none;
+}
+
+#fullscreenBtn.active .icon-collapse {
+  display: block;
 }
 
 .term-tool:hover {
@@ -833,41 +931,6 @@ body,
 .term-tool:focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: 2px;
-}
-
-/* ---------- Input with clear button ---------- */
-.input-wrap {
-  position: relative;
-  flex: 1 1 320px;
-  min-width: 160px;
-  display: flex;
-  align-items: center;
-}
-
-.input-wrap #terminalInput {
-  width: 100%;
-  padding-right: 34px;
-}
-
-.input-clear {
-  position: absolute;
-  right: 6px;
-  width: 26px;
-  height: 26px;
-  display: grid;
-  place-items: center;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--muted);
-  font-size: 18px;
-  line-height: 1;
-  cursor: pointer;
-}
-
-.input-clear:hover:not(:disabled) {
-  background: var(--panel-3);
-  color: var(--text);
 }
 
 /* ---------- Status bar ---------- */

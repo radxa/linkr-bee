@@ -200,15 +200,22 @@
       </aside>
 
       <section class="workpanel">
-        <section class="terminal-card" aria-label="Serial output">
+        <section id="terminalCard" class="terminal-card" aria-label="Interactive serial terminal" data-i18n-aria="terminalAria">
           <div class="terminal-head">
             <span class="term-title">
-              <span class="term-led"></span><span data-i18n="serialOutput">Serial Output</span>
+              <span class="term-led"></span><span data-i18n="serialOutput">Serial Terminal</span>
             </span>
             <div class="term-tools">
               <button id="zoomOutBtn" class="term-tool" type="button" data-i18n-title="zoomOut" aria-label="Decrease font">A−</button>
               <button id="zoomInBtn" class="term-tool" type="button" data-i18n-title="zoomIn" aria-label="Increase font">A+</button>
-              <button id="resetZoomBtn" class="term-tool" type="button" data-i18n-title="resetZoom" aria-label="Reset font">⤢</button>
+              <button id="fullscreenBtn" class="term-tool" type="button" data-i18n-title="fullscreen" data-i18n-aria="fullscreen" aria-label="Fullscreen terminal" aria-pressed="false">
+                <svg class="fullscreen-icon icon-expand" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"></path>
+                </svg>
+                <svg class="fullscreen-icon icon-collapse" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M3 8h5V3M21 8h-5V3M3 16h5v5M21 16h-5v5"></path>
+                </svg>
+              </button>
               <button id="autoscrollBtn" class="term-tool" type="button" data-i18n-title="autoScroll" aria-label="Auto-scroll" aria-pressed="true">⤓</button>
               <button id="copyBtn" class="term-tool" type="button" data-i18n-title="copy" aria-label="Copy selection">⧉</button>
               <span class="term-hint" data-i18n="xterm">xterm.js</span>
@@ -217,10 +224,19 @@
           <div
             id="terminalOutput"
             class="terminal-output"
-            role="log"
-            aria-live="polite"
-            tabindex="0"
+            role="application"
+            aria-label="Interactive serial terminal"
+            data-i18n-aria="terminalAria"
+            aria-describedby="terminalInputHint"
           ></div>
+          <div class="terminal-input-bar">
+            <span id="terminalInputHint" class="terminal-input-hint" data-i18n="terminalInputDisconnected">
+              Connect a device to enable terminal input
+            </span>
+            <button id="breakButton" class="btn terminal-break" type="button" disabled="">
+              <span class="btn-label" data-i18n="ctrlC">Ctrl-C</span>
+            </button>
+          </div>
         </section>
 
         <div class="presets" id="presetChips" aria-label="Quick send">
@@ -230,29 +246,6 @@
           <button class="preset-chip" type="button" data-cmd="df -h" disabled="">df -h</button>
           <button class="preset-chip" type="button" data-cmd="reboot" disabled="">reboot</button>
         </div>
-
-        <section class="input-row" aria-label="Serial input">
-          <div class="input-wrap">
-            <input
-              id="terminalInput"
-              type="text"
-              autocomplete="off"
-              autocapitalize="off"
-              spellcheck="false"
-              data-i18n-ph="placeholderInput"
-              placeholder="Type text and press Enter"
-              disabled=""
-            />
-            <button id="inputClearBtn" class="input-clear" type="button" data-i18n-title="clearInput" aria-label="Clear input" disabled="">×</button>
-          </div>
-          <button id="sendButton" class="btn btn-primary" type="button" disabled="">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
-            <span class="btn-label" data-i18n="send">Send</span>
-          </button>
-          <button id="breakButton" class="btn" type="button" disabled="">
-            <span class="btn-label" data-i18n="ctrlC">Ctrl-C</span>
-          </button>
-        </section>
 
         <div class="statusbar" aria-label="Status">
           <span class="sb-item"><b id="rxCount">0</b> <span data-i18n="rx">RX</span></span>
