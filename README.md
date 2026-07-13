@@ -161,6 +161,7 @@ new owner.
 | Item | Default / persistence rule | Clear or transfer |
 | --- | --- | --- |
 | BLE bond and owner | Always persisted by `CONFIG_BT_SETTINGS` in NVS | GPIO0 factory reset only; no BLE command unpairs the owner |
+| BLE identity/address | A random-static Linkr identity is persisted in NVS and reused across normal reboots | GPIO0 factory reset generates a new identity/address so hosts do not reuse stale device-name or bond caches |
 | WiFi SSID/PSK | RAM-only by default; `CONFIG_LINKR_BLE_BRIDGE_PERSIST_CREDENTIALS=y` saves it and reconnects on boot | `@w off` disables it and disconnects; factory reset erases it |
 | WebDAV target | Anonymous URL is persisted independently of WiFi credential persistence | `@d off` disables it; factory reset erases it |
 | Upload boot ID | Persisted when the uploader reserves a new boot ID, preventing filename reuse after reboot | Factory reset erases it |
@@ -177,10 +178,12 @@ To factory-reset a physical unit, reset or power-cycle it with **GPIO0 shorted
 to GND** and keep the short in place for two seconds. The firmware erases the
 entire `storage_partition` before Bluetooth or settings load, clearing the BLE
 owner/bond, Bluetooth identity data, Linkr WiFi/WebDAV configuration, and the
-upload boot counter. The device then starts unowned and may advertise with a
-regenerated BLE identity. Do not tie GPIO0 to GND permanently, and treat access
-to that pad or switch as access to factory reset. It does not erase firmware,
-the test-marker partition, or coredump storage.
+upload boot counter. The device then starts unowned and advertises with a newly
+generated random-static BLE identity/address. This makes macOS, Chrome, and
+other centrals create a fresh device record instead of retaining the old
+owner's cached name or bond. Do not tie GPIO0 to GND permanently, and treat
+access to that pad or switch as access to factory reset. It does not erase
+firmware, the test-marker partition, or coredump storage.
 
 The Python tool pairs automatically for WiFi/WebDAV actions (or use `--pair`);
 the C tool needs a running BlueZ pairing agent; Web Bluetooth shows the
@@ -482,9 +485,14 @@ Bluetooth requires a secure context, so use `localhost` or HTTPS.  Device
 selection must be triggered from the page's `Connect` button; browsers do not
 allow a web page to scan and connect silently.
 
+The firmware places the NUS service UUID in the primary advertising packet and
+the `Linkr BLE UART-3` name in the scan response.  The page filters the browser
+device chooser by the NUS service UUID, which is more reliable than name-only
+filtering on macOS Chromium browsers.
+
 The page can:
 
-- connect to devices matching the `Linkr BLE UART*` name prefix
+- connect to devices advertising the Linkr NUS service UUID
 - subscribe to TX notifications
 - write terminal input to the RX characteristic
 - query or set UART mode with `@u?` and `@u=...`

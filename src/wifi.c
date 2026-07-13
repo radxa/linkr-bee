@@ -34,6 +34,7 @@
 #include <zephyr/net/socket.h>
 #include <zephyr/net/wifi.h>
 #include <zephyr/net/wifi_mgmt.h>
+#include <zephyr/bluetooth/conn.h>
 #include <zephyr/settings/settings.h>
 #include <zephyr/sys/ring_buffer.h>
 
@@ -46,6 +47,8 @@ LOG_MODULE_REGISTER(linkr_wifi, CONFIG_LOG_DEFAULT_LEVEL);
 #define LOG_RING_SIZE 8192
 #define SETTINGS_MAGIC 0x4c4e4b52u /* "LNKR" */
 #define SETTINGS_VERSION 1u
+/* Leaves room for the completion marker in the control-response queue. */
+#define WIFI_SCAN_MAX_RESULTS 12
 
 static char wifi_ssid[SSID_MAX + 1];
 static char wifi_psk[PSK_MAX + 1];
@@ -55,7 +58,16 @@ static char webdav_pass[CRED_MAX + 1];
 
 static struct k_mutex cfg_lock;
 static struct net_mgmt_event_callback wifi_mgmt_cb;
+static struct net_mgmt_event_callback wifi_scan_cb;
 static struct net_if *wifi_iface;
+
+/* Asynchronous scan state. linkr_wifi_scan() references conn for the lifetime
+ * of the scan; results are streamed through scan_respond and released on
+ * NET_EVENT_WIFI_SCAN_DONE. */
+static linkr_wifi_respond_fn scan_respond;
+static struct bt_conn *scan_conn;
+static atomic_t scan_in_progress;
+static atomic_t scan_result_count;
 static atomic_t wifi_connected;
 static atomic_t wifi_ip_ready;
 static atomic_t wifi_reconnect_enabled;
@@ -409,6 +421,110 @@ int linkr_wifi_disconnect(void)
         return -EINVAL;
     }
     return net_mgmt(NET_REQUEST_WIFI_DISCONNECT, wifi_iface, NULL, 0);
+}
+
+/* ------------------------------------------------------------------------ */
+/* WiFi scan (asynchronous, streamed over BLE)                              */
+/* ------------------------------------------------------------------------ */
+
+void linkr_wifi_set_respond_fn(linkr_wifi_respond_fn fn)
+{
+    scan_respond = fn;
+}
+
+static void wifi_scan_event_handler(struct net_mgmt_event_callback *cb,
+                                    unsigned long long mgmt_event,
+                                    struct net_if *iface)
+{
+    if (wifi_iface && iface != wifi_iface) {
+        return;
+    }
+    if (!atomic_get(&scan_in_progress) || !scan_respond) {
+        return;
+    }
+
+    if (mgmt_event == NET_EVENT_WIFI_SCAN_RESULT) {
+        const struct wifi_scan_result *result =
+            (const struct wifi_scan_result *)cb->info;
+        char line[WIFI_SSID_MAX_LEN + 32];
+        size_t ssid_len;
+
+        if (!result) {
+            return;
+        }
+        if (atomic_inc(&scan_result_count) >= WIFI_SCAN_MAX_RESULTS) {
+            return;
+        }
+        if (result->ssid_length == 0 || result->ssid[0] == '\0') {
+            /* Hidden network; report it without leaking the raw buffer. */
+            snprintk(line, sizeof(line), "@scan result <hidden> %ddBm",
+                     result->rssi);
+        } else {
+            char ssid[WIFI_SSID_MAX_LEN + 1];
+
+            ssid_len = MIN(result->ssid_length, WIFI_SSID_MAX_LEN);
+            memcpy(ssid, result->ssid, ssid_len);
+            for (size_t i = 0; i < ssid_len; i++) {
+                if ((unsigned char)ssid[i] < 0x20 || ssid[i] == 0x7f) {
+                    ssid[i] = '?';
+                }
+            }
+            ssid[ssid_len] = '\0';
+            snprintk(line, sizeof(line), "@scan result %.*s %ddBm",
+                     (int)ssid_len, ssid, result->rssi);
+        }
+        scan_respond(scan_conn, line);
+    } else if (mgmt_event == NET_EVENT_WIFI_SCAN_DONE) {
+        const struct wifi_status *status =
+            (const struct wifi_status *)cb->info;
+        bool ok = status ? (status->status == 0) : true;
+
+        scan_respond(scan_conn, ok ? "@scan done" : "@scan error");
+        if (scan_conn) {
+            bt_conn_unref(scan_conn);
+            scan_conn = NULL;
+        }
+        atomic_clear(&scan_result_count);
+        atomic_set(&scan_in_progress, 0);
+    }
+}
+
+int linkr_wifi_scan(struct bt_conn *conn)
+{
+    struct wifi_scan_params params;
+    int err;
+
+    if (!wifi_iface) {
+        return -ENODEV;
+    }
+    if (!atomic_cas(&scan_in_progress, 0, 1)) {
+        return -EBUSY;
+    }
+    if (!scan_respond) {
+        LOG_WRN("scan requested but no response sink registered");
+        atomic_clear(&scan_in_progress);
+        return -ENOSYS;
+    }
+
+    memset(&params, 0, sizeof(params));
+    params.bands = BIT(WIFI_FREQ_BAND_2_4_GHZ);
+    params.max_bss_cnt = WIFI_SCAN_MAX_RESULTS;
+
+    scan_conn = conn ? bt_conn_ref(conn) : NULL;
+    atomic_clear(&scan_result_count);
+
+    err = net_mgmt(NET_REQUEST_WIFI_SCAN, wifi_iface,
+                   &params, sizeof(params));
+    if (err) {
+        LOG_WRN("WiFi scan request failed: %d", err);
+        if (scan_conn) {
+            bt_conn_unref(scan_conn);
+            scan_conn = NULL;
+        }
+        atomic_clear(&scan_result_count);
+        atomic_set(&scan_in_progress, 0);
+    }
+    return err;
 }
 
 bool linkr_wifi_is_connected(void)
@@ -927,6 +1043,11 @@ int linkr_wifi_init(void)
                                  NET_EVENT_IPV4_ADDR_ADD |
                                  NET_EVENT_IPV4_ADDR_DEL);
     net_mgmt_add_event_callback(&wifi_mgmt_cb);
+
+    net_mgmt_init_event_callback(&wifi_scan_cb, wifi_scan_event_handler,
+                                 NET_EVENT_WIFI_SCAN_RESULT |
+                                 NET_EVENT_WIFI_SCAN_DONE);
+    net_mgmt_add_event_callback(&wifi_scan_cb);
 
     /* Settings are initialized and loaded by main.c, so pairing bonds and
      * this module share one settings lifecycle. */

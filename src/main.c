@@ -50,7 +50,7 @@ LOG_MODULE_REGISTER(linkr_ble_bridge, LOG_LEVEL_INF);
 #define CONTROL_FRAME_PREFIX "@!"
 #define CONTROL_CMD_MAX_LEN 416
 #define CONTROL_RESPONSE_MAX_LEN 128
-#define CONTROL_RESPONSE_QUEUE_DEPTH 8
+#define CONTROL_RESPONSE_QUEUE_DEPTH 16
 #define FACTORY_RESET_CONFIRM_MS 2000
 #define FACTORY_RESET_SAMPLE_MS 100
 
@@ -64,6 +64,8 @@ LOG_MODULE_REGISTER(linkr_ble_bridge, LOG_LEVEL_INF);
 
 BUILD_ASSERT(UART_RX_CHUNK <= BLE_TO_UART_MAX_LEN);
 BUILD_ASSERT(UART_RX_CHUNK <= UART_RX_BUFFER_SIZE);
+BUILD_ASSERT(CONFIG_BT_ID_MAX >= 2,
+	     "Linkr requires a persistent non-default BLE identity");
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY) && \
 	IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_ECHO)
 #error "UART loopback verify must not be combined with UART echo test"
@@ -125,6 +127,8 @@ static struct k_mutex conn_lock;
 static struct k_mutex uart_config_lock;
 static struct k_work_delayable advertise_work;
 static atomic_t nus_notify_enabled;
+static atomic_t control_response_needs_settle;
+static uint8_t linkr_identity = BT_ID_DEFAULT;
 static uint16_t control_frame_expected;
 static uint16_t control_frame_received;
 static int64_t control_frame_started_at;
@@ -213,7 +217,10 @@ static bool factory_reset_requested(void)
 		return false;
 	}
 
-	value = gpio_pin_get_dt(&factory_reset_gpio);
+	/* Read the physical level here. The devicetree marks this input active-low,
+	 * so gpio_pin_get_dt() would translate a released, pulled-up pin to logical
+	 * 0 and make it look grounded. Raw reads keep low == 0 as documented below. */
+	value = gpio_pin_get_raw(factory_reset_gpio.port, factory_reset_gpio.pin);
 	if (value < 0) {
 		LOG_ERR("Factory-reset GPIO read failed: %d", value);
 		return false;
@@ -227,7 +234,8 @@ static bool factory_reset_requested(void)
 	for (elapsed_ms = 0; elapsed_ms < FACTORY_RESET_CONFIRM_MS;
 	     elapsed_ms += FACTORY_RESET_SAMPLE_MS) {
 		k_sleep(K_MSEC(FACTORY_RESET_SAMPLE_MS));
-		value = gpio_pin_get_dt(&factory_reset_gpio);
+		value = gpio_pin_get_raw(factory_reset_gpio.port,
+					 factory_reset_gpio.pin);
 		if (value < 0) {
 			LOG_ERR("Factory-reset GPIO read failed: %d", value);
 			return false;
@@ -320,12 +328,84 @@ static void ble_diag_marker_thread(void)
 
 static const struct bt_data ad[] = {
 	BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
-	BT_DATA(BT_DATA_NAME_COMPLETE, DEVICE_NAME, DEVICE_NAME_LEN),
+	BT_DATA_BYTES(BT_DATA_UUID128_ALL, BT_UUID_NUS_SRV_VAL),
 };
 
 static const struct bt_data sd[] = {
-	BT_DATA_BYTES(BT_DATA_UUID128_ALL, BT_UUID_NUS_SRV_VAL),
+	BT_DATA(BT_DATA_NAME_COMPLETE, DEVICE_NAME, DEVICE_NAME_LEN),
 };
+
+#if IS_ENABLED(CONFIG_BT_SMP)
+static void bond_counter(const struct bt_bond_info *info, void *user_data)
+{
+	bool *has_bond = user_data;
+
+	ARG_UNUSED(info);
+	*has_bond = true;
+}
+
+static bool identity_has_bond(uint8_t id)
+{
+	bool has_bond = false;
+
+	bt_foreach_bond(id, bond_counter, &has_bond);
+	return has_bond;
+}
+#endif
+
+/* Use a settings-backed random-static identity instead of the controller's
+ * fixed public address. Erasing settings therefore gives a factory-reset unit
+ * a new address, preventing hosts from reusing a stale CoreBluetooth name.
+ * Preserve a bonded default identity during one-time upgrades. */
+static int linkr_identity_init(void)
+{
+	bt_addr_le_t addrs[CONFIG_BT_ID_MAX];
+	size_t count = ARRAY_SIZE(addrs);
+	char addr_str[BT_ADDR_LE_STR_LEN];
+	int id = -ENOENT;
+
+	bt_id_get(addrs, &count);
+	for (size_t i = 1; i < count; i++) {
+		if (!bt_addr_le_eq(&addrs[i], BT_ADDR_LE_ANY)) {
+			id = (int)i;
+			break;
+		}
+	}
+
+#if IS_ENABLED(CONFIG_BT_SMP)
+	if (id < 0 && identity_has_bond(BT_ID_DEFAULT)) {
+		/* Older firmware bonded on identity 0. Keep it until the owner uses
+		 * factory reset, which erases that bond and permits identity creation. */
+		id = BT_ID_DEFAULT;
+		LOG_WRN("Using legacy default BLE identity to preserve existing owner");
+	}
+#endif
+
+	if (id < 0) {
+		if (count > 1 && bt_addr_le_eq(&addrs[1], BT_ADDR_LE_ANY)) {
+			id = bt_id_reset(1, NULL, NULL);
+		} else {
+			id = bt_id_create(NULL, NULL);
+		}
+		if (id < 0) {
+			LOG_ERR("Persistent BLE identity creation failed: %d", id);
+			return id;
+		}
+	}
+
+	linkr_identity = (uint8_t)id;
+	count = ARRAY_SIZE(addrs);
+	bt_id_get(addrs, &count);
+	if (linkr_identity >= count ||
+	    bt_addr_le_eq(&addrs[linkr_identity], BT_ADDR_LE_ANY)) {
+		LOG_ERR("BLE identity %u is unavailable", linkr_identity);
+		return -ENOENT;
+	}
+
+	bt_addr_le_to_str(&addrs[linkr_identity], addr_str, sizeof(addr_str));
+	LOG_INF("BLE identity %u: %s", linkr_identity, addr_str);
+	return 0;
+}
 
 #if defined(ACTIVITY_LED_NODE)
 static void led_off(struct k_work *work)
@@ -421,8 +501,12 @@ static void indicate_loopback_result(bool ok)
 
 static int advertise_start(void)
 {
-	int err = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad),
-				  sd, ARRAY_SIZE(sd));
+	struct bt_le_adv_param params = *BT_LE_ADV_CONN_FAST_1;
+	int err;
+
+	params.id = linkr_identity;
+	params.options |= BT_LE_ADV_OPT_USE_IDENTITY;
+	err = bt_le_adv_start(&params, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
 
 	if (err && err != -EALREADY) {
 		LOG_ERR("BLE advertising failed: %d", err);
@@ -483,6 +567,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 	k_mutex_unlock(&conn_lock);
 
 	atomic_clear(&nus_notify_enabled);
+	atomic_clear(&control_response_needs_settle);
 	k_msgq_purge(&ble_to_uart_queue);
 	while (k_msgq_get(&control_response_queue, &response, K_NO_WAIT) == 0) {
 		if (response.conn) {
@@ -509,23 +594,12 @@ static void recycled(void)
 
 #if IS_ENABLED(CONFIG_BT_SMP)
 #if IS_ENABLED(CONFIG_BT_SMP_APP_PAIRING_ACCEPT)
-static void bond_counter(const struct bt_bond_info *info, void *user_data)
-{
-	bool *has_bond = user_data;
-
-	ARG_UNUSED(info);
-	*has_bond = true;
-}
-
 static enum bt_security_err pairing_accept(struct bt_conn *conn,
 						   const struct bt_conn_pairing_feat *const feat)
 {
-	bool has_bond = false;
-
 	ARG_UNUSED(conn);
 	ARG_UNUSED(feat);
-	bt_foreach_bond(BT_ID_DEFAULT, bond_counter, &has_bond);
-	if (has_bond) {
+	if (identity_has_bond(linkr_identity)) {
 		/* Factory-reset settings before transferring ownership. */
 		LOG_WRN("Rejecting pairing: bridge already has an owner");
 		return BT_SECURITY_ERR_PAIR_NOT_ALLOWED;
@@ -602,6 +676,12 @@ static void nus_notif_enabled(bool enabled, void *ctx)
 	ARG_UNUSED(ctx);
 
 	atomic_set(&nus_notify_enabled, enabled);
+	if (enabled) {
+		/* The first response may race the CCC write; later responses need not. */
+		atomic_set(&control_response_needs_settle, 1);
+	} else {
+		atomic_clear(&control_response_needs_settle);
+	}
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_BLE_DIAG_MARKER)
 	ble_diag.notify_enabled = enabled ? 1 : 0;
 	ble_diag.notify_events++;
@@ -710,6 +790,12 @@ static int uart_status_response(struct bt_conn *conn, const char *prefix)
 				     uart_parity_name(cfg.parity),
 				     uart_stop_bits_name(cfg.stop_bits),
 				     uart_flow_ctrl_name(cfg.flow_ctrl));
+}
+
+/* Forwards WiFi scan results from wifi.c into the NUS control-response queue. */
+static void wifi_scan_respond(struct bt_conn *conn, const char *line)
+{
+	(void)send_control_response(conn, "%s\r\n", line);
 }
 
 static char *trim_spaces(char *s)
@@ -875,7 +961,7 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 	if (!strcmp(body, "help") || !strcmp(body, "h")) {
 		(void)send_control_response(conn,
 					    "OK cmds: @u?|@u=baud,data,par,stop,flow "
-					    "@w?|@w=ssid,pass|@w off "
+					    "@w?|@w=ssid,pass|@w off|@w scan "
 					    "@d?|@d=http://host/path/|@d off\r\n");
 		return true;
 	}
@@ -964,6 +1050,16 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 					    err ? "ERR wifi=%d\r\n"
 						: "OK wifi off\r\n",
 					    err);
+		return true;
+	}
+	if (!strcmp(body, "wifi scan") || !strcmp(body, "w scan")) {
+		err = linkr_wifi_scan(conn);
+		if (err) {
+			(void)send_control_response(conn,
+						    "ERR scan=%d\r\n", err);
+		}
+		/* On success the SSIDs stream in via the scan sink, terminated by
+		 * a "scan done" line, so no immediate OK is echoed here. */
 		return true;
 	}
 
@@ -1280,8 +1376,10 @@ static void control_response_thread(void)
 		int err = -ENOTCONN;
 
 		k_msgq_get(&control_response_queue, &response, K_FOREVER);
-		/* Let the CCC write settle before sending the first notification. */
-		k_sleep(K_MSEC(200));
+		/* Let the CCC write settle before the first notification only. */
+		if (atomic_cas(&control_response_needs_settle, 1, 0)) {
+			k_sleep(K_MSEC(200));
+		}
 
 		if (!response.conn) {
 			continue;
@@ -1592,9 +1690,17 @@ int main(void)
 	}
 #endif
 
+	err = linkr_identity_init();
+	if (err) {
+		LOG_ERR("BLE identity init failed: %d", err);
+		return err;
+	}
+
 	err = linkr_wifi_init();
 	if (err) {
 		LOG_WRN("WiFi init failed: %d (WiFi disabled)", err);
+	} else {
+		linkr_wifi_set_respond_fn(wifi_scan_respond);
 	}
 
 	advertise_schedule(K_NO_WAIT);

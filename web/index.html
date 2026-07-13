@@ -1,9 +1,14 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Linkr BLE Terminal</title>
+    <meta name="theme-color" id="themeColorMeta" content="#0d1014" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%234fb477'/%3E%3Cpath d='M7 7l10 10-4 4V3l4 4L7 17' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"
+    />
     <link
       rel="stylesheet"
       href="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/css/xterm.css"
@@ -13,99 +18,254 @@
   <body>
     <main class="app-shell">
       <header class="topbar">
-        <div>
-          <h1>Linkr BLE Terminal</h1>
-          <p id="supportText" class="support-text">Checking Web Bluetooth...</p>
+        <div class="brand">
+          <span class="logo" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M7 7l10 10-4 4V3l4 4L7 17"></path>
+            </svg>
+          </span>
+          <div>
+            <h1 data-i18n="title">Linkr BLE Terminal</h1>
+            <p id="supportText" class="support-text">Checking Web Bluetooth…</p>
+          </div>
         </div>
-        <div class="status-strip" aria-live="polite">
-          <span id="statusDot" class="status-dot"></span>
-          <span id="statusText">Disconnected</span>
+
+        <div class="top-right">
+          <div class="top-actions">
+            <button id="panelToggle" class="icon-btn" type="button" data-i18n-title="panel" aria-label="Toggle panel">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="3" width="18" height="18" rx="2"></rect>
+                <line x1="9" y1="3" x2="9" y2="21"></line>
+              </svg>
+            </button>
+            <button id="themeButton" class="icon-btn" type="button" data-i18n-title="theme" aria-label="Theme">
+              <svg class="icon-sun" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="4"></circle>
+                <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path>
+              </svg>
+              <svg class="icon-moon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z"></path>
+              </svg>
+              <span class="btn-label">Light</span>
+            </button>
+            <button id="langButton" class="icon-btn" type="button" data-i18n-title="language" aria-label="Language">
+              <span class="btn-label">中</span>
+            </button>
+          </div>
+          <div class="status-pill" aria-live="polite">
+            <span id="statusDot" class="status-dot"></span>
+            <span id="statusText">Disconnected</span>
+            <span id="deviceName" class="device-name"></span>
+          </div>
         </div>
       </header>
 
-      <section class="toolbar" aria-label="Connection controls">
-        <button id="connectButton" type="button">Connect</button>
-        <button id="disconnectButton" type="button" disabled>Disconnect</button>
-        <button id="queryButton" type="button" disabled>Query UART</button>
-        <button id="clearButton" type="button">Clear</button>
-        <button id="saveButton" type="button">Save Log</button>
+      <aside class="controls" aria-label="Controls">
+        <div class="drawer-head">
+          <span data-i18n="panel">Panel</span>
+          <button id="drawerClose" class="icon-btn icon-close" type="button" data-i18n-title="close" aria-label="Close panel">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+            </svg>
+          </button>
+        </div>
+
+        <section class="card" aria-label="Connection controls">
+          <div class="card-title">
+            <span class="dot"></span><span data-i18n="connection">Connection</span>
+          </div>
+          <div class="btn-grid">
+            <button id="connectButton" class="btn btn-primary" type="button">
+              <span class="spinner" aria-hidden="true"></span>
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7l10 10-4 4V3l4 4L7 17"></path></svg>
+              <span class="btn-label" data-i18n="connect">Connect</span>
+            </button>
+            <button id="disconnectButton" class="btn" type="button" disabled="">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18.36 6.64a9 9 0 0 1 0 12.73M5.64 6.64a9 9 0 0 0 0 12.73"></path><line x1="12" y1="2" x2="12" y2="22" opacity="0"></line><line x1="2" y1="12" x2="22" y2="12"></line></svg>
+              <span class="btn-label" data-i18n="disconnect">Disconnect</span>
+            </button>
+            <button id="reconnectButton" class="btn" type="button" disabled="">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.5 15a9 9 0 1 1-2.1-9.4L23 10"></path></svg>
+              <span class="btn-label" data-i18n="reconnect">Reconnect</span>
+            </button>
+            <button id="queryButton" class="btn" type="button" disabled="">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+              <span class="btn-label" data-i18n="queryUart">Query UART</span>
+            </button>
+            <button id="clearButton" class="btn" type="button">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+              <span class="btn-label" data-i18n="clear">Clear</span>
+            </button>
+            <button id="saveButton" class="btn" type="button">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+              <span class="btn-label" data-i18n="saveLog">Save Log</span>
+            </button>
+          </div>
+        </section>
+
+        <section class="card" aria-label="Terminal settings">
+          <div class="card-title"><span class="dot"></span><span data-i18n="terminalSettings">Terminal Settings</span></div>
+          <label class="field">
+            <span class="field-label" data-i18n="uart">UART</span>
+            <span class="field-row">
+              <input id="uartInput" type="text" value="115200,8,n,1,n" spellcheck="false">
+              <button id="setUartButton" class="btn btn-soft" type="button" disabled="">
+                <span class="btn-label" data-i18n="set">Set</span>
+              </button>
+            </span>
+          </label>
+
+          <label class="field">
+            <span class="field-label" data-i18n="enterKey">Enter key</span>
+            <select id="enterSelect">
+              <option value="raw" data-i18n="enterRaw">Raw</option>
+              <option value="cr" data-i18n="enterCr">CR</option>
+              <option value="lf" data-i18n="enterLf">LF</option>
+              <option value="crlf" data-i18n="enterCrlf">CRLF</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span class="field-label" data-i18n="chunkSize">Chunk size</span>
+            <input id="chunkInput" type="number" min="1" max="62" value="20">
+          </label>
+
+          <div class="checks">
+            <label class="check">
+              <input id="localEchoInput" type="checkbox">
+              <span data-i18n="localEcho">Local echo</span>
+            </label>
+            <label class="check">
+              <input id="debugInput" type="checkbox">
+              <span data-i18n="debugIO">Debug I/O</span>
+            </label>
+          </div>
+        </section>
+
+        <section class="card" aria-label="WiFi and WebDAV">
+          <div class="card-title"><span class="dot"></span><span data-i18n="wifiWebdav">WiFi &amp; WebDAV</span></div>
+          <label class="field">
+            <span class="field-label" data-i18n="wifi">WiFi</span>
+            <span class="field-row">
+              <input id="wifiInput" type="text" list="wifiSsidList" data-i18n-ph="placeholderWifi" placeholder="SSID,pass" spellcheck="false" autocomplete="off">
+              <button id="wifiSetButton" class="btn btn-soft" type="button" disabled="">
+                <span class="btn-label" data-i18n="set">Set</span>
+              </button>
+            </span>
+            <datalist id="wifiSsidList"></datalist>
+          </label>
+          <div class="btn-grid compact">
+            <button id="wifiScanButton" class="btn btn-soft" type="button" disabled="">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+              <span class="btn-label" data-i18n="scan">Scan</span>
+            </button>
+            <button id="wifiOffButton" class="btn btn-soft" type="button" disabled="">
+              <span class="btn-label" data-i18n="off">Off</span>
+            </button>
+            <button id="wifiQueryButton" class="btn btn-soft" type="button" disabled="">?</button>
+          </div>
+
+          <label class="field">
+            <span class="field-label" data-i18n="webdav">WebDAV</span>
+            <span class="field-row">
+              <input id="webdavInput" type="url" data-i18n-ph="placeholderWebdav" placeholder="http://host/path/" spellcheck="false">
+              <button id="webdavSetButton" class="btn btn-soft" type="button" disabled="">
+                <span class="btn-label" data-i18n="set">Set</span>
+              </button>
+            </span>
+          </label>
+          <div class="btn-grid compact">
+            <button id="webdavOffButton" class="btn btn-soft" type="button" disabled="">
+              <span class="btn-label" data-i18n="off">Off</span>
+            </button>
+            <button id="webdavQueryButton" class="btn btn-soft" type="button" disabled="">?</button>
+          </div>
+        </section>
+
+        <section class="card" aria-label="Cheat sheet">
+          <div class="card-title">
+            <span class="dot"></span><span data-i18n="cheatsheet">Cheat Sheet</span>
+          </div>
+          <details class="ref" open>
+            <summary data-i18n="linuxCmds">Linux Commands</summary>
+            <div id="cheatList" class="ref-body"></div>
+          </details>
+          <details class="ref">
+            <summary data-i18n="shortcuts">Shortcuts</summary>
+            <div id="shortcutList" class="ref-body"></div>
+          </details>
+          <p class="ref-hint" data-i18n="cheatHint">Tip: click a command to send it when connected.</p>
+        </section>
+      </aside>
+
+      <section class="workpanel">
+        <section class="terminal-card" aria-label="Serial output">
+          <div class="terminal-head">
+            <span class="term-title">
+              <span class="term-led"></span><span data-i18n="serialOutput">Serial Output</span>
+            </span>
+            <div class="term-tools">
+              <button id="zoomOutBtn" class="term-tool" type="button" data-i18n-title="zoomOut" aria-label="Decrease font">A−</button>
+              <button id="zoomInBtn" class="term-tool" type="button" data-i18n-title="zoomIn" aria-label="Increase font">A+</button>
+              <button id="resetZoomBtn" class="term-tool" type="button" data-i18n-title="resetZoom" aria-label="Reset font">⤢</button>
+              <button id="autoscrollBtn" class="term-tool" type="button" data-i18n-title="autoScroll" aria-label="Auto-scroll" aria-pressed="true">⤓</button>
+              <button id="copyBtn" class="term-tool" type="button" data-i18n-title="copy" aria-label="Copy selection">⧉</button>
+              <span class="term-hint" data-i18n="xterm">xterm.js</span>
+            </div>
+          </div>
+          <div
+            id="terminalOutput"
+            class="terminal-output"
+            role="log"
+            aria-live="polite"
+            tabindex="0"
+          ></div>
+        </section>
+
+        <div class="presets" id="presetChips" aria-label="Quick send">
+          <button class="preset-chip" type="button" data-cmd="help" disabled="">help</button>
+          <button class="preset-chip" type="button" data-cmd="version" disabled="">version</button>
+          <button class="preset-chip" type="button" data-cmd="uname -a" disabled="">uname -a</button>
+          <button class="preset-chip" type="button" data-cmd="df -h" disabled="">df -h</button>
+          <button class="preset-chip" type="button" data-cmd="reboot" disabled="">reboot</button>
+        </div>
+
+        <section class="input-row" aria-label="Serial input">
+          <div class="input-wrap">
+            <input
+              id="terminalInput"
+              type="text"
+              autocomplete="off"
+              autocapitalize="off"
+              spellcheck="false"
+              data-i18n-ph="placeholderInput"
+              placeholder="Type text and press Enter"
+              disabled=""
+            />
+            <button id="inputClearBtn" class="input-clear" type="button" data-i18n-title="clearInput" aria-label="Clear input" disabled="">×</button>
+          </div>
+          <button id="sendButton" class="btn btn-primary" type="button" disabled="">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+            <span class="btn-label" data-i18n="send">Send</span>
+          </button>
+          <button id="breakButton" class="btn" type="button" disabled="">
+            <span class="btn-label" data-i18n="ctrlC">Ctrl-C</span>
+          </button>
+        </section>
+
+        <div class="statusbar" aria-label="Status">
+          <span class="sb-item"><b id="rxCount">0</b> <span data-i18n="rx">RX</span></span>
+          <span class="sb-item"><b id="txCount">0</b> <span data-i18n="tx">TX</span></span>
+          <span class="sb-item"><span data-i18n="baud">Baud</span> <b id="baudLabel">115200</b></span>
+          <span class="sb-item sb-state" id="connStateText"><span data-i18n="disconnected">Disconnected</span></span>
+        </div>
       </section>
 
-      <section class="settings" aria-label="Terminal settings">
-        <label>
-          UART
-          <input id="uartInput" type="text" value="115200,8,n,1,n" spellcheck="false" />
-        </label>
-        <button id="setUartButton" type="button" disabled>Set UART</button>
-
-        <label>
-          Enter
-          <select id="enterSelect">
-            <option value="raw">Raw</option>
-            <option value="cr">CR</option>
-            <option value="lf">LF</option>
-            <option value="crlf">CRLF</option>
-          </select>
-        </label>
-
-        <label>
-          Chunk
-          <input id="chunkInput" type="number" min="1" max="62" value="20" />
-        </label>
-
-        <label class="check-label">
-          <input id="localEchoInput" type="checkbox" />
-          Local echo
-        </label>
-
-        <label class="check-label">
-          <input id="debugInput" type="checkbox" />
-          Debug I/O
-        </label>
-      </section>
-
-      <section class="settings" aria-label="WiFi and WebDAV">
-        <label>
-          WiFi
-          <input id="wifiInput" type="text" placeholder="SSID,pass" spellcheck="false" />
-        </label>
-        <button id="wifiSetButton" type="button" disabled>Set WiFi</button>
-        <button id="wifiOffButton" type="button" disabled>WiFi Off</button>
-        <button id="wifiQueryButton" type="button" disabled>WiFi ?</button>
-
-        <label>
-          WebDAV
-          <input id="webdavInput" type="url" placeholder="http://host/path/ (anonymous)" spellcheck="false" />
-        </label>
-        <button id="webdavSetButton" type="button" disabled>Set WebDAV</button>
-        <button id="webdavOffButton" type="button" disabled>WebDAV Off</button>
-        <button id="webdavQueryButton" type="button" disabled>WebDAV ?</button>
-      </section>
-
-      <section class="terminal-wrap" aria-label="Serial output">
-        <div
-          id="terminalOutput"
-          class="terminal-output"
-          role="log"
-          aria-live="polite"
-          tabindex="0"
-        ></div>
-      </section>
-
-      <section class="input-row" aria-label="Serial input">
-        <input
-          id="terminalInput"
-          type="text"
-          autocomplete="off"
-          autocapitalize="off"
-          spellcheck="false"
-          placeholder="Type text and press Enter"
-          disabled
-        />
-        <button id="sendButton" type="button" disabled>Send</button>
-        <button id="breakButton" type="button" disabled>Ctrl-C</button>
-      </section>
+      <div id="drawerBackdrop" class="drawer-backdrop" aria-hidden="true"></div>
     </main>
+
+    <div id="toastHost" class="toast-host" aria-live="polite"></div>
 
     <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/lib/xterm.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.11.0/lib/addon-fit.js"></script>
