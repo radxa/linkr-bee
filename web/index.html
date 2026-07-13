@@ -50,7 +50,7 @@
 
         <label>
           Chunk
-          <input id="chunkInput" type="number" min="1" max="244" value="244" />
+          <input id="chunkInput" type="number" min="1" max="62" value="20" />
         </label>
 
         <label class="check-label">
@@ -62,6 +62,24 @@
           <input id="debugInput" type="checkbox" />
           Debug I/O
         </label>
+      </section>
+
+      <section class="settings" aria-label="WiFi and WebDAV">
+        <label>
+          WiFi
+          <input id="wifiInput" type="text" placeholder="SSID,pass" spellcheck="false" />
+        </label>
+        <button id="wifiSetButton" type="button" disabled>Set WiFi</button>
+        <button id="wifiOffButton" type="button" disabled>WiFi Off</button>
+        <button id="wifiQueryButton" type="button" disabled>WiFi ?</button>
+
+        <label>
+          WebDAV
+          <input id="webdavInput" type="url" placeholder="http://host/path/ (anonymous)" spellcheck="false" />
+        </label>
+        <button id="webdavSetButton" type="button" disabled>Set WebDAV</button>
+        <button id="webdavOffButton" type="button" disabled>WebDAV Off</button>
+        <button id="webdavQueryButton" type="button" disabled>WebDAV ?</button>
       </section>
 
       <section class="terminal-wrap" aria-label="Serial output">

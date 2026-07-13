@@ -41,6 +41,14 @@ const elements = {
   chunkInput: $("chunkInput"),
   localEchoInput: $("localEchoInput"),
   debugInput: $("debugInput"),
+  wifiInput: $("wifiInput"),
+  wifiSetButton: $("wifiSetButton"),
+  wifiOffButton: $("wifiOffButton"),
+  wifiQueryButton: $("wifiQueryButton"),
+  webdavInput: $("webdavInput"),
+  webdavSetButton: $("webdavSetButton"),
+  webdavOffButton: $("webdavOffButton"),
+  webdavQueryButton: $("webdavQueryButton"),
 };
 
 function fitTerminal() {
@@ -139,6 +147,12 @@ function setConnected(connected) {
   elements.terminalInput.disabled = !connected;
   elements.sendButton.disabled = !connected;
   elements.breakButton.disabled = !connected;
+  elements.wifiSetButton.disabled = !connected;
+  elements.wifiOffButton.disabled = !connected;
+  elements.wifiQueryButton.disabled = !connected;
+  elements.webdavSetButton.disabled = !connected;
+  elements.webdavOffButton.disabled = !connected;
+  elements.webdavQueryButton.disabled = !connected;
 }
 
 function normalizeEnter(text) {
@@ -161,10 +175,10 @@ function chunkSize() {
   if (!Number.isFinite(value)) {
     return 20;
   }
-  return Math.max(1, Math.min(244, Math.floor(value)));
+  return Math.max(1, Math.min(62, Math.floor(value)));
 }
 
-async function writeBytes(bytes) {
+async function writeBytes(bytes, sensitive = false) {
   if (!state.rxChar) {
     throw new Error("RX characteristic is not ready");
   }
@@ -172,7 +186,8 @@ async function writeBytes(bytes) {
   const size = chunkSize();
   for (let offset = 0; offset < bytes.length; offset += size) {
     const chunk = bytes.slice(offset, offset + size);
-    debugLine(`TX ${chunk.length}: ${JSON.stringify(decoder.decode(chunk))}`);
+    debugLine(sensitive ? `TX <redacted ${chunk.length} bytes>` :
+      `TX ${chunk.length}: ${JSON.stringify(decoder.decode(chunk))}`);
     try {
       if (
         state.rxChar.properties.writeWithoutResponse &&
@@ -190,7 +205,7 @@ async function writeBytes(bytes) {
       }
       elements.chunkInput.value = "20";
       appendLine("[warn] BLE write failed; retrying with 20-byte chunks");
-      await writeBytes(bytes);
+      await writeBytes(bytes, sensitive);
       return;
     }
   }
@@ -216,8 +231,14 @@ async function sendTerminalInput() {
 }
 
 async function sendControl(command) {
-  appendLine(`[control] ${command}`);
-  await writeText(command);
+  const sensitive = command.startsWith("@w=") || command.startsWith("@d=");
+  appendLine(`[control] ${sensitive ? `${command.slice(0, 2)}=<redacted>` : command}`);
+  const payload = encoder.encode(command);
+  const header = encoder.encode(`@!${payload.length}:`);
+  const frame = new Uint8Array(header.length + payload.length);
+  frame.set(header);
+  frame.set(payload, header.length);
+  await writeBytes(frame, sensitive);
 }
 
 function onNotification(event) {
@@ -335,6 +356,29 @@ function bind() {
       event.preventDefault();
       sendTerminalInput().catch((error) => appendLine(`[error] ${error.message}`));
     }
+  });
+
+  elements.wifiSetButton.addEventListener("click", () => {
+    sendControl(`@w=${elements.wifiInput.value.trim()}`).catch((error) =>
+      appendLine(`[error] ${error.message}`),
+    );
+  });
+  elements.wifiOffButton.addEventListener("click", () => {
+    sendControl("@w off").catch((error) => appendLine(`[error] ${error.message}`));
+  });
+  elements.wifiQueryButton.addEventListener("click", () => {
+    sendControl("@w?").catch((error) => appendLine(`[error] ${error.message}`));
+  });
+  elements.webdavSetButton.addEventListener("click", () => {
+    sendControl(`@d=${elements.webdavInput.value.trim()}`).catch((error) =>
+      appendLine(`[error] ${error.message}`),
+    );
+  });
+  elements.webdavOffButton.addEventListener("click", () => {
+    sendControl("@d off").catch((error) => appendLine(`[error] ${error.message}`));
+  });
+  elements.webdavQueryButton.addEventListener("click", () => {
+    sendControl("@d?").catch((error) => appendLine(`[error] ${error.message}`));
   });
 }
 

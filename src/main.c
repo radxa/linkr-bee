@@ -19,13 +19,16 @@
 #include <zephyr/bluetooth/services/nus.h>
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
-#include <zephyr/drivers/flash.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/uart.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/settings/settings.h>
+#include <zephyr/storage/flash_map.h>
 #include <zephyr/sys/atomic.h>
 #include <zephyr/sys/ring_buffer.h>
+
+#include "wifi.h"
 
 LOG_MODULE_REGISTER(linkr_ble_bridge, LOG_LEVEL_INF);
 
@@ -43,14 +46,20 @@ LOG_MODULE_REGISTER(linkr_ble_bridge, LOG_LEVEL_INF);
 #define UART_RX_CHUNK CONFIG_LINKR_BLE_BRIDGE_UART_RX_CHUNK
 #define UART_RX_BUFFER_SIZE CONFIG_LINKR_BLE_BRIDGE_UART_RX_BUFFER_SIZE
 
-#define LOOPBACK_MARKER_OFFSET 0x3ff000
-#define LOOPBACK_MARKER_SECTOR_SIZE 4096
 #define CONTROL_CMD_PREFIX "@linkr "
-#define CONTROL_CMD_SHORT_PREFIX "@u"
-#define CONTROL_CMD_MAX_LEN 96
+#define CONTROL_FRAME_PREFIX "@!"
+#define CONTROL_CMD_MAX_LEN 416
+#define CONTROL_RESPONSE_MAX_LEN 128
+#define CONTROL_RESPONSE_QUEUE_DEPTH 8
+#define FACTORY_RESET_CONFIRM_MS 2000
+#define FACTORY_RESET_SAMPLE_MS 100
 
 #if DT_NODE_HAS_STATUS(DT_ALIAS(led0), okay)
 #define ACTIVITY_LED_NODE DT_ALIAS(led0)
+#endif
+
+#if DT_HAS_ALIAS(linkr_factory_reset)
+#define FACTORY_RESET_NODE DT_ALIAS(linkr_factory_reset)
 #endif
 
 BUILD_ASSERT(UART_RX_CHUNK <= BLE_TO_UART_MAX_LEN);
@@ -63,6 +72,12 @@ BUILD_ASSERT(UART_RX_CHUNK <= UART_RX_BUFFER_SIZE);
 struct bridge_packet {
 	uint16_t len;
 	uint8_t data[BLE_TO_UART_MAX_LEN];
+};
+
+struct control_response {
+	struct bt_conn *conn;
+	uint16_t len;
+	uint8_t data[CONTROL_RESPONSE_MAX_LEN];
 };
 
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_UART_DATA_BITS_5)
@@ -96,26 +111,27 @@ struct bridge_packet {
 #endif
 
 static const struct device *const bridge_uart = DEVICE_DT_GET(LINKR_UART_NODE);
-#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY) || \
-	IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_BLE_DIAG_MARKER)
-static const struct device *const flash_dev =
-	DEVICE_DT_GET(DT_CHOSEN(zephyr_flash_controller));
-#endif
 #if defined(ACTIVITY_LED_NODE)
 static const struct gpio_dt_spec activity_led =
 	GPIO_DT_SPEC_GET(ACTIVITY_LED_NODE, gpios);
 static struct k_work_delayable led_off_work;
 #endif
+#if defined(FACTORY_RESET_NODE)
+static const struct gpio_dt_spec factory_reset_gpio =
+	GPIO_DT_SPEC_GET(FACTORY_RESET_NODE, gpios);
+#endif
 static struct bt_conn *current_conn;
 static struct k_mutex conn_lock;
 static struct k_mutex uart_config_lock;
-static struct k_mutex control_response_lock;
 static struct k_work_delayable advertise_work;
 static atomic_t nus_notify_enabled;
-static uint16_t control_response_len;
-static uint8_t control_response_data[96];
-static struct bt_conn *control_response_conn;
+static uint16_t control_frame_expected;
+static uint16_t control_frame_received;
+static int64_t control_frame_started_at;
+static uint8_t control_frame_data[CONTROL_CMD_MAX_LEN];
+#if !IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY)
 static atomic_t uart_rx_dropped;
+#endif
 static struct uart_config active_uart_config = {
 	.baudrate = CONFIG_LINKR_BLE_BRIDGE_UART_BAUD_RATE,
 	.parity = DEFAULT_UART_PARITY,
@@ -125,10 +141,139 @@ static struct uart_config active_uart_config = {
 };
 
 K_MSGQ_DEFINE(ble_to_uart_queue, sizeof(struct bridge_packet),
-	      CONFIG_LINKR_BLE_BRIDGE_BLE_TO_UART_QUEUE_DEPTH, 4);
+		      CONFIG_LINKR_BLE_BRIDGE_BLE_TO_UART_QUEUE_DEPTH, 4);
+K_MSGQ_DEFINE(control_response_queue, sizeof(struct control_response),
+		      CONTROL_RESPONSE_QUEUE_DEPTH, 4);
 K_SEM_DEFINE(bridge_start_sem, 0, 5);
 RING_BUF_DECLARE(uart_rx_ring, UART_RX_BUFFER_SIZE);
 K_SEM_DEFINE(uart_rx_sem, 0, 1);
+
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY) || \
+	IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_BLE_DIAG_MARKER)
+K_MUTEX_DEFINE(test_marker_lock);
+
+static int write_test_marker(const void *data, size_t len, const char *name)
+{
+	const struct flash_area *area;
+	int err;
+
+	err = flash_area_open(PARTITION_ID(linkr_test_marker_partition), &area);
+	if (err) {
+		LOG_ERR("%s marker open failed: %d", name, err);
+		return err;
+	}
+
+	if (!flash_area_device_is_ready(area)) {
+		LOG_ERR("%s marker flash area is not ready", name);
+		err = -ENODEV;
+		goto close_area;
+	}
+	if (len > area->fa_size) {
+		LOG_ERR("%s marker is too large: %u > %u", name,
+			(unsigned int)len, (unsigned int)area->fa_size);
+		err = -EFBIG;
+		goto close_area;
+	}
+
+	k_mutex_lock(&test_marker_lock, K_FOREVER);
+	err = flash_area_erase(area, 0, area->fa_size);
+	if (err) {
+		LOG_ERR("%s marker erase failed: %d", name, err);
+	} else {
+		err = flash_area_write(area, 0, data, len);
+		if (err) {
+			LOG_ERR("%s marker write failed: %d", name, err);
+		}
+	}
+	k_mutex_unlock(&test_marker_lock);
+
+close_area:
+	flash_area_close(area);
+	return err;
+}
+#endif
+
+#if defined(FACTORY_RESET_NODE)
+/* GPIO0 is held high by the internal pull-up. A physical short to GND is
+ * sampled at boot and must remain low for the full confirmation window. */
+static bool factory_reset_requested(void)
+{
+	int value;
+	int err;
+	uint32_t elapsed_ms;
+
+	if (!device_is_ready(factory_reset_gpio.port)) {
+		LOG_ERR("Factory-reset GPIO device is not ready");
+		return false;
+	}
+
+	err = gpio_pin_configure_dt(&factory_reset_gpio, GPIO_INPUT);
+	if (err) {
+		LOG_ERR("Factory-reset GPIO configuration failed: %d", err);
+		return false;
+	}
+
+	value = gpio_pin_get_dt(&factory_reset_gpio);
+	if (value < 0) {
+		LOG_ERR("Factory-reset GPIO read failed: %d", value);
+		return false;
+	}
+	if (value != 0) {
+		return false;
+	}
+
+	printk("GPIO0 is low; hold GND short for %u ms to factory reset\n",
+	       FACTORY_RESET_CONFIRM_MS);
+	for (elapsed_ms = 0; elapsed_ms < FACTORY_RESET_CONFIRM_MS;
+	     elapsed_ms += FACTORY_RESET_SAMPLE_MS) {
+		k_sleep(K_MSEC(FACTORY_RESET_SAMPLE_MS));
+		value = gpio_pin_get_dt(&factory_reset_gpio);
+		if (value < 0) {
+			LOG_ERR("Factory-reset GPIO read failed: %d", value);
+			return false;
+		}
+		if (value != 0) {
+			printk("Factory reset cancelled: GPIO0 released\n");
+			return false;
+		}
+	}
+
+	return true;
+}
+
+static int erase_factory_settings(void)
+{
+	const struct flash_area *area;
+	int err;
+
+	/* storage_partition is the settings/NVS area. Erase it before Bluetooth
+	 * starts so no previous bond, identity, or Linkr configuration is loaded. */
+	err = flash_area_open(PARTITION_ID(storage_partition), &area);
+	if (err) {
+		LOG_ERR("Factory-reset storage open failed: %d", err);
+		return err;
+	}
+	if (!flash_area_device_is_ready(area)) {
+		LOG_ERR("Factory-reset storage is not ready");
+		err = -ENODEV;
+		goto close_area;
+	}
+
+	LOG_WRN("Factory reset requested: erasing %u-byte settings/NVS area",
+		(unsigned int)area->fa_size);
+	printk("Factory reset: erasing settings/NVS; owner and configuration cleared\n");
+	err = flash_area_erase(area, 0, area->fa_size);
+	if (err) {
+		LOG_ERR("Factory-reset storage erase failed: %d", err);
+	} else {
+		printk("Factory reset complete; device is ready for a new owner\n");
+	}
+
+close_area:
+	flash_area_close(area);
+	return err;
+}
+#endif
 
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_BLE_DIAG_MARKER)
 struct ble_diag_marker {
@@ -165,21 +310,9 @@ static void ble_diag_marker_thread(void)
 	for (;;) {
 		k_sem_take(&ble_diag_write_sem, K_FOREVER);
 
-		if (!device_is_ready(flash_dev)) {
-			continue;
-		}
-
-		err = flash_erase(flash_dev, LOOPBACK_MARKER_OFFSET,
-				  LOOPBACK_MARKER_SECTOR_SIZE);
+		err = write_test_marker(&ble_diag, sizeof(ble_diag), "BLE diag");
 		if (err) {
-			LOG_ERR("BLE diag marker erase failed: %d", err);
-			continue;
-		}
-
-		err = flash_write(flash_dev, LOOPBACK_MARKER_OFFSET, &ble_diag,
-				  sizeof(ble_diag));
-		if (err) {
-			LOG_ERR("BLE diag marker write failed: %d", err);
+			LOG_WRN("BLE diag marker update failed: %d", err);
 		}
 	}
 }
@@ -217,6 +350,7 @@ static void signal_uart_activity(void)
 }
 #endif
 
+#if !IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY)
 static void uart_rx_irq_callback(const struct device *dev, void *user_data)
 {
 	uint8_t buf[64];
@@ -245,6 +379,7 @@ static void uart_rx_irq_callback(const struct device *dev, void *user_data)
 		k_sem_give(&uart_rx_sem);
 	}
 }
+#endif
 
 static void uart_rx_irq_enable(void)
 {
@@ -338,7 +473,7 @@ static void connected(struct bt_conn *conn, uint8_t err)
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
-	ARG_UNUSED(conn);
+	struct control_response response;
 
 	k_mutex_lock(&conn_lock, K_FOREVER);
 	if (current_conn) {
@@ -349,25 +484,117 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 
 	atomic_clear(&nus_notify_enabled);
 	k_msgq_purge(&ble_to_uart_queue);
-	k_mutex_lock(&control_response_lock, K_FOREVER);
-	if (control_response_conn) {
-		bt_conn_unref(control_response_conn);
-		control_response_conn = NULL;
+	while (k_msgq_get(&control_response_queue, &response, K_NO_WAIT) == 0) {
+		if (response.conn) {
+			bt_conn_unref(response.conn);
+		}
 	}
-	control_response_len = 0;
-	k_mutex_unlock(&control_response_lock);
+	control_frame_expected = 0;
+	control_frame_received = 0;
+	control_frame_started_at = 0;
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_BLE_DIAG_MARKER)
 	ble_diag.disconnected_count++;
 	ble_diag.notify_enabled = 0;
 	schedule_ble_diag_marker_write();
 #endif
 	LOG_INF("BLE disconnected: 0x%02x", reason);
-	advertise_schedule(K_MSEC(200));
+	/* BT_LE_ADV_CONN_FAST_1 is persistent; the host resumes it after disconnect. */
 }
+
+static void recycled(void)
+{
+	/* Also recover explicitly after failed-to-establish connections. */
+	advertise_schedule(K_NO_WAIT);
+}
+
+#if IS_ENABLED(CONFIG_BT_SMP)
+#if IS_ENABLED(CONFIG_BT_SMP_APP_PAIRING_ACCEPT)
+static void bond_counter(const struct bt_bond_info *info, void *user_data)
+{
+	bool *has_bond = user_data;
+
+	ARG_UNUSED(info);
+	*has_bond = true;
+}
+
+static enum bt_security_err pairing_accept(struct bt_conn *conn,
+						   const struct bt_conn_pairing_feat *const feat)
+{
+	bool has_bond = false;
+
+	ARG_UNUSED(conn);
+	ARG_UNUSED(feat);
+	bt_foreach_bond(BT_ID_DEFAULT, bond_counter, &has_bond);
+	if (has_bond) {
+		/* Factory-reset settings before transferring ownership. */
+		LOG_WRN("Rejecting pairing: bridge already has an owner");
+		return BT_SECURITY_ERR_PAIR_NOT_ALLOWED;
+	}
+
+	return BT_SECURITY_ERR_SUCCESS;
+}
+#endif
+
+static void passkey_display(struct bt_conn *conn, unsigned int passkey)
+{
+	char addr[BT_ADDR_LE_STR_LEN];
+
+	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
+	printk("Linkr BLE pairing code for %s: %06u\n", addr, passkey);
+	LOG_INF("Enter the pairing code shown on the local console");
+}
+
+static void pairing_cancelled(struct bt_conn *conn)
+{
+	ARG_UNUSED(conn);
+	LOG_WRN("BLE pairing cancelled");
+}
+
+static void pairing_complete(struct bt_conn *conn, bool bonded)
+{
+	ARG_UNUSED(conn);
+	LOG_INF("BLE pairing complete%s", bonded ? " (owner saved)" : "");
+}
+
+static void pairing_failed(struct bt_conn *conn, enum bt_security_err reason)
+{
+	ARG_UNUSED(conn);
+	LOG_WRN("BLE pairing failed: %d", reason);
+}
+
+static struct bt_conn_auth_cb auth_callbacks = {
+#if IS_ENABLED(CONFIG_BT_SMP_APP_PAIRING_ACCEPT)
+	.pairing_accept = pairing_accept,
+#endif
+	.passkey_display = passkey_display,
+	.cancel = pairing_cancelled,
+};
+
+static struct bt_conn_auth_info_cb auth_info_callbacks = {
+	.pairing_complete = pairing_complete,
+	.pairing_failed = pairing_failed,
+};
+
+static void security_changed(struct bt_conn *conn, bt_security_t level,
+			     enum bt_security_err err)
+{
+	ARG_UNUSED(conn);
+
+	if (err) {
+		LOG_WRN("BLE security failed: level %u err %u", level, err);
+	} else {
+		LOG_INF("BLE security level changed: %u", level);
+	}
+}
+#endif
 
 BT_CONN_CB_DEFINE(conn_callbacks) = {
 	.connected = connected,
 	.disconnected = disconnected,
+	.recycled = recycled,
+#if IS_ENABLED(CONFIG_BT_SMP)
+	.security_changed = security_changed,
+#endif
 };
 
 static void nus_notif_enabled(bool enabled, void *ctx)
@@ -440,59 +667,33 @@ static const char *uart_flow_ctrl_name(enum uart_config_flow_control flow_ctrl)
 	}
 }
 
-static bool control_response_peek(uint8_t *data, uint16_t *len,
-				  struct bt_conn **conn)
-{
-	bool has_data;
-
-	k_mutex_lock(&control_response_lock, K_FOREVER);
-	*len = control_response_len;
-	has_data = *len > 0;
-	if (has_data) {
-		memcpy(data, control_response_data, *len);
-		*conn = control_response_conn ?
-			bt_conn_ref(control_response_conn) : NULL;
-	}
-	k_mutex_unlock(&control_response_lock);
-
-	return has_data;
-}
-
-static void control_response_clear(void)
-{
-	k_mutex_lock(&control_response_lock, K_FOREVER);
-	control_response_len = 0;
-	if (control_response_conn) {
-		bt_conn_unref(control_response_conn);
-		control_response_conn = NULL;
-	}
-	k_mutex_unlock(&control_response_lock);
-}
-
 static int send_control_response(struct bt_conn *conn, const char *fmt, ...)
 {
+	struct control_response response = { 0 };
 	va_list args;
 	int len;
+	int err;
 
-	k_mutex_lock(&control_response_lock, K_FOREVER);
 	va_start(args, fmt);
-	len = vsnprintk(control_response_data, sizeof(control_response_data),
+	len = vsnprintk(response.data, sizeof(response.data),
 			fmt, args);
 	va_end(args);
 
 	if (len < 0) {
-		k_mutex_unlock(&control_response_lock);
 		return len;
 	}
 
-	if (control_response_conn) {
-		bt_conn_unref(control_response_conn);
+	response.conn = conn ? bt_conn_ref(conn) : NULL;
+	response.len = MIN(len, (int)sizeof(response.data) - 1);
+	err = k_msgq_put(&control_response_queue, &response, K_NO_WAIT);
+	if (err) {
+		if (response.conn) {
+			bt_conn_unref(response.conn);
+		}
+		LOG_WRN("Dropping control response; queue full");
 	}
-	control_response_conn = conn ? bt_conn_ref(conn) : NULL;
-	control_response_len = MIN(len, (int)sizeof(control_response_data));
-	k_mutex_unlock(&control_response_lock);
 
-	return 0;
+	return err;
 }
 
 static int uart_status_response(struct bt_conn *conn, const char *prefix)
@@ -615,69 +816,78 @@ static int apply_uart_config(const struct uart_config *cfg)
 	if (!err) {
 		active_uart_config = *cfg;
 		ring_buf_reset(&uart_rx_ring);
-		uart_rx_irq_enable();
 	}
+	/* uart_configure() may fail after RX was disabled; always restore it. */
+	uart_rx_irq_enable();
 	k_mutex_unlock(&uart_config_lock);
 
 	return err;
 }
 
-static bool handle_control_command(struct bt_conn *conn, const uint8_t *data,
-				   uint16_t len)
+static bool handle_control_command_complete(struct bt_conn *conn,
+					    const uint8_t *data, uint16_t len)
 {
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_CONTROL_COMMANDS)
 	char cmd[CONTROL_CMD_MAX_LEN];
 	char *body;
 	struct uart_config cfg;
 	int err;
-	bool short_cmd = false;
-
-	if (len == 2 && memcmp(data, "@h", 2) == 0) {
-		short_cmd = true;
-	} else if (len >= strlen(CONTROL_CMD_SHORT_PREFIX) &&
-		   memcmp(data, CONTROL_CMD_SHORT_PREFIX,
-			  strlen(CONTROL_CMD_SHORT_PREFIX)) == 0 &&
-		   (len == strlen(CONTROL_CMD_SHORT_PREFIX) ||
-		    data[strlen(CONTROL_CMD_SHORT_PREFIX)] == '?' ||
-		    data[strlen(CONTROL_CMD_SHORT_PREFIX)] == '=')) {
-		short_cmd = true;
-	} else if (len < strlen(CONTROL_CMD_PREFIX) ||
-		   memcmp(data, CONTROL_CMD_PREFIX,
-			  strlen(CONTROL_CMD_PREFIX)) != 0) {
-		return false;
-	}
+	bool is_long;
+	char short_ch = 0;
 
 	if (len >= sizeof(cmd)) {
 		(void)send_control_response(conn, "ERR command too long\r\n");
 		return true;
 	}
 
+	is_long = (len >= strlen(CONTROL_CMD_PREFIX) &&
+		   memcmp(data, CONTROL_CMD_PREFIX,
+			  strlen(CONTROL_CMD_PREFIX)) == 0);
+
+	if (!is_long) {
+		if (len == 2 && data[0] == '@' && data[1] == 'h') {
+			short_ch = 'h';
+		} else if (len >= 2 && data[0] == '@' &&
+			   (data[1] == 'u' || data[1] == 'w' ||
+			    data[1] == 'd') &&
+			   (len == 2 || data[2] == '?' ||
+			    data[2] == '=' || data[2] == ' ')) {
+			short_ch = data[1];
+		} else {
+			return false;
+		}
+	}
+
 	memcpy(cmd, data, len);
 	cmd[len] = '\0';
-	if (len == 2 && !strcmp(cmd, "@h")) {
+
+	if (is_long) {
+		body = trim_spaces(cmd + strlen(CONTROL_CMD_PREFIX));
+	} else if (short_ch == 'h') {
 		body = "h";
 	} else {
-		body = trim_spaces(cmd +
-				   (short_cmd ?
-				    strlen(CONTROL_CMD_SHORT_PREFIX) :
-				    strlen(CONTROL_CMD_PREFIX)));
+		/* Keep the leading keyword letter so @u?/@w?/@d? are distinct. */
+		body = trim_spaces(cmd + 1);
 	}
-	LOG_INF("Control command: %s", body);
+
+	LOG_INF("Control command received");
 
 	if (!strcmp(body, "help") || !strcmp(body, "h")) {
 		(void)send_control_response(conn,
-					    "OK cmds: @u? | "
-					    "@u=<baud>,<data>,<parity>,<stop>,<flow>\r\n");
+					    "OK cmds: @u?|@u=baud,data,par,stop,flow "
+					    "@w?|@w=ssid,pass|@w off "
+					    "@d?|@d=http://host/path/|@d off\r\n");
 		return true;
 	}
 
-	if (!strcmp(body, "uart?") || !strcmp(body, "?")) {
+	/* ---- UART (@u / @linkr uart) ---- */
+	if (!strcmp(body, "uart?") || !strcmp(body, "u?")) {
 		(void)uart_status_response(conn, "OK");
 		return true;
 	}
-
-	if (!strncmp(body, "uart=", 5) || body[0] == '=') {
-		char *value = body[0] == '=' ? body + 1 : body + 5;
+	if (!strncmp(body, "uart=", 5) || !strncmp(body, "u=", 2)) {
+		char *value = (body[0] == 'u' && body[1] == '=') ?
+				      body + 2 : body + 5;
 
 		k_mutex_lock(&uart_config_lock, K_FOREVER);
 		cfg = active_uart_config;
@@ -703,8 +913,204 @@ static bool handle_control_command(struct bt_conn *conn, const uint8_t *data,
 		return true;
 	}
 
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_WIFI)
+	if ((body[0] == 'w' || body[0] == 'd' ||
+	     !strncmp(body, "wifi", 4) || !strncmp(body, "webdav", 6)) &&
+	    bt_conn_get_security(conn) < BT_SECURITY_L3) {
+		err = bt_conn_set_security(conn, BT_SECURITY_L3);
+		(void)send_control_response(conn,
+					    err ? "ERR pairing=%d\r\n"
+						: "ERR pairing required; enter local code then retry\r\n",
+					    err);
+		return true;
+	}
+
+	/* ---- WiFi (@w / @linkr wifi) ---- */
+	if (!strcmp(body, "wifi?") || !strcmp(body, "w?")) {
+		char status[80];
+
+		linkr_wifi_status(status, sizeof(status));
+		(void)send_control_response(conn, "OK %s\r\n", status);
+		return true;
+	}
+	if (!strncmp(body, "wifi=", 5) || !strncmp(body, "w=", 2)) {
+		char *value = (body[0] == 'w' && body[1] == '=') ?
+				      body + 2 : body + 5;
+		char *comma = strchr(value, ',');
+
+		if (!comma) {
+			(void)send_control_response(conn,
+						    "ERR format: "
+						    "@w=ssid,pass\r\n");
+			return true;
+		}
+		*comma = '\0';
+		err = linkr_wifi_set_config(value, comma + 1);
+		if (err) {
+			(void)send_control_response(conn,
+						    "ERR wifi=%d\r\n", err);
+		} else {
+			char status[80];
+
+			linkr_wifi_status(status, sizeof(status));
+			(void)send_control_response(conn, "OK %s\r\n",
+						    status);
+		}
+		return true;
+	}
+	if (!strcmp(body, "wifi off") || !strcmp(body, "w off")) {
+		err = linkr_wifi_clear_config();
+		(void)send_control_response(conn,
+					    err ? "ERR wifi=%d\r\n"
+						: "OK wifi off\r\n",
+					    err);
+		return true;
+	}
+
+	/* ---- WebDAV (@d / @linkr webdav) ---- */
+	if (!strcmp(body, "webdav?") || !strcmp(body, "d?")) {
+		char status[120];
+
+		linkr_webdav_status(status, sizeof(status));
+		(void)send_control_response(conn, "OK %s\r\n", status);
+		return true;
+	}
+	if (!strncmp(body, "webdav=", 7) || !strncmp(body, "d=", 2)) {
+		char *value = (body[0] == 'd' && body[1] == '=') ?
+				      body + 2 : body + 7;
+		char *save = NULL;
+		char *url = strtok_r(value, ",", &save);
+		char *user = strtok_r(NULL, ",", &save);
+		char *pass = strtok_r(NULL, ",", &save);
+
+		if (!url) {
+			(void)send_control_response(conn,
+						    "ERR format: "
+						    "@d=http://host/path/\r\n");
+			return true;
+		}
+		err = linkr_webdav_set_config(url, user, pass);
+		if (err) {
+			(void)send_control_response(conn,
+						    "ERR webdav=%d\r\n", err);
+		} else {
+			char status[120];
+
+			linkr_webdav_status(status, sizeof(status));
+			(void)send_control_response(conn, "OK %s\r\n",
+						    status);
+		}
+		return true;
+	}
+	if (!strcmp(body, "webdav off") || !strcmp(body, "d off")) {
+		err = linkr_webdav_clear_config();
+		(void)send_control_response(conn,
+					    err ? "ERR webdav=%d\r\n"
+						: "OK webdav off\r\n",
+					    err);
+		return true;
+	}
+#endif /* CONFIG_LINKR_BLE_BRIDGE_WIFI */
+
 	(void)send_control_response(conn, "ERR unknown command\r\n");
 	return true;
+#else
+	ARG_UNUSED(conn);
+	ARG_UNUSED(data);
+	ARG_UNUSED(len);
+	return false;
+#endif
+}
+
+static bool handle_control_command(struct bt_conn *conn, const uint8_t *data,
+				   uint16_t len)
+{
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_CONTROL_COMMANDS)
+	if (control_frame_expected > 0 &&
+	    k_uptime_get() - control_frame_started_at > 2000) {
+		control_frame_expected = 0;
+		control_frame_received = 0;
+	}
+
+	if (control_frame_expected > 0) {
+		uint16_t remaining = control_frame_expected - control_frame_received;
+
+		if (len > remaining) {
+			control_frame_expected = 0;
+			control_frame_received = 0;
+			(void)send_control_response(conn, "ERR malformed control frame\r\n");
+			return true;
+		}
+
+		memcpy(control_frame_data + control_frame_received, data, len);
+		control_frame_received += len;
+		if (control_frame_received == control_frame_expected) {
+			uint16_t complete_len = control_frame_expected;
+
+			control_frame_expected = 0;
+			control_frame_received = 0;
+			return handle_control_command_complete(conn, control_frame_data,
+							       complete_len);
+		}
+		return true;
+	}
+
+	if (len >= 4 && !memcmp(data, CONTROL_FRAME_PREFIX,
+				      strlen(CONTROL_FRAME_PREFIX))) {
+		const uint8_t *colon = memchr(data + 2, ':', len - 2);
+		uint32_t expected = 0;
+		size_t header_len;
+		size_t payload_len;
+
+		if (!colon || colon == data + 2) {
+			(void)send_control_response(conn, "ERR malformed control frame\r\n");
+			return true;
+		}
+		for (const uint8_t *p = data + 2; p < colon; p++) {
+			uint32_t digit;
+
+			if (*p < '0' || *p > '9') {
+				(void)send_control_response(conn,
+							    "ERR malformed control frame\r\n");
+				return true;
+			}
+			digit = (uint32_t)(*p - '0');
+			if (expected > (sizeof(control_frame_data) - 1U - digit) / 10U) {
+				(void)send_control_response(conn,
+							    "ERR command too long\r\n");
+				return true;
+			}
+			expected = expected * 10U + digit;
+			if (expected >= sizeof(control_frame_data)) {
+				(void)send_control_response(conn,
+							    "ERR command too long\r\n");
+				return true;
+			}
+		}
+
+		header_len = (size_t)(colon - data) + 1U;
+		payload_len = len - header_len;
+		if (expected == 0 || payload_len > expected) {
+			(void)send_control_response(conn, "ERR malformed control frame\r\n");
+			return true;
+		}
+
+		memcpy(control_frame_data, data + header_len, payload_len);
+		control_frame_expected = (uint16_t)expected;
+		control_frame_received = (uint16_t)payload_len;
+		control_frame_started_at = k_uptime_get();
+		if (control_frame_received == control_frame_expected) {
+			uint16_t complete_len = control_frame_expected;
+
+			control_frame_expected = 0;
+			control_frame_received = 0;
+			return handle_control_command_complete(conn, control_frame_data,
+							       complete_len);
+		}
+		return true;
+	}
+
+	return handle_control_command_complete(conn, data, len);
 #else
 	ARG_UNUSED(conn);
 	ARG_UNUSED(data);
@@ -789,24 +1195,10 @@ static void write_loopback_marker(bool ok, unsigned int pass_count,
 		.rx_len = rx_len,
 		.expected_len = expected_len,
 	};
-	int err;
+	int err = write_test_marker(&marker, sizeof(marker), "Loopback");
 
-	if (!device_is_ready(flash_dev)) {
-		LOG_ERR("Flash device is not ready");
-		return;
-	}
-
-	err = flash_erase(flash_dev, LOOPBACK_MARKER_OFFSET,
-			  LOOPBACK_MARKER_SECTOR_SIZE);
 	if (err) {
-		LOG_ERR("Loopback marker erase failed: %d", err);
-		return;
-	}
-
-	err = flash_write(flash_dev, LOOPBACK_MARKER_OFFSET, &marker,
-			  sizeof(marker));
-	if (err) {
-		LOG_ERR("Loopback marker write failed: %d", err);
+		LOG_WRN("Loopback marker update failed: %d", err);
 	}
 }
 #endif
@@ -831,10 +1223,10 @@ static void ble_to_uart_thread(void)
 static int nus_send_conn(struct bt_conn *conn, const uint8_t *data, uint16_t len)
 {
 	uint16_t mtu_payload = bt_gatt_get_mtu(conn) - 3;
+	uint16_t acl_payload = CONFIG_BT_BUF_ACL_TX_SIZE > 7 ?
+			       CONFIG_BT_BUF_ACL_TX_SIZE - 7 : 1;
 
-	if (mtu_payload == 0) {
-		mtu_payload = 20;
-	}
+	mtu_payload = MIN(MAX(mtu_payload, 1), acl_payload);
 
 	while (len > 0) {
 		uint16_t chunk_len = MIN(len, mtu_payload);
@@ -856,6 +1248,7 @@ static int nus_send_conn(struct bt_conn *conn, const uint8_t *data, uint16_t len
 	return 0;
 }
 
+#if !IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY)
 static int nus_send_chunk(const uint8_t *data, uint16_t len)
 {
 	struct bt_conn *conn;
@@ -877,44 +1270,36 @@ static int nus_send_chunk(const uint8_t *data, uint16_t len)
 	bt_conn_unref(conn);
 	return err;
 }
+#endif
 
-static bool control_response_flush(uint8_t *data)
+static void control_response_thread(void)
 {
-	struct bt_conn *conn = NULL;
-	uint16_t len;
-	int err;
+	struct control_response response;
 
-	if (!control_response_peek(data, &len, &conn)) {
-		return false;
-	}
-	if (conn) {
-		bt_conn_unref(conn);
-		conn = NULL;
-	}
+	for (;;) {
+		int err = -ENOTCONN;
 
-	k_sleep(K_MSEC(200));
-	if (!control_response_peek(data, &len, &conn)) {
-		return false;
-	}
-	if (!conn) {
-		LOG_WRN("Control notify skipped; no command connection");
-		return true;
-	}
+		k_msgq_get(&control_response_queue, &response, K_FOREVER);
+		/* Let the CCC write settle before sending the first notification. */
+		k_sleep(K_MSEC(200));
 
-	for (int retry = 0; retry < 5; retry++) {
-		err = nus_send_conn(conn, data, len);
-		if (err == 0) {
-			control_response_clear();
-			bt_conn_unref(conn);
-			return true;
+		if (!response.conn) {
+			continue;
 		}
-
-		LOG_WRN("Control notify failed: %d", err);
-		k_sleep(K_MSEC(100));
+		for (int retry = 0; retry < 5; retry++) {
+			err = nus_send_conn(response.conn, response.data, response.len);
+			if (!err) {
+				break;
+			}
+			k_sleep(K_MSEC(50));
+		}
+		if (err) {
+			LOG_WRN("Control notify failed: %d", err);
+		} else {
+			LOG_INF("Control notify sent: %u bytes", response.len);
+		}
+		bt_conn_unref(response.conn);
 	}
-
-	bt_conn_unref(conn);
-	return true;
 }
 
 static void uart_to_ble_thread(void)
@@ -927,7 +1312,6 @@ static void uart_to_ble_thread(void)
 	}
 #else
 	uint8_t buf[UART_RX_CHUNK];
-	uint8_t control_buf[sizeof(control_response_data)];
 	size_t len = 0;
 	int64_t last_rx = 0;
 
@@ -937,11 +1321,6 @@ static void uart_to_ble_thread(void)
 		uint32_t dropped;
 		uint32_t got;
 		unsigned int key;
-
-		if (control_response_flush(control_buf)) {
-			len = 0;
-			continue;
-		}
 
 		dropped = atomic_set(&uart_rx_dropped, 0);
 		if (dropped) {
@@ -959,6 +1338,7 @@ static void uart_to_ble_thread(void)
 			last_rx = k_uptime_get();
 
 			if (len == sizeof(buf)) {
+				linkr_log_feed(buf, len);
 				(void)nus_send_chunk(buf, len);
 				len = 0;
 			}
@@ -968,6 +1348,7 @@ static void uart_to_ble_thread(void)
 
 		if (len > 0 &&
 		    k_uptime_get() - last_rx >= CONFIG_LINKR_BLE_BRIDGE_UART_IDLE_MS) {
+			linkr_log_feed(buf, len);
 			(void)nus_send_chunk(buf, len);
 			len = 0;
 		}
@@ -1106,6 +1487,8 @@ K_THREAD_DEFINE(ble_to_uart_tid, 1024, ble_to_uart_thread, NULL, NULL, NULL,
 		7, 0, 0);
 K_THREAD_DEFINE(uart_to_ble_tid, 2048, uart_to_ble_thread, NULL, NULL, NULL,
 		7, 0, 0);
+K_THREAD_DEFINE(control_response_tid, 1024, control_response_thread,
+		NULL, NULL, NULL, 7, 0, 0);
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_TX)
 K_THREAD_DEFINE(uart_test_tx_tid, 1024, uart_test_tx_thread, NULL, NULL, NULL,
 		7, 0, 0);
@@ -1131,7 +1514,6 @@ int main(void)
 	}
 
 	k_mutex_init(&uart_config_lock);
-	k_mutex_init(&control_response_lock);
 #if !IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY)
 	uart_irq_callback_user_data_set(bridge_uart, uart_rx_irq_callback, NULL);
 #endif
@@ -1149,6 +1531,16 @@ int main(void)
 
 	gpio_pin_configure_dt(&activity_led, GPIO_OUTPUT_INACTIVE);
 	k_work_init_delayable(&led_off_work, led_off);
+#endif
+
+#if defined(FACTORY_RESET_NODE)
+	if (factory_reset_requested()) {
+		err = erase_factory_settings();
+		if (err) {
+			LOG_ERR("Factory reset failed: %d", err);
+			return err;
+		}
+	}
 #endif
 
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY)
@@ -1172,6 +1564,37 @@ int main(void)
 	if (err) {
 		LOG_ERR("Bluetooth init failed: %d", err);
 		return err;
+	}
+
+#if IS_ENABLED(CONFIG_BT_SMP)
+	err = bt_conn_auth_cb_register(&auth_callbacks);
+	if (err) {
+		LOG_ERR("BLE auth callback registration failed: %d", err);
+		return err;
+	}
+	err = bt_conn_auth_info_cb_register(&auth_info_callbacks);
+	if (err) {
+		LOG_ERR("BLE auth info callback registration failed: %d", err);
+		return err;
+	}
+#endif
+
+#if IS_ENABLED(CONFIG_SETTINGS)
+	err = settings_subsys_init();
+	if (err) {
+		LOG_ERR("Settings init failed: %d", err);
+		return err;
+	}
+	err = settings_load();
+	if (err) {
+		LOG_ERR("Settings load failed: %d", err);
+		return err;
+	}
+#endif
+
+	err = linkr_wifi_init();
+	if (err) {
+		LOG_WRN("WiFi init failed: %d (WiFi disabled)", err);
 	}
 
 	advertise_schedule(K_NO_WAIT);

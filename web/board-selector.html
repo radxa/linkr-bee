@@ -1,0 +1,440 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>开发板选型</title>
+  <style>
+    :root {
+      --bg: #f4f7fb;
+      --surface: #ffffff;
+      --text: #16233b;
+      --muted: #5b6680;
+      --line: #dbe3ef;
+      --primary: #1474ff;
+      --primary-soft: #e9f2ff;
+      --ok: #0ca678;
+      --bad: #f03e3e;
+      --radius: 12px;
+      --shadow: 0 8px 24px rgba(20, 45, 80, 0.08);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.45;
+    }
+    .container { max-width: 1180px; margin: 0 auto; padding: 16px; }
+    .top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .logo {
+      width: 34px;
+      height: 34px;
+      border-radius: 9px;
+      background: linear-gradient(135deg, #1976ff, #59a0ff);
+      color: #fff;
+      display: grid;
+      place-items: center;
+      font-weight: 700;
+      font-size: 13px;
+    }
+    h1 { margin: 0; font-size: 22px; }
+    .actions button, .btn {
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 10px;
+      padding: 9px 13px;
+      font-size: 14px;
+      cursor: pointer;
+      min-height: 40px;
+    }
+    .btn-primary {
+      background: var(--primary);
+      border-color: var(--primary);
+      color: #fff;
+      font-weight: 600;
+    }
+    .layout { display: grid; grid-template-columns: 320px 1fr 320px; gap: 16px; align-items: start; }
+    .panel, .list, .cart {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 12px;
+    }
+    .section { margin-bottom: 14px; padding-bottom: 12px; border-bottom: 1px dashed #e5ebf5; }
+    .section:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+    .section h2 { margin: 0 0 8px; font-size: 15px; }
+    .chip-wrap, .row { display: flex; flex-wrap: wrap; gap: 8px; }
+    .chip {
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 999px;
+      padding: 7px 12px;
+      cursor: pointer;
+      min-height: 34px;
+      font-size: 13px;
+    }
+    .chip[aria-pressed="true"] {
+      border-color: #97c9ff;
+      background: var(--primary-soft);
+      color: #0b4f9e;
+      font-weight: 600;
+    }
+    .field { margin: 10px 0; }
+    label { display: block; margin-bottom: 7px; font-size: 13px; color: var(--muted); }
+    select, input[type="number"] {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px;
+      font-size: 14px;
+    }
+    .bar {
+      position: sticky;
+      top: 10px;
+      padding: 10px;
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      border-bottom-left-radius: 0;
+      border-bottom-right-radius: 0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin: -12px -12px 12px;
+      flex-wrap: wrap;
+    }
+    .meta { color: var(--muted); font-size: 13px; }
+    .row-card {
+      border: 1px solid #edf1f8;
+      border-radius: 10px;
+      padding: 12px;
+      margin-bottom: 10px;
+    }
+    .row-top { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; }
+    .name { font-size: 16px; margin: 0 0 4px; }
+    .sub { margin: 0; color: var(--muted); font-size: 13px; }
+    .score { font-size: 13px; background: var(--primary-soft); color: #0b4f9a; border: 1px solid #b7d9ff; border-radius: 999px; padding: 5px 10px; }
+    .tags { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 8px; }
+    .tag {
+      border: 1px solid #dce4f2;
+      border-radius: 999px;
+      font-size: 12px;
+      padding: 4px 9px;
+      background: #f8fbff;
+      color: #4b5a73;
+    }
+    .grid3 {
+      margin-top: 8px;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+    }
+    .mini {
+      border: 1px solid #f0f3f9;
+      border-radius: 8px;
+      padding: 7px;
+      background: #f9fbff;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .mini strong { color: var(--text); font-size: 13px; display: block; margin-bottom: 2px; }
+    .inline-btns { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
+    .success { color: var(--ok); }
+    .danger { color: var(--bad); }
+    .cart ul { list-style: none; margin: 0; padding: 0; }
+    .cart li { border: 1px solid #eef2f8; border-radius: 9px; padding: 9px; margin-bottom: 8px; background: #fbfdff; }
+    .empty { color: var(--muted); padding: 20px; text-align: center; }
+    button:focus-visible, .chip:focus-visible, select:focus-visible, input:focus-visible {
+      outline: 2px solid #4ea2ff;
+      outline-offset: 2px;
+    }
+
+    @media (max-width: 1180px) {
+      .layout { grid-template-columns: 1fr; }
+      .cart { position: static; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header class="top">
+      <div class="brand">
+        <div class="logo" aria-hidden="true">BL</div>
+        <h1>开发板选型</h1>
+      </div>
+      <div class="actions">
+        <button id="openExport" class="btn-primary" type="button">导出 CSV</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <aside class="panel">
+        <div class="section">
+          <h2>项目类型</h2>
+          <label><input type="radio" name="project" value="" checked> 不限</label>
+          <label><input type="radio" name="project" value="AIoT"> AIoT</label>
+          <label><input type="radio" name="project" value="工业控制"> 工业控制</label>
+          <label><input type="radio" name="project" value="教育开发"> 教育开发</label>
+          <label><input type="radio" name="project" value="物联网"> 物联网</label>
+        </div>
+
+        <div class="section">
+          <h2>CPU 架构</h2>
+          <div class="chip-wrap">
+            <button class="chip" type="button" data-k="arch" data-v="ARM64">ARM64</button>
+            <button class="chip" type="button" data-k="arch" data-v="ARM32">ARM32</button>
+            <button class="chip" type="button" data-k="arch" data-v="RISC-V">RISC-V</button>
+          </div>
+        </div>
+
+        <div class="section">
+          <h2>外设能力</h2>
+          <div class="chip-wrap">
+            <button class="chip" type="button" data-k="iface" data-v="UART">UART</button>
+            <button class="chip" type="button" data-k="iface" data-v="SPI">SPI</button>
+            <button class="chip" type="button" data-k="iface" data-v="I2C">I2C</button>
+            <button class="chip" type="button" data-k="iface" data-v="CAN">CAN</button>
+            <button class="chip" type="button" data-k="iface" data-v="PCIe">PCIe</button>
+            <button class="chip" type="button" data-k="iface" data-v="GPIO">GPIO</button>
+          </div>
+        </div>
+
+        <div class="section">
+          <h2>无线能力</h2>
+          <div class="chip-wrap">
+            <button class="chip" type="button" data-k="wireless" data-v="Wi-Fi">Wi-Fi</button>
+            <button class="chip" type="button" data-k="wireless" data-v="BLE">BLE</button>
+            <button class="chip" type="button" data-k="wireless" data-v="LTE">LTE</button>
+            <button class="chip" type="button" data-k="wireless" data-v="Ethernet">有线网口</button>
+          </div>
+        </div>
+
+        <div class="section">
+          <h2>电源</h2>
+          <label><input type="checkbox" class="power" value="USB-C"> USB-C</label>
+          <label><input type="checkbox" class="power" value="DC"> DC</label>
+          <label><input type="checkbox" class="power" value="PoE"> PoE</label>
+        </div>
+
+        <div class="section">
+          <h2>价格（元）</h2>
+          <div class="field">
+            <label for="minP">最低价</label>
+            <input id="minP" type="number" min="0" placeholder="0" />
+          </div>
+          <div class="field">
+            <label for="maxP">最高价</label>
+            <input id="maxP" type="number" min="0" placeholder="2000" />
+          </div>
+          <label><input type="checkbox" id="stockOnly"> 只看有现货</label>
+        </div>
+
+        <div class="section">
+          <div class="inline-btns">
+            <button id="apply" type="button" class="btn-primary">应用筛选</button>
+            <button id="reset" type="button">重置</button>
+          </div>
+        </div>
+      </aside>
+
+      <section class="list">
+        <div class="bar">
+          <div>
+            <strong id="count">0</strong> 款可选
+          </div>
+          <div class="meta">
+            <label for="sort">排序：</label>
+            <select id="sort">
+              <option value="match">匹配度</option>
+              <option value="priceAsc">价格低→高</option>
+              <option value="priceDesc">价格高→低</option>
+              <option value="stock">有现货优先</option>
+            </select>
+          </div>
+        </div>
+        <div id="listWrap"></div>
+        <div id="empty" class="empty" style="display:none;">没有匹配结果，请放宽筛选条件。</div>
+      </section>
+
+      <aside class="cart">
+        <h2>我的清单（<span id="pickCount">0</span>）</h2>
+        <ul id="pickList"></ul>
+      </aside>
+    </main>
+  </div>
+
+  <script>
+    const boardData = [
+      { id: "RADX1", name: "Radxa-RK3568 开发套件", soc: "RK3568", arch: "ARM64", project: "AIoT", ram: "4GB", storage: "16GB", wireless: ["Wi-Fi", "BLE"], iface: ["UART","SPI","I2C","CAN","GPIO"], power: ["USB-C","DC"], price: 249, stock: "有现货", lead: 0 },
+      { id: "TINY1", name: "Tiny-Edge RV1106 工业板", soc: "RV1106", arch: "RISC-V", project: "工业控制", ram: "2GB", storage: "16GB", wireless: ["Wi-Fi", "BLE"], iface: ["UART","I2C","SPI","GPIO"], power: ["DC"], price: 329, stock: "有现货", lead: 0 },
+      { id: "MESH2", name: "MESH-K AIoT 模组板", soc: "RK3588", arch: "ARM64", project: "AIoT", ram: "8GB", storage: "64GB", wireless: ["Wi-Fi", "BLE", "LTE"], iface: ["PCIe", "CAN", "GPIO", "SPI"], power: ["DC", "PoE"], price: 899, stock: "5天", lead: 5 },
+      { id: "EDU9", name: "教育教学入门板", soc: "RK3308", arch: "ARM64", project: "教育开发", ram: "1GB", storage: "4GB", wireless: ["Wi-Fi","BLE"], iface: ["UART","I2C","GPIO"], power: ["USB-C"], price: 98, stock: "有现货", lead: 0 },
+      { id: "IO10", name: "工业网关控制板", soc: "i.MX93", arch: "ARM32", project: "工业控制", ram: "2GB", storage: "16GB", wireless: ["Ethernet","CAN"], iface: ["CAN","UART","PCIe","I2C"], power: ["DC","PoE"], price: 599, stock: "缺货", lead: 20 },
+      { id: "VIO11", name: "物联小白盒", soc: "RK3566", arch: "ARM64", project: "物联网", ram: "2GB", storage: "8GB", wireless: ["Wi-Fi","BLE"], iface: ["UART","SPI","I2C"], power: ["USB-C","DC"], price: 168, stock: "有现货", lead: 0 }
+    ];
+
+    const st = {
+      project: "", arch: new Set(), iface: new Set(), wireless: new Set(), power: new Set(),
+      minP: "", maxP: "", stockOnly: false, sort: "match", picks: new Set()
+    };
+
+    const nodes = {
+      listWrap: document.getElementById("listWrap"),
+      empty: document.getElementById("empty"),
+      count: document.getElementById("count"),
+      pickCount: document.getElementById("pickCount"),
+      pickList: document.getElementById("pickList")
+    };
+
+    function chipPressed(btn, kind, v) {
+      if (st[kind].has(v)) st[kind].delete(v); else st[kind].add(v);
+      btn.setAttribute("aria-pressed", st[kind].has(v) ? "true" : "false");
+      render();
+    }
+
+    function score(board) {
+      const checks = [];
+      if (st.project) checks.push({ pass: board.project === st.project });
+      if (st.arch.size) checks.push({ pass: st.arch.has(board.arch) });
+      if (st.iface.size) checks.push({ pass: [...st.iface].some(x => board.iface.includes(x)) });
+      if (st.wireless.size) checks.push({ pass: [...st.wireless].some(x => board.wireless.includes(x)) });
+      if (st.power.size) checks.push({ pass: [...st.power].some(x => board.power.includes(x)) });
+      if (st.minP !== "") checks.push({ pass: board.price >= Number(st.minP) });
+      if (st.maxP !== "") checks.push({ pass: board.price <= Number(st.maxP) });
+      if (st.stockOnly) checks.push({ pass: board.stock === "有现货" });
+
+      const total = checks.length || 1;
+      const hit = checks.filter(c => c.pass).length;
+      return { passAll: checks.every(c => c.pass), match: Math.round((hit / total) * 100) };
+    }
+
+    function setCard() {}
+
+    function render() {
+      const result = boardData.map(b => {
+        const m = score(b);
+        return { ...b, match: m.match, show: m.passAll };
+      }).filter(b => b.show);
+
+      if (st.sort === "match") result.sort((a,b)=>b.match-a.match);
+      if (st.sort === "priceAsc") result.sort((a,b)=>a.price-b.price);
+      if (st.sort === "priceDesc") result.sort((a,b)=>b.price-a.price);
+      if (st.sort === "stock") result.sort((a,b)=>Number(b.stock==="有现货")-Number(a.stock==="有现货"));
+
+      nodes.count.textContent = result.length;
+      nodes.listWrap.innerHTML = "";
+      if (!result.length) { nodes.empty.style.display = "block"; return; }
+      nodes.empty.style.display = "none";
+      for (const b of result) {
+        const node = document.createElement("article");
+        node.className = "row-card";
+        const selected = st.picks.has(b.id);
+        node.innerHTML = `
+          <div class="row-top">
+            <div>
+              <h3 class="name">${b.name}</h3>
+              <p class="sub">${b.soc} · ${b.arch} · ${b.ram} · ${b.storage}</p>
+            </div>
+            <span class="score">匹配度 ${b.match}%</span>
+          </div>
+          <div class="tags">
+            ${b.wireless.map(t => `<span class="tag">${t}</span>`).join("")}
+            ${b.iface.map(t => `<span class="tag">${t}</span>`).join("")}
+            ${b.power.map(t => `<span class="tag">${t}</span>`).join("")}
+          </div>
+          <div class="grid3">
+            <div class="mini"><strong>价格</strong>¥ ${b.price}</div>
+            <div class="mini"><strong>场景</strong>${b.project}</div>
+            <div class="mini"><strong>库存</strong><span class="${b.stock === "有现货" ? "success":"danger"}">${b.stock}</span></div>
+          </div>
+          <div class="inline-btns">
+            <button class="btn" data-id="${b.id}" data-a="${selected}" type="button">${selected ? "已加入清单" : "加入清单"}</button>
+          </div>`;
+        nodes.listWrap.appendChild(node);
+      }
+      nodes.listWrap.querySelectorAll("button[data-id]").forEach(btn => {
+        btn.addEventListener("click", () => {
+          const id = btn.dataset.id;
+          if (st.picks.has(id)) st.picks.delete(id); else st.picks.add(id);
+          renderList();
+          render();
+        });
+      });
+      renderList();
+    }
+
+    function renderList() {
+      nodes.pickCount.textContent = st.picks.size;
+      nodes.pickList.innerHTML = "";
+      boardData.filter(b => st.picks.has(b.id)).forEach(b => {
+        const li = document.createElement("li");
+        li.innerHTML = `<strong>${b.name}</strong><div style="font-size:12px;color:#52607c;">${b.soc} / ${b.ram} / ¥ ${b.price}</div>`;
+        nodes.pickList.appendChild(li);
+      });
+    }
+
+    function resetAll() {
+      st.project = "";
+      st.arch.clear(); st.iface.clear(); st.wireless.clear(); st.power.clear();
+      st.minP = ""; st.maxP = ""; st.stockOnly = false;
+      document.getElementById("minP").value = "";
+      document.getElementById("maxP").value = "";
+      document.getElementById("stockOnly").checked = false;
+      document.querySelectorAll("input[name='project']").forEach(r => { if (r.value === "") r.checked = true; });
+      document.querySelectorAll(".power").forEach(cb => cb.checked = false);
+      document.querySelectorAll(".chip").forEach(ch => ch.setAttribute("aria-pressed", "false"));
+      document.querySelectorAll(".chip, .btn-primary, button").forEach(x => x.blur());
+      render();
+    }
+
+    document.querySelectorAll(".chip").forEach(btn => {
+      btn.addEventListener("click", () => chipPressed(btn, btn.dataset.k, btn.dataset.v));
+    });
+    document.querySelectorAll("input[name='project']").forEach(r => {
+      r.addEventListener("change", e => { st.project = e.target.value; render(); });
+    });
+    document.querySelectorAll(".power").forEach(ch => {
+      ch.addEventListener("change", e => {
+        if (e.target.checked) st.power.add(e.target.value); else st.power.delete(e.target.value);
+        render();
+      });
+    });
+    document.getElementById("minP").addEventListener("input", e => { st.minP = e.target.value; render(); });
+    document.getElementById("maxP").addEventListener("input", e => { st.maxP = e.target.value; render(); });
+    document.getElementById("stockOnly").addEventListener("change", e => { st.stockOnly = e.target.checked; render(); });
+    document.getElementById("sort").addEventListener("change", e => { st.sort = e.target.value; render(); });
+    document.getElementById("apply").addEventListener("click", render);
+    document.getElementById("reset").addEventListener("click", resetAll);
+    document.getElementById("openExport").addEventListener("click", () => {
+      const picks = boardData.filter(b => st.picks.has(b.id));
+      if (!picks.length) { alert("清单为空"); return; }
+      const header = ["name","soc","arch","price","project","stock","wireless","iface","power","ram","storage"];
+      const rows = picks.map(b => [b.name,b.soc,b.arch,b.price,b.project,b.stock,b.wireless.join("|"),b.iface.join("|"),b.power.join("|"),b.ram,b.storage]);
+      const csv = [header.join(",")].concat(rows.map(r => r.map(v=>`"${String(v).replaceAll('"','""')}"`).join(","))).join("\n");
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "board_selection.csv";
+      a.click();
+      URL.revokeObjectURL(a.href);
+    });
+
+    render();
+  </script>
+</body>
+</html>

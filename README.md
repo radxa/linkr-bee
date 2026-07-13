@@ -1,5 +1,7 @@
 # Linkr BLE UART Bridge
 
+> 中文文档：[README.zh-CN.md](README.zh-CN.md)
+
 Zephyr application for an ESP32-C3 BLE serial bridge.  The first milestone is a
 plain Bluetooth LE UART window:
 
@@ -10,9 +12,20 @@ plain Bluetooth LE UART window:
 
 The Linkr card/device integration is intentionally left for a later layer.
 
+## Supported environment
+
+- Firmware: ESP32-C3 DevKitM, DevKitC, and Super Mini
+- Zephyr: **v4.4.1**
+- Default feature set: BLE UART bridge, WiFi station control, and anonymous
+  HTTP WebDAV log upload
+- BLE-only feature set: `CONFIG_LINKR_BLE_BRIDGE_WIFI=n`
+
 ## Build
 
-From a Zephyr workspace:
+Use a Zephyr v4.4.1 west workspace. The default WiFi-enabled build also needs
+the Espressif HAL blobs (`modules/hal_espressif`) present in the manifest.
+
+From that workspace:
 
 ```sh
 west build -b esp32c3_devkitm /Users/xiangzelong/Dev/linkr-ble
@@ -42,6 +55,7 @@ On `esp32c3_supermini`, `uart0` is enabled for bridge traffic:
 - RX: GPIO20
 - TX: GPIO21
 - Activity LED: GPIO8 blue LED, flashed on UART RX and TX activity
+- Factory reset: GPIO0, internally pulled up; short it to GND during boot
 
 ## SBC UART settings
 
@@ -82,9 +96,156 @@ OK uart=115200,8,N,1,none
 ERR format: @u=115200,8,n,1,n
 ```
 
+## WiFi and WebDAV log upload
+
+The WiFi + WebDAV feature is **enabled by default** through
+`CONFIG_LINKR_BLE_BRIDGE_WIFI=y`. The radio stays off until the user sends
+`@w=ssid,pass`. Its Kconfig option selects the networking, WiFi, DNS, and HTTP
+dependencies; a BLE-only build removes all of them:
+
+```sh
+west build -p always -b esp32c3_supermini /Users/xiangzelong/Dev/linkr-ble -- \
+  -DCONFIG_LINKR_BLE_BRIDGE_WIFI=n
+```
+
+WiFi credentials are RAM-only by default and are discarded on reboot. Set
+`CONFIG_LINKR_BLE_BRIDGE_PERSIST_CREDENTIALS=y` only on production devices
+that have both secure boot and flash encryption provisioned: the PSK is stored
+in Zephyr settings/NVS and is otherwise recoverable from flash. With that
+explicit option, saved credentials reconnect on boot. The anonymous WebDAV URL
+and the upload boot counter are persisted independently so upload filenames do
+not collide after reboot.
+
+A normal build already includes it:
+
+```sh
+west build -b esp32c3_supermini /Users/xiangzelong/Dev/linkr-ble
+```
+
+The ESP32-C3 SoC WiFi driver is `CONFIG_WIFI_ESP32` (defined in
+`drivers/wifi/esp32/Kconfig.esp32`), which auto-selects the L2/ethernet/mgmt
+layers and MBEDTLS. STA mode is the `CONFIG_WIFI_USAGE_MODE_STA` choice.
+
+Two workspace prerequisites (not Kconfig):
+
+- `modules/hal_espressif` must be in the west manifest — `CONFIG_WIFI_ESP32`
+  depends on `ZEPHYR_HAL_ESPRESSIF_MODULE_BLOBS`.
+- The board's devicetree must enable the `wifi` node. `esp32c3_devkitm` and
+  `esp32c3_devkitc` already do `&wifi { status = "okay"; };` in their board
+  DTS; `boards/esp32c3_supermini.overlay` adds it for the Super Mini.
+
+The application code in `src/wifi.c` uses the standard `net_mgmt` /
+`wifi_mgmt` APIs (`NET_REQUEST_WIFI_CONNECT`, `NET_EVENT_WIFI_CONNECT_RESULT`)
+and starts DHCPv4 itself on connect, so no `CONFIG_NET_CONFIG_AUTO_INIT` is
+needed.
+
+### BLE pairing, owner, persistence, and factory reset
+
+Pairing protects the **management plane**, not the general NUS UART stream.
+Every WiFi or WebDAV command, including `@w?` and `@d?`, requires BLE Security
+Level 3 (encrypted and authenticated with MITM protection). If the connection
+is below that level, the firmware starts a security upgrade, returns a pairing
+required response, and the caller must complete pairing then retry the command.
+Raw NUS UART traffic and `@u...` UART configuration are deliberately outside
+this gate; do not attach a sensitive console unless that access model is
+acceptable.
+
+On the first pairing, a six-digit passkey is printed on the bridge's USB serial
+console and must be entered on the central. The resulting BLE bond is stored in
+Zephyr settings/NVS. The firmware treats the presence of *any* bond as an
+owner: it accepts one bonded central and rejects every new pairing request.
+This also means that deleting the device from the owner's phone or computer
+does not release ownership on the bridge; use factory reset before moving to a
+new owner.
+
+| Item | Default / persistence rule | Clear or transfer |
+| --- | --- | --- |
+| BLE bond and owner | Always persisted by `CONFIG_BT_SETTINGS` in NVS | GPIO0 factory reset only; no BLE command unpairs the owner |
+| WiFi SSID/PSK | RAM-only by default; `CONFIG_LINKR_BLE_BRIDGE_PERSIST_CREDENTIALS=y` saves it and reconnects on boot | `@w off` disables it and disconnects; factory reset erases it |
+| WebDAV target | Anonymous URL is persisted independently of WiFi credential persistence | `@d off` disables it; factory reset erases it |
+| Upload boot ID | Persisted when the uploader reserves a new boot ID, preventing filename reuse after reboot | Factory reset erases it |
+
+Saved WiFi and WebDAV configurations are single versioned settings records;
+invalid or unsafe saved records are ignored at boot. The credential-persistence
+Kconfig option is a deployment promise, not a runtime check: enable it only
+after secure boot and flash encryption have actually been provisioned. On an
+unencrypted device, an SSID/PSK written to NVS can be recovered from flash.
+`@w off` is a functional clear, not a validated secure-flash wipe; use factory
+reset before disposal or ownership transfer.
+
+To factory-reset a physical unit, reset or power-cycle it with **GPIO0 shorted
+to GND** and keep the short in place for two seconds. The firmware erases the
+entire `storage_partition` before Bluetooth or settings load, clearing the BLE
+owner/bond, Bluetooth identity data, Linkr WiFi/WebDAV configuration, and the
+upload boot counter. The device then starts unowned and may advertise with a
+regenerated BLE identity. Do not tie GPIO0 to GND permanently, and treat access
+to that pad or switch as access to factory reset. It does not erase firmware,
+the test-marker partition, or coredump storage.
+
+The Python tool pairs automatically for WiFi/WebDAV actions (or use `--pair`);
+the C tool needs a running BlueZ pairing agent; Web Bluetooth shows the
+browser's native pairing prompt, then the action must be retried. BLE pairing
+does not encrypt the subsequent WebDAV upload: the current uploader accepts
+anonymous HTTP only, so use it solely on a trusted local network.
+
+UART RX bytes are buffered and periodically HTTP-PUT to
+`<webdav_url>log-<boot-id>-<sequence>-<uptime>.txt`. Upload waits for an IPv4
+address, retries connection failures, keeps a failed batch name stable, and
+discards queued bytes if its target is changed or disabled.
+
+Control commands (short form fits the default 20-byte BLE write before MTU
+exchange):
+
+```text
+@w?                          query WiFi status
+@w=MySSID,secret             join WiFi (RAM-only unless persistence is enabled)
+@w off                       clear WiFi configuration and disconnect
+@d?                          query WebDAV status
+@d=http://host/dav/             set anonymous WebDAV target and enable upload
+@d off                       disable WebDAV upload
+```
+
+Long forms `@linkr wifi?`, `@linkr wifi=...`, `@linkr webdav=...` are also
+accepted. Responses come back over the NUS TX notification characteristic:
+
+```text
+OK wifi=connected,ssid=MySSID
+OK webdav=on,url=http://host/dav/
+```
+
+From the Python terminal:
+
+```sh
+python3 tools/linkr_ble_terminal.py --wifi MySSID,secret --query-wifi
+python3 tools/linkr_ble_terminal.py --webdav http://host/dav/
+```
+
+Configuration commands are carried in a length-prefixed `@!<bytes>:` frame by
+the supplied Python, C, and web clients, so SSIDs, PSKs, and long URLs remain
+one atomic command even when BLE splits them across ATT writes. Legacy short
+commands are still accepted directly.
+
+The uploader accepts anonymous HTTP endpoints only. It rejects Basic Auth
+credentials because sending them over plain HTTP would expose them on the
+network. Use this mode only on a trusted local network; authenticated or
+internet-facing deployments require a future HTTPS build with a provisioned CA
+trust anchor.
+
+The Web Bluetooth terminal exposes the same controls as `Set WiFi` /
+`WiFi ?` / `Set WebDAV` / `WebDAV ?` buttons, and the C reference terminal
+accepts `--wifi`, `--wifi-off`, `--query-wifi`, `--webdav`, `--webdav-off`,
+`--query-webdav`.
+
 ## Test options
 
 All test options default to off.
+
+Run the repeatable local regression check (WiFi build, BLE-only build, Python
+syntax, and shell syntax) with:
+
+```sh
+tools/verify.sh
+```
 
 Enable UART RX echo loopback:
 
@@ -102,6 +263,24 @@ option before building:
 - `CONFIG_LINKR_BLE_BRIDGE_TEST_UART_TX_INTERVAL_MS=1000`
 - `CONFIG_LINKR_BLE_BRIDGE_TEST_UART_TX_PAYLOAD="linkr-ble-uart-test\r\n"`
 
+Build the hardware loopback verifier after shorting UART0 TX (GPIO21) to RX
+(GPIO20):
+
+```sh
+west build -p always -b esp32c3_devkitm /Users/xiangzelong/Dev/linkr-ble -- \
+  -DEXTRA_CONF_FILE=test_loopback.conf
+```
+
+For a BLE-only NUS echo diagnostic (no UART wiring required):
+
+```sh
+west build -p always -b esp32c3_supermini /Users/xiangzelong/Dev/linkr-ble -- \
+  -DEXTRA_CONF_FILE=test_ble_echo.conf
+```
+
+Both diagnostic modes use the dedicated `linkr-test-marker` flash partition;
+they do not write the ESP32-C3 coredump sector.
+
 ## BLE protocol
 
 This uses Zephyr's built-in Nordic UART Service:
@@ -110,12 +289,10 @@ This uses Zephyr's built-in Nordic UART Service:
 - RX write characteristic: `6e400002-b5a3-f393-e0a9-e50e24dcca9e`
 - TX notify characteristic: `6e400003-b5a3-f393-e0a9-e50e24dcca9e`
 
-The firmware is configured for larger BLE packets:
-
-- ATT/L2CAP MTU: 247
-- ACL TX/RX size: 251
-- LE Data Length Update: enabled
-- effective NUS payload after MTU exchange: up to 244 bytes per write/notify
+The checked-in default configuration negotiates an ATT/L2CAP MTU of 65 with an
+ACL TX buffer of 27. Its effective NUS payload is therefore at most **62 bytes
+per write/notification**. The firmware segments UART bursts accordingly, and
+the supplied Python, C, and Web Bluetooth clients cap their writes at 62 bytes.
 
 The final packet size still depends on the BLE central.  The host terminal
 prints the negotiated write chunk size when it connects.

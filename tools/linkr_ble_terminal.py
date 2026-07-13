@@ -135,14 +135,16 @@ async def find_device(name: str, address: str | None, timeout: float):
     raise RuntimeError(f"device not found matching: {prefix + '*'}")
 
 
-async def ble_write(client: BleakClient, data: bytes, cfg: TerminalConfig) -> None:
+async def ble_write(client: BleakClient, data: bytes, cfg: TerminalConfig,
+                    sensitive: bool = False) -> None:
     if cfg.write_size <= 0:
         cfg.write_size = 20
 
     for offset in range(0, len(data), cfg.write_size):
         chunk = data[offset:offset + cfg.write_size]
         if cfg.debug_io:
-            stderr(f"TX {chunk!r}")
+            stderr(f"TX <redacted {len(chunk)} bytes>" if sensitive else
+                   f"TX {chunk!r}")
         await client.write_gatt_char(NUS_RX_UUID, chunk, response=cfg.write_response)
         if cfg.write_delay:
             await asyncio.sleep(cfg.write_delay)
@@ -150,21 +152,21 @@ async def ble_write(client: BleakClient, data: bytes, cfg: TerminalConfig) -> No
 
 async def send_control(client: BleakClient, command: bytes, cfg: TerminalConfig,
                        delay: float = 0.8) -> None:
-    if len(command) > cfg.write_size:
-        raise RuntimeError(
-            f"control command is {len(command)} bytes, larger than BLE write size "
-            f"{cfg.write_size}; use short @u form or increase --ble-write-size"
-        )
+    if command.startswith((b"@w=", b"@d=")):
+        stderr(f"control -> {command[:2].decode()}=<redacted>")
+    else:
+        stderr(f"control -> {command.decode(errors='replace')}")
 
-    stderr(f"control -> {command.decode(errors='replace')}")
-    await ble_write(client, command, cfg)
+    frame = f"@!{len(command)}:".encode() + command
+    await ble_write(client, frame, cfg,
+                    sensitive=command.startswith((b"@w=", b"@d=")))
     await asyncio.sleep(delay)
 
 
 def configure_ble_write_size(client: BleakClient, cfg: TerminalConfig,
                              requested_size: int) -> None:
     if requested_size > 0:
-        cfg.write_size = requested_size
+        cfg.write_size = min(requested_size, 62)
         stderr(f"BLE write chunk size: {cfg.write_size} bytes (manual)")
         return
 
@@ -174,7 +176,8 @@ def configure_ble_write_size(client: BleakClient, cfg: TerminalConfig,
     except Exception:
         size = 20
 
-    cfg.write_size = max(20, min(int(size or 20), 244))
+    # The default firmware negotiates ATT MTU 65, i.e. 62-byte NUS writes.
+    cfg.write_size = max(20, min(int(size or 20), 62))
     stderr(f"BLE write chunk size: {cfg.write_size} bytes")
 
 
@@ -267,10 +270,19 @@ async def terminal_loop(client: BleakClient, cfg: TerminalConfig) -> None:
 async def run(args: argparse.Namespace) -> None:
     if args.scan:
         await scan_devices(args.timeout)
-        if args.no_terminal and not args.query_uart and not args.uart:
+        has_control_action = any((
+            args.query_uart, args.uart, args.wifi, args.wifi_off,
+            args.query_wifi, args.webdav, args.webdav_off,
+            args.query_webdav, args.loopback_test is not None,
+        ))
+        if args.no_terminal and not has_control_action:
             return
 
     target = await find_device(args.name, args.address, args.timeout)
+    needs_pairing = args.pair or any((
+        args.wifi, args.wifi_off, args.query_wifi, args.webdav,
+        args.webdav_off, args.query_webdav,
+    ))
     cfg = TerminalConfig(
         escape=args.escape,
         enter=args.enter,
@@ -293,7 +305,7 @@ async def run(args: argparse.Namespace) -> None:
 
     try:
         async with BleakClient(target, disconnected_callback=on_disconnect,
-                               timeout=args.timeout) as client:
+                               timeout=args.timeout, pair=needs_pairing) as client:
             stderr(f"Connected: {client.address}")
 
             def on_notify(_char, data: bytearray) -> None:
@@ -316,6 +328,24 @@ async def run(args: argparse.Namespace) -> None:
 
             if args.query_uart:
                 await send_control(client, b"@u?", cfg)
+
+            if args.wifi:
+                await send_control(client, f"@w={args.wifi}".encode(), cfg)
+
+            if args.wifi_off:
+                await send_control(client, b"@w off", cfg)
+
+            if args.query_wifi:
+                await send_control(client, b"@w?", cfg)
+
+            if args.webdav:
+                await send_control(client, f"@d={args.webdav}".encode(), cfg)
+
+            if args.webdav_off:
+                await send_control(client, b"@d off", cfg)
+
+            if args.query_webdav:
+                await send_control(client, b"@d?", cfg)
 
             if args.loopback_test is not None:
                 payload = args.loopback_test.encode()
@@ -361,6 +391,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout", type=float, default=8.0, help="scan timeout seconds")
     parser.add_argument("--query-uart", action="store_true", help="send @u? before terminal")
     parser.add_argument("--uart", help="set UART as baud,data,parity,stop,flow")
+    parser.add_argument("--wifi", help="connect ESP32 to WiFi as ssid,pass")
+    parser.add_argument("--wifi-off", action="store_true", help="forget saved WiFi")
+    parser.add_argument("--query-wifi", action="store_true", help="send @w? before terminal")
+    parser.add_argument("--webdav", help="set anonymous HTTP WebDAV upload URL")
+    parser.add_argument("--webdav-off", action="store_true", help="disable WebDAV upload")
+    parser.add_argument("--query-webdav", action="store_true", help="send @d? before terminal")
+    parser.add_argument("--pair", action="store_true",
+                        help="pair before opening the terminal (required for WiFi/WebDAV)")
     parser.add_argument("--loopback-test", nargs="?", const="A",
                         help="send payload and require the same bytes back")
     parser.add_argument("--loopback-timeout", type=float, default=3.0,

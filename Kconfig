@@ -1,12 +1,13 @@
 menu "Linkr BLE bridge"
 
 config LINKR_BLE_BRIDGE_UART_RX_CHUNK
-	int "Maximum UART bytes sent in one BLE notification"
+	int "Maximum UART bytes gathered before BLE transmission"
 	default 128
 	range 20 244
 	help
-	  UART data is accumulated up to this many bytes before it is sent over
-	  the Nordic UART Service TX characteristic.
+	  UART data is accumulated up to this many bytes before it is handed to
+	  the Nordic UART Service TX characteristic. It is then segmented to the
+	  negotiated ATT payload size (62 bytes in the default build).
 
 config LINKR_BLE_BRIDGE_UART_IDLE_MS
 	int "UART idle flush timeout in milliseconds"
@@ -169,6 +170,88 @@ config LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_PAYLOAD
 	string "UART loopback verify payload"
 	default "linkr-loopback-test"
 	depends on LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY
+
+config LINKR_BLE_BRIDGE_WIFI
+	bool "Enable WiFi station support"
+	default y
+	select NETWORKING
+	select NET_IPV4
+	select NET_DHCPV4
+	select NET_MGMT
+	select NET_MGMT_EVENT
+	select NET_MGMT_EVENT_INFO
+	select DNS_RESOLVER
+	select WIFI
+	select WIFI_ESP32
+	select HTTP_CLIENT
+	help
+	  Compile in WiFi station management and BLE control commands
+	  (@w/@webdav). The radio stays off until the user configures credentials
+	  via @w=ssid,pass (CLI or web). Disabling this option also removes the
+	  application networking, WiFi, DNS, and HTTP client dependencies.
+
+config LINKR_BLE_BRIDGE_PERSIST_CREDENTIALS
+	bool "Persist WiFi credentials"
+	default n
+	depends on LINKR_BLE_BRIDGE_WIFI
+	help
+	  Save the WiFi SSID and PSK in nonvolatile storage. Leave this disabled
+	  unless the board's flash encryption and secure-boot provisioning are
+	  enabled. When disabled, credentials exist only until reboot.
+
+config LINKR_BLE_BRIDGE_WIFI_RETRY_MS
+	int "WiFi reconnect retry interval in milliseconds"
+	default 10000
+	range 1000 600000
+	depends on LINKR_BLE_BRIDGE_WIFI
+	help
+	  Delay before retrying a configured WiFi connection after a connection
+	  failure or disconnect.
+
+config LINKR_BLE_BRIDGE_WEBDAV
+	bool "Enable WebDAV serial log upload"
+	default y
+	depends on LINKR_BLE_BRIDGE_WIFI
+	help
+	  Periodically upload accumulated UART RX data to a WebDAV server over
+	  HTTP PUT. Requires WiFi to be connected.
+
+config LINKR_BLE_BRIDGE_WEBDAV_UPLOAD_INTERVAL_MS
+	int "WebDAV upload interval in milliseconds"
+	default 10000
+	range 1000 600000
+	depends on LINKR_BLE_BRIDGE_WEBDAV
+
+config LINKR_BLE_BRIDGE_WEBDAV_UPLOAD_CHUNK
+	int "WebDAV upload chunk size in bytes"
+	default 4096
+	range 256 32768
+	depends on LINKR_BLE_BRIDGE_WEBDAV
+
+config LINKR_BLE_BRIDGE_WIFI_SSID_MAX
+	int "Maximum WiFi SSID length"
+	default 32
+	depends on LINKR_BLE_BRIDGE_WIFI
+
+config LINKR_BLE_BRIDGE_WIFI_PSK_MAX
+	int "Maximum WiFi PSK length"
+	default 64
+	depends on LINKR_BLE_BRIDGE_WIFI
+
+config LINKR_BLE_BRIDGE_WEBDAV_URL_MAX
+	int "Maximum WebDAV URL length"
+	default 256
+	depends on LINKR_BLE_BRIDGE_WEBDAV
+
+config LINKR_BLE_BRIDGE_WEBDAV_CRED_MAX
+	int "Maximum WebDAV user/password length"
+	default 64
+	depends on LINKR_BLE_BRIDGE_WEBDAV
+
+config LINKR_BLE_BRIDGE_LOG_UPLOAD_STACK
+	int "WiFi/WebDAV workqueue stack size"
+	default 4096
+	depends on LINKR_BLE_BRIDGE_WIFI
 
 endmenu
 
