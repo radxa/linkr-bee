@@ -1,0 +1,17 @@
+manifest:
+  remotes:
+    - name: zephyrproject-rtos
+      url-base: https://github.com/zephyrproject-rtos
+
+  projects:
+    - name: zephyr
+      remote: zephyrproject-rtos
+      revision: v4.4.1
+      import:
+        name-allowlist:
+          - hal_espressif
+          - mbedtls
+          - tf-psa-crypto
+
+  self:
+    path: linkr-ble

@@ -48,7 +48,8 @@ west build -b esp32c3_supermini /Users/xiangzelong/Dev/linkr-ble
 The workflow in `.gitea/workflows/build.yml` builds one production firmware:
 the default WiFi + BLE configuration for `esp32c3_supermini`. It runs on pushes
 to `main`, version tags, pull requests, and manual dispatches using Zephyr
-v4.4.1 with Zephyr SDK 1.0.1.
+v4.4.1 with Zephyr SDK 1.0.1. To keep runner disk usage bounded, it installs
+only the `riscv64-zephyr-elf` toolchain instead of the full Zephyr CI image.
 
 Download the `linkr-ble-esp32c3-supermini` artifact from the completed Gitea
 Actions run. Its flashable image is:
