@@ -808,7 +808,7 @@ static bool ensure_paired(DBusConnection *conn)
     if (device_is_paired(conn)) {
         return true;
     }
-    msg("Pairing required; enter the six-digit code shown on the bridge console");
+    msg("Pairing required; enter 123456 in the system Bluetooth prompt");
     reply = call_sync(conn, BLUEZ_BUS, g_state.device_path, DEVICE_IFACE, "Pair", NULL);
     if (!reply) {
         return false;

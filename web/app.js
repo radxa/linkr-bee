@@ -23,6 +23,7 @@ const state = {
   logBytes: [],
   autoScroll: true,
   fontSize: 13,
+  fontFamily: "system",
   rxBytes: 0,
   txBytes: 0,
   writeQueue: Promise.resolve(),
@@ -54,6 +55,8 @@ const elements = {
   uartInput: $("uartInput"),
   enterSelect: $("enterSelect"),
   chunkInput: $("chunkInput"),
+  fontSelect: $("fontSelect"),
+  fontPreview: $("fontPreview"),
   localEchoInput: $("localEchoInput"),
   debugInput: $("debugInput"),
   wifiInput: $("wifiInput"),
@@ -87,6 +90,28 @@ const elements = {
 
 const THEME_KEY = "linkr-theme";
 const LANG_KEY = "linkr-lang";
+const FONT_FAMILY_KEY = "linkr-font-family";
+
+const SYSTEM_TERMINAL_FONT =
+  'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace';
+const TERMINAL_FONTS = {
+  system: SYSTEM_TERMINAL_FONT,
+  symbols:
+    '"Symbols Nerd Font Mono", "Symbols Nerd Font", ' +
+    SYSTEM_TERMINAL_FONT,
+  jetbrains:
+    '"JetBrainsMono Nerd Font Mono", "JetBrainsMono Nerd Font", ' +
+    '"Symbols Nerd Font Mono", "Symbols Nerd Font", ' +
+    SYSTEM_TERMINAL_FONT,
+  meslo:
+    '"MesloLGS Nerd Font Mono", "MesloLGS NF", ' +
+    '"Symbols Nerd Font Mono", "Symbols Nerd Font", ' +
+    SYSTEM_TERMINAL_FONT,
+  firacode:
+    '"FiraCode Nerd Font Mono", "FiraCode Nerd Font", ' +
+    '"Symbols Nerd Font Mono", "Symbols Nerd Font", ' +
+    SYSTEM_TERMINAL_FONT,
+};
 
 const XTERM_DARK = {
   background: "#07090c",
@@ -126,6 +151,14 @@ const I18N = {
     uart: "UART",
     enterKey: "Enter key",
     chunkSize: "Chunk size",
+    fontFamily: "Terminal font",
+    fontSystem: "System monospace",
+    fontSymbols: "System + Nerd Symbols",
+    fontJetBrains: "JetBrains Mono Nerd Font",
+    fontMeslo: "MesloLGS Nerd Font",
+    fontFiraCode: "FiraCode Nerd Font",
+    fontHint: "Nerd Font options use fonts installed on this device.",
+    fontApplied: "Terminal font applied",
     localEcho: "Local echo",
     debugIO: "Debug I/O",
     wifi: "WiFi",
@@ -175,7 +208,7 @@ const I18N = {
     scanning: "Scanning…",
     foundN: "Found {n} networks",
     noNetworks: "No networks found",
-    scanFailed: "Wi-Fi scan failed; complete BLE pairing and retry",
+    scanFailed: "Wi-Fi scan failed; retry in a moment",
     light: "Light",
     dark: "Dark",
   },
@@ -202,6 +235,14 @@ const I18N = {
     uart: "UART",
     enterKey: "回车键",
     chunkSize: "分片大小",
+    fontFamily: "终端字体",
+    fontSystem: "系统等宽字体",
+    fontSymbols: "系统字体 + Nerd Symbols",
+    fontJetBrains: "JetBrains Mono Nerd Font",
+    fontMeslo: "MesloLGS Nerd Font",
+    fontFiraCode: "FiraCode Nerd Font",
+    fontHint: "Nerd Font 选项使用当前设备已安装的本地字体。",
+    fontApplied: "终端字体已应用",
     localEcho: "本地回显",
     debugIO: "调试 I/O",
     wifi: "WiFi",
@@ -251,7 +292,7 @@ const I18N = {
     scanning: "扫描中…",
     foundN: "找到 {n} 个网络",
     noNetworks: "未找到网络",
-    scanFailed: "Wi-Fi 扫描失败，请完成 BLE 配对后重试",
+    scanFailed: "Wi-Fi 扫描失败，请稍后重试",
     light: "浅色",
     dark: "深色",
   },
@@ -298,6 +339,55 @@ function updateXtermTheme() {
     return;
   }
   state.term.options.theme = theme === "dark" ? XTERM_DARK : XTERM_LIGHT;
+}
+
+function terminalFontStack(fontId = state.fontFamily) {
+  return TERMINAL_FONTS[fontId] || TERMINAL_FONTS.system;
+}
+
+function refreshTerminalFont(fontId) {
+  if (!state.term || state.fontFamily !== fontId) {
+    return;
+  }
+
+  requestAnimationFrame(() => {
+    if (!state.term || state.fontFamily !== fontId) {
+      return;
+    }
+    if (state.term.rows > 0) {
+      state.term.refresh(0, state.term.rows - 1);
+    }
+    fitTerminal();
+  });
+}
+
+function applyTerminalFont(fontId, persist = false) {
+  const next = TERMINAL_FONTS[fontId] ? fontId : "system";
+  const stack = terminalFontStack(next);
+
+  state.fontFamily = next;
+  if (elements.fontSelect) {
+    elements.fontSelect.value = next;
+  }
+  if (elements.fontPreview) {
+    elements.fontPreview.style.fontFamily = stack;
+  }
+  if (persist) {
+    saveSetting(FONT_FAMILY_KEY, next);
+  }
+  if (!state.term) {
+    return;
+  }
+
+  state.term.options.fontFamily = stack;
+  if (document.fonts && document.fonts.load) {
+    document.fonts
+      .load(`${state.fontSize}px ${stack}`, "\ue0a0\ue0b0")
+      .then(() => refreshTerminalFont(next))
+      .catch(() => refreshTerminalFont(next));
+  } else {
+    refreshTerminalFont(next);
+  }
 }
 
 function updateToggleLabels() {
@@ -550,8 +640,7 @@ function initTerminal() {
   state.termReady = true;
   state.term = new globalThis.Terminal({
     cursorBlink: true,
-    fontFamily:
-      'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace',
+    fontFamily: terminalFontStack(),
     fontSize: state.fontSize,
     lineHeight: 1,
     scrollback: 10000,
@@ -562,6 +651,7 @@ function initTerminal() {
   state.term.loadAddon(state.fitAddon);
   state.term.open(elements.terminalOutput);
   state.term.onData(onTerminalData);
+  applyTerminalFont(state.fontFamily);
   fitTerminal();
 
   window.addEventListener("resize", fitTerminal);
@@ -1037,6 +1127,9 @@ function loadPersisted() {
   if (Number.isFinite(fs)) {
     state.fontSize = fs;
   }
+  const fontFamily = localStorage.getItem(FONT_FAMILY_KEY);
+  state.fontFamily = TERMINAL_FONTS[fontFamily] ? fontFamily : "system";
+  applyTerminalFont(state.fontFamily);
   state.sidebarCollapsed = localStorage.getItem("linkr-sidebar") === "collapsed";
   updateBaudLabel();
 }
@@ -1264,6 +1357,10 @@ function bind() {
   elements.chunkInput.addEventListener("change", () =>
     saveSetting("linkr-chunk", elements.chunkInput.value),
   );
+  elements.fontSelect.addEventListener("change", () => {
+    applyTerminalFont(elements.fontSelect.value, true);
+    toast(t("fontApplied"));
+  });
   elements.localEchoInput.addEventListener("change", () =>
     saveSetting("linkr-echo", elements.localEchoInput.checked ? "1" : "0"),
   );

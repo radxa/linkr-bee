@@ -68,6 +68,7 @@ static linkr_wifi_respond_fn scan_respond;
 static struct bt_conn *scan_conn;
 static atomic_t scan_in_progress;
 static atomic_t scan_result_count;
+static struct k_work wifi_scan_work;
 static atomic_t wifi_connected;
 static atomic_t wifi_ip_ready;
 static atomic_t wifi_reconnect_enabled;
@@ -489,9 +490,45 @@ static void wifi_scan_event_handler(struct net_mgmt_event_callback *cb,
     }
 }
 
-int linkr_wifi_scan(struct bt_conn *conn)
+static void wifi_scan_release(void)
+{
+    if (scan_conn) {
+        bt_conn_unref(scan_conn);
+        scan_conn = NULL;
+    }
+    atomic_clear(&scan_result_count);
+    atomic_set(&scan_in_progress, 0);
+}
+
+static void wifi_scan_work_handler(struct k_work *work)
 {
     struct wifi_scan_params params;
+    int err;
+
+    ARG_UNUSED(work);
+    memset(&params, 0, sizeof(params));
+    params.bands = BIT(WIFI_FREQ_BAND_2_4_GHZ);
+    params.max_bss_cnt = WIFI_SCAN_MAX_RESULTS;
+
+    /* esp_wifi_start()/esp_wifi_scan_start() can consume more stack than the
+     * Bluetooth RX workqueue owns. Start the scan on the 4 KiB system
+     * workqueue; result callbacks remain asynchronous. */
+    err = net_mgmt(NET_REQUEST_WIFI_SCAN, wifi_iface,
+                   &params, sizeof(params));
+    if (err) {
+        LOG_WRN("WiFi scan request failed: %d", err);
+        if (scan_respond) {
+            scan_respond(scan_conn, "@scan error");
+        }
+        wifi_scan_release();
+        return;
+    }
+
+    LOG_INF("WiFi scan started");
+}
+
+int linkr_wifi_scan(struct bt_conn *conn)
+{
     int err;
 
     if (!wifi_iface) {
@@ -506,25 +543,16 @@ int linkr_wifi_scan(struct bt_conn *conn)
         return -ENOSYS;
     }
 
-    memset(&params, 0, sizeof(params));
-    params.bands = BIT(WIFI_FREQ_BAND_2_4_GHZ);
-    params.max_bss_cnt = WIFI_SCAN_MAX_RESULTS;
-
     scan_conn = conn ? bt_conn_ref(conn) : NULL;
     atomic_clear(&scan_result_count);
 
-    err = net_mgmt(NET_REQUEST_WIFI_SCAN, wifi_iface,
-                   &params, sizeof(params));
-    if (err) {
-        LOG_WRN("WiFi scan request failed: %d", err);
-        if (scan_conn) {
-            bt_conn_unref(scan_conn);
-            scan_conn = NULL;
-        }
-        atomic_clear(&scan_result_count);
-        atomic_set(&scan_in_progress, 0);
+    err = k_work_submit(&wifi_scan_work);
+    if (err < 0) {
+        LOG_WRN("WiFi scan work submit failed: %d", err);
+        wifi_scan_release();
+        return err;
     }
-    return err;
+    return 0;
 }
 
 bool linkr_wifi_is_connected(void)
@@ -1030,6 +1058,7 @@ int linkr_wifi_init(void)
     k_mutex_init(&log_lock);
     k_mutex_init(&upload_lock);
     k_work_init_delayable(&wifi_retry_work, wifi_retry_work_handler);
+    k_work_init(&wifi_scan_work, wifi_scan_work_handler);
 
     wifi_iface = net_if_get_default();
     if (!wifi_iface) {

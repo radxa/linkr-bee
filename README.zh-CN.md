@@ -112,13 +112,14 @@ ESP32-C3 SoC WiFi 驱动是 `CONFIG_WIFI_ESP32`（定义于 `drivers/wifi/esp32/
 
 ### BLE 配对、owner、持久化与恢复出厂
 
-BLE 配对保护的是**管理面**，不是通用 NUS UART 数据流。所有 WiFi/WebDAV 命令（包括 `@w?` 和 `@d?`）都要求 BLE Security Level 3：链路已加密、已认证，并具有 MITM 防护。若当前连接低于该级别，固件会请求提升安全级别、返回“需要配对”的响应；完成配对后必须重试原命令。原始 NUS UART 数据和 `@u...` UART 配置刻意不在这个门禁内；若 SBC console 含敏感信息，必须确认这种访问模型可接受。
+BLE 配对保护的是**管理面**，不是通用 NUS UART 数据流。WiFi/WebDAV 管理命令（包括 `@w?` 和 `@d?`）都要求 BLE Security Level 3：链路已加密，并通过配对码完成认证。唯一例外是只读的 `@w scan`，它可在配对前发现附近 SSID，但不会读取或修改已保存凭据。若其他管理命令到达时安全级别不足，固件会请求提升安全级别、返回“需要配对”的响应；完成配对后必须重试原命令。原始 NUS UART 数据和 `@u...` UART 配置刻意不在这个门禁内；若 SBC console 含敏感信息，必须确认这种访问模型可接受。
 
-首次配对时，桥的 USB serial console 会显示六码，需要在中心设备上输入。成功后的 BLE bond 由 Zephyr settings/NVS 保存。固件将“存在任意 bond”视为已经有 owner：只接受一个已绑定中心设备，并拒绝之后所有新的配对请求。因此，在手机或电脑端“忽略/删除此设备”不会解除 bridge 上的 owner；移交给新 owner 前需要恢复出厂。
+设备没有显示屏，因此使用固定 BLE 配对码 **123456**；在浏览器或操作系统弹出的密码框中输入即可。成功后的 BLE bond 由 Zephyr settings/NVS 保存。固件将“存在任意 bond”视为已经有 owner：只接受一个已绑定中心设备，并拒绝之后所有新的配对请求。因此，在手机或电脑端“忽略/删除此设备”不会解除 bridge 上的 owner；移交给新 owner 前需要恢复出厂。由于固定配对码已经公开，首次配对的有效信任边界仍是可控物理距离、单 owner 与 GPIO0 恢复出厂机制。
 
 | 项目 | 默认值 / 持久化规则 | 清除或移交方式 |
 | --- | --- | --- |
 | BLE bond 与 owner | 始终由 `CONFIG_BT_SETTINGS` 持久化到 NVS | 仅 GPIO0 恢复出厂；没有可通过 BLE 调用的解除 owner 命令 |
+| BLE identity/address | 随机静态 Linkr identity 持久化在 NVS，正常重启继续复用 | GPIO0 恢复出厂会生成新的 identity/address，避免系统沿用旧名称或 bond 缓存 |
 | WiFi SSID/PSK | 默认仅 RAM；`CONFIG_LINKR_BLE_BRIDGE_PERSIST_CREDENTIALS=y` 才保存并在启动时重连 | `@w off` 停用并断开；恢复出厂会擦除 |
 | WebDAV 目标 | 匿名 URL 独立于 WiFi 凭据持久化设置，默认也会保存 | `@d off` 停用；恢复出厂会擦除 |
 | 上传 boot ID | 上传器分配新的 boot ID 时保存，避免重启后复用文件名 | 恢复出厂会擦除 |
@@ -127,7 +128,7 @@ BLE 配对保护的是**管理面**，不是通用 NUS UART 数据流。所有 W
 
 恢复出厂时，在设备复位或上电后将 **GPIO0 与 GND 短接**，并持续保持两秒。固件会在 Bluetooth 与 settings 加载前擦除整个 `storage_partition`，清除 BLE owner/bond、Bluetooth identity 数据、Linkr 的 WiFi/WebDAV 配置和上传 boot 计数器。设备将以未绑定状态启动，BLE identity 也可能重新生成。不要让 GPIO0 永久接地，并将该焊盘或按键的物理访问视为恢复出厂权限。该操作不会擦除固件、测试 marker 分区或 coredump 存储。
 
-Python 工具对 WiFi/WebDAV 操作会自动配对（或使用 `--pair`）；C 工具需要运行中的 BlueZ pairing agent；Web Bluetooth 会显示浏览器原生配对提示，完成后需重新点击原操作。BLE 配对不会加密后续 WebDAV 上传：当前上传器仅接受匿名 HTTP，因此只能在可信局域网使用。
+Python 工具对 WiFi/WebDAV 操作会自动配对（或使用 `--pair`）；C 工具需要运行中的 BlueZ pairing agent；Web Bluetooth 会显示浏览器或系统原生配对框，配对码为 **123456**，完成后需重新点击原操作。BLE 配对不会加密后续 WebDAV 上传：当前上传器仅接受匿名 HTTP，因此只能在可信局域网使用。
 
 UART RX 字节（SBC console 输出）会被缓存，并定期 HTTP PUT 到 `<webdav_url>log-<boot-id>-<sequence>-<uptime>.txt`。上传会等待 IPv4 地址、重试连接失败、为失败批次保留稳定文件名；更改目标或停用时会丢弃已排队旧数据。
 
@@ -392,6 +393,8 @@ http://127.0.0.1:8765/
 - 将终端输入写入 RX 特征
 - 用 `@u?` 和 `@u=...` 查询或设置 UART 模式
 - 调整换行和 BLE 写入块大小
+- 在系统等宽字体与常见本地 Nerd Font 之间切换，并预览 Powerline/Nerd
+  字形；所选字体会按当前浏览器来源持久化，但网页不内置字体文件
 - 通过 xterm.js 渲染终端控制序列，包括光标移动、行擦除、readline 重绘、16 色、256 色和真彩色 SGR
 - 显示可选的本地回显和调试 I/O 跟踪
 - 将接收字节保存为日志文件

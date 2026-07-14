@@ -161,21 +161,25 @@ needed.
 ### BLE pairing, owner, persistence, and factory reset
 
 Pairing protects the **management plane**, not the general NUS UART stream.
-Every WiFi or WebDAV command, including `@w?` and `@d?`, requires BLE Security
-Level 3 (encrypted and authenticated with MITM protection). If the connection
-is below that level, the firmware starts a security upgrade, returns a pairing
-required response, and the caller must complete pairing then retry the command.
+Every WiFi or WebDAV management command, including `@w?` and `@d?`, requires
+BLE Security Level 3 (encrypted and authenticated with passkey pairing). The
+read-only `@w scan` discovery command is the sole exception and works before
+pairing; it never reads or changes saved credentials. If another management
+command arrives below Level 3, the firmware starts a security upgrade, returns
+a pairing-required response, and the caller must finish pairing then retry it.
 Raw NUS UART traffic and `@u...` UART configuration are deliberately outside
 this gate; do not attach a sensitive console unless that access model is
 acceptable.
 
-On the first pairing, a six-digit passkey is printed on the bridge's USB serial
-console and must be entered on the central. The resulting BLE bond is stored in
-Zephyr settings/NVS. The firmware treats the presence of *any* bond as an
-owner: it accepts one bonded central and rejects every new pairing request.
-This also means that deleting the device from the owner's phone or computer
-does not release ownership on the bridge; use factory reset before moving to a
-new owner.
+The bridge is headless, so it uses the fixed pairing code **123456** instead of
+a code shown on a local display. Enter that code in the browser or operating
+system prompt. The resulting BLE bond is stored in Zephyr settings/NVS. The
+firmware treats the presence of *any* bond as an owner: it accepts one bonded
+central and rejects every new pairing request. This also means that deleting
+the device from the owner's phone or computer does not release ownership on
+the bridge; use factory reset before moving to a new owner. Because the fixed
+code is documented, the one-owner/factory-reset model and controlled physical
+proximity remain the effective trust boundary for first pairing.
 
 | Item | Default / persistence rule | Clear or transfer |
 | --- | --- | --- |
@@ -205,10 +209,10 @@ access to that pad or switch as access to factory reset. It does not erase
 firmware, the test-marker partition, or coredump storage.
 
 The Python tool pairs automatically for WiFi/WebDAV actions (or use `--pair`);
-the C tool needs a running BlueZ pairing agent; Web Bluetooth shows the
-browser's native pairing prompt, then the action must be retried. BLE pairing
-does not encrypt the subsequent WebDAV upload: the current uploader accepts
-anonymous HTTP only, so use it solely on a trusted local network.
+the C tool needs a running BlueZ pairing agent; Web Bluetooth shows the native
+pairing prompt, where the code is **123456**, then the action must be retried.
+BLE pairing does not encrypt the subsequent WebDAV upload: the current uploader
+accepts anonymous HTTP only, so use it solely on a trusted local network.
 
 UART RX bytes are buffered and periodically HTTP-PUT to
 `<webdav_url>log-<boot-id>-<sequence>-<uptime>.txt`. Upload waits for an IPv4
@@ -518,6 +522,9 @@ The page can:
   command-history arrows, backspace, Ctrl-C, and pasted text
 - query or set UART mode with `@u?` and `@u=...`
 - adjust line ending and BLE write chunk size
+- switch between the system monospace stack and common locally installed Nerd
+  Fonts, with a Powerline/Nerd glyph preview; the selection is persisted for
+  the current browser origin, but the font files themselves are not bundled
 - render terminal control sequences through xterm.js, including cursor movement,
   line erasing, readline redraws, 16-color, 256-color, and truecolor SGR
 - expand the terminal to fullscreen and automatically refit its rows and columns

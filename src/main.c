@@ -53,6 +53,7 @@ LOG_MODULE_REGISTER(linkr_ble_bridge, LOG_LEVEL_INF);
 #define CONTROL_RESPONSE_QUEUE_DEPTH 16
 #define FACTORY_RESET_CONFIRM_MS 2000
 #define FACTORY_RESET_SAMPLE_MS 100
+#define PAIRING_PASSKEY 123456U
 
 #if DT_NODE_HAS_STATUS(DT_ALIAS(led0), okay)
 #define ACTIVITY_LED_NODE DT_ALIAS(led0)
@@ -128,11 +129,19 @@ static struct k_mutex uart_config_lock;
 static struct k_work_delayable advertise_work;
 static atomic_t nus_notify_enabled;
 static atomic_t control_response_needs_settle;
+#if IS_ENABLED(CONFIG_BT_SMP)
+static atomic_t security_upgrade_pending;
+#endif
 static uint8_t linkr_identity = BT_ID_DEFAULT;
 static uint16_t control_frame_expected;
 static uint16_t control_frame_received;
 static int64_t control_frame_started_at;
 static uint8_t control_frame_data[CONTROL_CMD_MAX_LEN];
+/* NUS receive callbacks run serially on the Bluetooth workqueue.  Keep the
+ * command scratch buffer out of that workqueue's small thread stack: placing
+ * it in handle_control_command_complete() consumed more than half of the
+ * stack on every terminal keystroke. */
+static char control_command_data[CONTROL_CMD_MAX_LEN];
 #if !IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY)
 static atomic_t uart_rx_dropped;
 #endif
@@ -547,6 +556,9 @@ static void connected(struct bt_conn *conn, uint8_t err)
 	}
 	current_conn = bt_conn_ref(conn);
 	k_mutex_unlock(&conn_lock);
+#if IS_ENABLED(CONFIG_BT_SMP)
+	atomic_clear(&security_upgrade_pending);
+#endif
 
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_BLE_DIAG_MARKER)
 	ble_diag.connected_count++;
@@ -568,6 +580,9 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 
 	atomic_clear(&nus_notify_enabled);
 	atomic_clear(&control_response_needs_settle);
+#if IS_ENABLED(CONFIG_BT_SMP)
+	atomic_clear(&security_upgrade_pending);
+#endif
 	k_msgq_purge(&ble_to_uart_queue);
 	while (k_msgq_get(&control_response_queue, &response, K_NO_WAIT) == 0) {
 		if (response.conn) {
@@ -583,7 +598,11 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 	schedule_ble_diag_marker_write();
 #endif
 	LOG_INF("BLE disconnected: 0x%02x", reason);
-	/* BT_LE_ADV_CONN_FAST_1 is persistent; the host resumes it after disconnect. */
+	/* Persistent advertising normally resumes automatically, but an SMP
+	 * disconnect can leave the controller between security and connection
+	 * teardown. Scheduling an explicit start is harmless when advertising has
+	 * already resumed (-EALREADY) and recovers the headless pairing path. */
+	advertise_schedule(K_MSEC(100));
 }
 
 static void recycled(void)
@@ -609,32 +628,43 @@ static enum bt_security_err pairing_accept(struct bt_conn *conn,
 }
 #endif
 
-static void passkey_display(struct bt_conn *conn, unsigned int passkey)
-{
-	char addr[BT_ADDR_LE_STR_LEN];
-
-	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
-	printk("Linkr BLE pairing code for %s: %06u\n", addr, passkey);
-	LOG_INF("Enter the pairing code shown on the local console");
-}
-
 static void pairing_cancelled(struct bt_conn *conn)
 {
 	ARG_UNUSED(conn);
+	atomic_clear(&security_upgrade_pending);
 	LOG_WRN("BLE pairing cancelled");
 }
 
 static void pairing_complete(struct bt_conn *conn, bool bonded)
 {
 	ARG_UNUSED(conn);
+	atomic_clear(&security_upgrade_pending);
 	LOG_INF("BLE pairing complete%s", bonded ? " (owner saved)" : "");
 }
 
 static void pairing_failed(struct bt_conn *conn, enum bt_security_err reason)
 {
 	ARG_UNUSED(conn);
+	atomic_clear(&security_upgrade_pending);
 	LOG_WRN("BLE pairing failed: %d", reason);
 }
+
+static void passkey_display(struct bt_conn *conn, unsigned int passkey)
+{
+	char addr[BT_ADDR_LE_STR_LEN];
+
+	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
+	printk("Linkr BLE pairing code for %s: %06u\n", addr, passkey);
+	LOG_INF("Enter BLE pairing code %06u on the central", passkey);
+}
+
+#if IS_ENABLED(CONFIG_BT_APP_PASSKEY)
+static uint32_t pairing_passkey(struct bt_conn *conn)
+{
+	ARG_UNUSED(conn);
+	return PAIRING_PASSKEY;
+}
+#endif
 
 static struct bt_conn_auth_cb auth_callbacks = {
 #if IS_ENABLED(CONFIG_BT_SMP_APP_PAIRING_ACCEPT)
@@ -642,6 +672,9 @@ static struct bt_conn_auth_cb auth_callbacks = {
 #endif
 	.passkey_display = passkey_display,
 	.cancel = pairing_cancelled,
+#if IS_ENABLED(CONFIG_BT_APP_PASSKEY)
+	.app_passkey = pairing_passkey,
+#endif
 };
 
 static struct bt_conn_auth_info_cb auth_info_callbacks = {
@@ -655,8 +688,12 @@ static void security_changed(struct bt_conn *conn, bt_security_t level,
 	ARG_UNUSED(conn);
 
 	if (err) {
+		atomic_clear(&security_upgrade_pending);
 		LOG_WRN("BLE security failed: level %u err %u", level, err);
 	} else {
+		if (level >= BT_SECURITY_L3) {
+			atomic_clear(&security_upgrade_pending);
+		}
 		LOG_INF("BLE security level changed: %u", level);
 	}
 }
@@ -914,14 +951,14 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 					    const uint8_t *data, uint16_t len)
 {
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_CONTROL_COMMANDS)
-	char cmd[CONTROL_CMD_MAX_LEN];
+	char *cmd = control_command_data;
 	char *body;
 	struct uart_config cfg;
 	int err;
 	bool is_long;
 	char short_ch = 0;
 
-	if (len >= sizeof(cmd)) {
+	if (len >= sizeof(control_command_data)) {
 		(void)send_control_response(conn, "ERR command too long\r\n");
 		return true;
 	}
@@ -1000,13 +1037,31 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 	}
 
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_WIFI)
-	if ((body[0] == 'w' || body[0] == 'd' ||
+	bool is_wifi_scan = !strcmp(body, "wifi scan") ||
+			    !strcmp(body, "w scan");
+
+	if (!is_wifi_scan &&
+	    (body[0] == 'w' || body[0] == 'd' ||
 	     !strncmp(body, "wifi", 4) || !strncmp(body, "webdav", 6)) &&
 	    bt_conn_get_security(conn) < BT_SECURITY_L3) {
-		err = bt_conn_set_security(conn, BT_SECURITY_L3);
+		err = 0;
+		if (atomic_cas(&security_upgrade_pending, 0, 1)) {
+			bt_security_t security = BT_SECURITY_L3;
+
+			/* A central may retain a stale bond after the bridge settings
+			 * were erased. With no local owner, force a fresh headless
+			 * passkey exchange instead of waiting for unusable old keys. */
+			if (!identity_has_bond(linkr_identity)) {
+				security |= BT_SECURITY_FORCE_PAIR;
+			}
+			err = bt_conn_set_security(conn, security);
+			if (err) {
+				atomic_clear(&security_upgrade_pending);
+			}
+		}
 		(void)send_control_response(conn,
 					    err ? "ERR pairing=%d\r\n"
-						: "ERR pairing required; enter local code then retry\r\n",
+						: "ERR pairing required; enter 123456 then retry\r\n",
 					    err);
 		return true;
 	}
@@ -1223,7 +1278,7 @@ static void nus_received(struct bt_conn *conn, const void *data, uint16_t len,
 
 	ARG_UNUSED(ctx);
 
-	LOG_INF("BLE RX write: %u bytes", len);
+	LOG_DBG("BLE RX write: %u bytes", len);
 
 	if (handle_control_command(conn, bytes, len)) {
 		return;

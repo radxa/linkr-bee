@@ -345,13 +345,17 @@ h1 {
 
 .btn-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
 }
 
 .btn-grid.compact {
   margin-top: 8px;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.btn-grid.compact.two-actions {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 /* ---------- Fields ---------- */
@@ -371,14 +375,42 @@ h1 {
   color: var(--muted);
 }
 
+.field-hint {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.font-preview {
+  display: block;
+  margin-top: 7px;
+  padding: 7px 9px;
+  overflow: hidden;
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  background: var(--panel-3);
+  color: var(--accent-strong);
+  font-size: 12px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .field-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
 }
 
 .field-row input {
-  flex: 1 1 auto;
   min-width: 0;
+}
+
+.field-row .btn {
+  min-width: 64px;
+  white-space: nowrap;
 }
 
 input,

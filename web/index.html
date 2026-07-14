@@ -131,6 +131,19 @@
             <input id="chunkInput" type="number" min="1" max="62" value="20">
           </label>
 
+          <div class="field">
+            <label class="field-label" for="fontSelect" data-i18n="fontFamily">Terminal font</label>
+            <select id="fontSelect" aria-describedby="fontHint">
+              <option value="system" data-i18n="fontSystem">System monospace</option>
+              <option value="symbols" data-i18n="fontSymbols">System + Nerd Symbols</option>
+              <option value="jetbrains" data-i18n="fontJetBrains">JetBrains Mono Nerd Font</option>
+              <option value="meslo" data-i18n="fontMeslo">MesloLGS Nerd Font</option>
+              <option value="firacode" data-i18n="fontFiraCode">FiraCode Nerd Font</option>
+            </select>
+            <span id="fontHint" class="field-hint" data-i18n="fontHint">Nerd Font options use fonts installed on this device.</span>
+            <span id="fontPreview" class="font-preview" aria-hidden="true"> main  󰘧 ~/project</span>
+          </div>
+
           <div class="checks">
             <label class="check">
               <input id="localEchoInput" type="checkbox">
@@ -175,7 +188,7 @@
               </button>
             </span>
           </label>
-          <div class="btn-grid compact">
+          <div class="btn-grid compact two-actions">
             <button id="webdavOffButton" class="btn btn-soft" type="button" disabled="">
               <span class="btn-label" data-i18n="off">Off</span>
             </button>
