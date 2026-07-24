@@ -176,7 +176,8 @@ def configure_ble_write_size(client: BleakClient, cfg: TerminalConfig,
     except Exception:
         size = 20
 
-    # The default firmware negotiates ATT MTU 65, i.e. 62-byte NUS writes.
+    # The default firmware uses ATT MTU 23. Keep 62 as a future-build ceiling,
+    # but only use it when the platform explicitly reports that capacity.
     cfg.write_size = max(20, min(int(size or 20), 62))
     stderr(f"BLE write chunk size: {cfg.write_size} bytes")
 

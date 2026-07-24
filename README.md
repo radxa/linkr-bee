@@ -2,6 +2,8 @@
 
 > 中文文档：[README.zh-CN.md](README.zh-CN.md)
 
+> Linkr integration: [BLE accessory API guide (Chinese)](docs/LINKR_BLE_API.zh-CN.md)
+
 Zephyr application for an ESP32-C3 BLE serial bridge.  The first milestone is a
 plain Bluetooth LE UART window:
 
@@ -10,7 +12,8 @@ plain Bluetooth LE UART window:
 - BLE RX characteristic writes are forwarded to the selected UART
 - UART RX bytes are forwarded through BLE TX notifications
 
-The Linkr card/device integration is intentionally left for a later layer.
+The Linkr product integrates this accessory through the API guide above; this
+repository owns the accessory firmware and reference clients.
 
 ## Supported environment
 
@@ -359,13 +362,12 @@ This uses Zephyr's built-in Nordic UART Service:
 - RX write characteristic: `6e400002-b5a3-f393-e0a9-e50e24dcca9e`
 - TX notify characteristic: `6e400003-b5a3-f393-e0a9-e50e24dcca9e`
 
-The checked-in default configuration negotiates an ATT/L2CAP MTU of 65 with an
-ACL TX buffer of 27. Its effective NUS payload is therefore at most **62 bytes
-per write/notification**. The firmware segments UART bursts accordingly, and
-the supplied Python, C, and Web Bluetooth clients cap their writes at 62 bytes.
-
-The final packet size still depends on the BLE central.  The host terminal
-prints the negotiated write chunk size when it connects.
+The checked-in production configuration uses the baseline ATT/L2CAP MTU of 23,
+so every client must support **20-byte writes**. If the central explicitly
+reports a larger write-without-response limit, a client may use
+`min(platform_limit, 62)`. The firmware continues to segment UART notifications
+to the actual ATT/ACL capacity, and the host terminal prints the detected write
+chunk size when it connects.
 
 ## BLE terminal
 

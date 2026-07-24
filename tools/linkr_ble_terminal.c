@@ -45,7 +45,8 @@
 #define MAX_PATH_LEN    256
 #define MAX_UUID_LEN    40
 #define MAX_NAME_LEN    128
-/* The firmware's default ATT MTU is 65, leaving 62 bytes for NUS data. */
+/* Current firmware defaults to 20-byte writes; 62 is the supported ceiling
+ * when a future build and the central negotiate a larger ATT MTU. */
 #define BLE_MAX_NUS_PAYLOAD 62
 
 struct options {

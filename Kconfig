@@ -14,7 +14,7 @@ config LINKR_BLE_BRIDGE_UART_RX_CHUNK
 	help
 	  UART data is accumulated up to this many bytes before it is handed to
 	  the Nordic UART Service TX characteristic. It is then segmented to the
-	  negotiated ATT payload size (62 bytes in the default build).
+	  negotiated ATT payload size (20 bytes in the default build).
 
 config LINKR_BLE_BRIDGE_UART_IDLE_MS
 	int "UART idle flush timeout in milliseconds"

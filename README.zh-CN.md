@@ -2,6 +2,8 @@
 
 > English: [README.md](README.md)
 
+> Linkr 端接入：[BLE 配件 API 对接文档](docs/LINKR_BLE_API.zh-CN.md)
+
 基于 Zephyr 的 ESP32-C3 BLE 串口桥应用。第一个里程碑是一个纯粹的蓝牙 LE UART 窗口：
 
 - BLE 外设以 `Linkr BLE UART-3` 广播
@@ -9,7 +11,8 @@
 - BLE RX 特征写入转发到所选 UART
 - UART RX 字节通过 BLE TX 通知转发出去
 
-Linkr 卡片/设备集成有意留到后续层。
+Linkr 端通过上方 BLE 配件 API 文档实现发现、串口、配网和局域网桥接功能；
+本仓库负责配件固件及参考客户端。
 
 ## 支持环境
 
@@ -273,9 +276,10 @@ coredump 扇区。
 - RX 写特征：`6e400002-b5a3-f393-e0a9-e50e24dcca9e`
 - TX 通知特征：`6e400003-b5a3-f393-e0a9-e50e24dcca9e`
 
-当前仓库默认配置协商的 ATT/L2CAP MTU 为 65，ACL TX buffer 为 27，因此有效 NUS 载荷最多为**每次写/通知 62 字节**。固件会自动分段 UART 突发数据，随附的 Python、C 和 Web Bluetooth 客户端也会将写入限制为 62 字节。
-
-最终包大小仍取决于 BLE 中心。主机终端在连接时打印协商的写入块大小。
+当前正式配置的 ATT/L2CAP MTU 为 23，因此客户端必须支持**每次写 20 字节**
+的安全基线。若中心平台明确报告更大的 write-without-response 能力，客户端
+可以使用 `min(平台上限, 62)`；固件会按实际 ATT/ACL 能力对 UART 通知继续
+分段。主机终端连接时会打印检测到的写入块大小。
 
 ## BLE 终端
 
