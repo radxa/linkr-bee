@@ -1,5 +1,12 @@
 menu "Linkr BLE bridge"
 
+config LINKR_BLE_BRIDGE_FIRMWARE_VERSION
+	string "Firmware version"
+	default "0.2.0"
+	help
+	  Human-readable application version returned by the diagnostic command
+	  and included in release metadata.
+
 config LINKR_BLE_BRIDGE_UART_RX_CHUNK
 	int "Maximum UART bytes gathered before BLE transmission"
 	default 128
@@ -26,11 +33,11 @@ config LINKR_BLE_BRIDGE_UART_RX_BUFFER_SIZE
 	  bytes when the SBC emits a burst faster than BLE can transmit.
 
 config LINKR_BLE_BRIDGE_BLE_TO_UART_QUEUE_DEPTH
-	int "BLE to UART packet queue depth"
+	int "Transport to UART packet queue depth"
 	default 8
 	range 1 32
 	help
-	  Number of BLE RX packets that can wait for UART transmission.
+	  Number of BLE or WebSocket RX packets that can wait for UART transmission.
 
 config LINKR_BLE_BRIDGE_UART_BAUD_RATE
 	int "UART baud rate"
@@ -136,7 +143,7 @@ config LINKR_BLE_BRIDGE_TEST_UART_TX_PAYLOAD
 config LINKR_BLE_BRIDGE_TEST_BLE_ECHO
 	bool "Echo BLE RX writes back as BLE TX notifications"
 	help
-	  Enable a BLE-only self-test. Data written to the Nordic UART Service RX
+	  Enable a BLE NUS self-test. Data written to the Nordic UART Service RX
 	  characteristic is immediately sent back through the TX notification
 	  characteristic. This bypasses the physical UART path.
 
@@ -172,7 +179,7 @@ config LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_PAYLOAD
 	depends on LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY
 
 config LINKR_BLE_BRIDGE_WIFI
-	bool "Enable WiFi station support"
+	bool
 	default y
 	select NETWORKING
 	select NET_IPV4
@@ -186,9 +193,8 @@ config LINKR_BLE_BRIDGE_WIFI
 	select HTTP_CLIENT
 	help
 	  Compile in WiFi station management and BLE control commands
-	  (@w/@webdav). The radio stays off until the user configures credentials
-	  via @w=ssid,pass (CLI or web). Disabling this option also removes the
-	  application networking, WiFi, DNS, and HTTP client dependencies.
+	  (@w/@webdav). Linkr ships one WiFi + BLE firmware; the radio stays off
+	  until the user configures credentials via @w=ssid,pass (CLI or web).
 
 config LINKR_BLE_BRIDGE_PERSIST_CREDENTIALS
 	bool "Persist WiFi credentials"
@@ -252,6 +258,56 @@ config LINKR_BLE_BRIDGE_LOG_UPLOAD_STACK
 	int "WiFi/WebDAV workqueue stack size"
 	default 4096
 	depends on LINKR_BLE_BRIDGE_WIFI
+
+config LINKR_BLE_BRIDGE_WS_BRIDGE
+	bool "Enable UART-over-WebSocket LAN bridge"
+	default y
+	depends on LINKR_BLE_BRIDGE_WIFI
+	select HTTP_SERVER
+	select HTTP_SERVER_WEBSOCKET
+	help
+	  Serve the bridge UART over a WebSocket endpoint (ws://<device-ip>/ws)
+	  so LAN clients can use the serial console without BLE range or
+	  throughput limits. Binary frames carry raw UART bytes in both
+	  directions. The server only runs while WiFi has an IP address and
+	  can be toggled at runtime with the "@s on|off|?" control command.
+
+config LINKR_BLE_BRIDGE_WS_BRIDGE_PORT
+	int "WebSocket bridge TCP port"
+	default 80
+	range 1 65535
+	depends on LINKR_BLE_BRIDGE_WS_BRIDGE
+
+config LINKR_BLE_BRIDGE_WS_BRIDGE_MAX_CLIENTS
+	int "Maximum simultaneous WebSocket bridge clients"
+	default 2
+	range 1 4
+	depends on LINKR_BLE_BRIDGE_WS_BRIDGE
+
+config LINKR_BLE_BRIDGE_WS_BRIDGE_CLIENT_BUFFER_SIZE
+	int "Per-client TX ring buffer size in bytes (power of two)"
+	default 2048
+	range 512 16384
+	depends on LINKR_BLE_BRIDGE_WS_BRIDGE
+	help
+	  Bytes of UART RX buffered per WebSocket client. A client slower than
+	  the UART drops oldest data instead of blocking the bridge.
+
+config LINKR_BLE_BRIDGE_WS_BRIDGE_AUTH_TOKEN
+	string "Optional first-frame auth token for WebSocket clients"
+	default ""
+	depends on LINKR_BLE_BRIDGE_WS_BRIDGE
+	help
+	  When non-empty, clients must send this token as their first
+	  WebSocket text frame within 3 seconds or the connection is closed.
+	  This is a lightweight LAN deterrent, not real security; use a
+	  trusted network.
+
+config LINKR_BLE_BRIDGE_WS_BRIDGE_STACK
+	int "WebSocket bridge per-client thread stack size"
+	default 4096
+	range 1024 8192
+	depends on LINKR_BLE_BRIDGE_WS_BRIDGE
 
 endmenu
 

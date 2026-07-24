@@ -53,11 +53,13 @@ struct options {
     const char *address;
     bool scan;
     double timeout;
+    bool query_info;
     bool query_uart;
     const char *uart;
     const char *wifi;
     bool wifi_off;
     bool query_wifi;
+    bool wifi_scan;
     const char *webdav;
     bool webdav_off;
     bool query_webdav;
@@ -762,59 +764,6 @@ static bool connect_device(DBusConnection *conn, const char *device_path)
     strncpy(g_state.device_path, device_path, sizeof(g_state.device_path) - 1);
     msg("Connected: %s", device_path);
     return true;
-}
-
-static bool device_is_paired(DBusConnection *conn)
-{
-    DBusMessage *msg, *reply;
-    DBusMessageIter args, variant;
-    DBusError err;
-    const char *iface = DEVICE_IFACE;
-    const char *prop = "Paired";
-    dbus_bool_t paired = false;
-
-    dbus_error_init(&err);
-    msg = dbus_message_new_method_call(BLUEZ_BUS, g_state.device_path,
-                                       DBUS_PROP_IFACE, "Get");
-    if (!msg) {
-        return false;
-    }
-    dbus_message_iter_init_append(msg, &args);
-    dbus_message_iter_append_basic(&args, DBUS_TYPE_STRING, &iface);
-    dbus_message_iter_append_basic(&args, DBUS_TYPE_STRING, &prop);
-    reply = dbus_connection_send_with_reply_and_block(conn, msg, 5000, &err);
-    dbus_message_unref(msg);
-    if (dbus_error_is_set(&err)) {
-        dbus_error_free(&err);
-        return false;
-    }
-    if (reply && dbus_message_iter_init(reply, &args) &&
-        dbus_message_iter_get_arg_type(&args) == DBUS_TYPE_VARIANT) {
-        dbus_message_iter_recurse(&args, &variant);
-        if (dbus_message_iter_get_arg_type(&variant) == DBUS_TYPE_BOOLEAN) {
-            dbus_message_iter_get_basic(&variant, &paired);
-        }
-    }
-    if (reply) {
-        dbus_message_unref(reply);
-    }
-    return paired;
-}
-
-static bool ensure_paired(DBusConnection *conn)
-{
-    DBusMessage *reply;
-
-    if (device_is_paired(conn)) {
-        return true;
-    }
-    msg("Pairing required; enter 123456 in the system Bluetooth prompt");
-    reply = call_sync(conn, BLUEZ_BUS, g_state.device_path, DEVICE_IFACE, "Pair", NULL);
-    if (!reply) {
-        return false;
-    }
-    dbus_message_unref(reply);
-    return device_is_paired(conn);
 }
 
 static void disconnect_device(DBusConnection *conn)
@@ -1622,15 +1571,17 @@ static void usage(const char *prog)
             "  --address ADDR        BLE address; skip name scan\n"
             "  --scan                list nearby BLE devices and exit\n"
             "  --timeout SEC         scan timeout (default: 8.0)\n"
+            "  --query-info          send @i? diagnostics before terminal\n"
             "  --query-uart          send @u? before terminal\n"
             "  --uart SPEC           set UART as baud,data,parity,stop,flow\n"
             "  --wifi SSID,PASS      connect ESP32 to WiFi\n"
             "  --wifi-off            forget saved WiFi\n"
             "  --query-wifi          send @w? before terminal\n"
+            "  --wifi-scan           scan nearby 2.4 GHz WiFi networks\n"
             "  --webdav URL         set anonymous HTTP WebDAV upload URL\n"
             "  --webdav-off          disable WebDAV upload\n"
             "  --query-webdav        send @d? before terminal\n"
-            "  --pair                pair before opening the terminal\n"
+            "  --pair                deprecated no-op; pairing is disabled\n"
             "  --loopback-test PAYLOAD  send payload and require echo\n"
             "  --loopback-timeout SEC   loopback timeout (default: 3.0)\n"
             "  --no-terminal         connect, run commands, exit\n"
@@ -1670,6 +1621,8 @@ static void parse_args(int argc, char **argv, struct options *opt)
             opt->scan = true;
         } else if (strcmp(a, "--timeout") == 0 && i + 1 < argc) {
             opt->timeout = atof(argv[++i]);
+        } else if (strcmp(a, "--query-info") == 0) {
+            opt->query_info = true;
         } else if (strcmp(a, "--query-uart") == 0) {
             opt->query_uart = true;
         } else if (strcmp(a, "--uart") == 0 && i + 1 < argc) {
@@ -1680,6 +1633,8 @@ static void parse_args(int argc, char **argv, struct options *opt)
             opt->wifi_off = true;
         } else if (strcmp(a, "--query-wifi") == 0) {
             opt->query_wifi = true;
+        } else if (strcmp(a, "--wifi-scan") == 0) {
+            opt->wifi_scan = true;
         } else if (strcmp(a, "--webdav") == 0 && i + 1 < argc) {
             opt->webdav = argv[++i];
         } else if (strcmp(a, "--webdav-off") == 0) {
@@ -1753,8 +1708,9 @@ int main(int argc, char **argv)
 
     if (opt.scan) {
         scan_and_list_devices(g_state.conn, opt.timeout);
-        if (!opt.query_uart && !opt.uart && !opt.wifi && !opt.wifi_off &&
-            !opt.query_wifi && !opt.webdav && !opt.webdav_off &&
+        if (!opt.query_info && !opt.query_uart && !opt.uart &&
+            !opt.wifi && !opt.wifi_off && !opt.query_wifi &&
+            !opt.wifi_scan && !opt.webdav && !opt.webdav_off &&
             !opt.query_webdav && !opt.loopback_test && !opt.pair) {
             return 0;
         }
@@ -1768,13 +1724,8 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    if (opt.pair || opt.wifi || opt.wifi_off || opt.query_wifi ||
-        opt.webdav || opt.webdav_off || opt.query_webdav) {
-        if (!ensure_paired(g_state.conn)) {
-            msg("pairing failed; ensure a BlueZ agent is running and retry");
-            disconnect_device(g_state.conn);
-            return 1;
-        }
+    if (opt.pair) {
+        msg("Pairing is disabled by this firmware; --pair is a no-op");
     }
 
     if (!discover_characteristics(g_state.conn)) {
@@ -1802,6 +1753,10 @@ int main(int argc, char **argv)
         }
     }
 
+    if (opt.query_info) {
+        send_control(g_state.conn, &opt, "@i?");
+    }
+
     if (opt.uart) {
         char cmd[80];
         snprintf(cmd, sizeof(cmd), "@u=%s", normalize_uart_spec(opt.uart));
@@ -1822,6 +1777,13 @@ int main(int argc, char **argv)
     }
     if (opt.query_wifi) {
         send_control(g_state.conn, &opt, "@w?");
+    }
+    if (opt.wifi_scan) {
+        send_control(g_state.conn, &opt, "@w scan");
+        for (int i = 0; i < 50; i++) {
+            dbus_connection_read_write_dispatch(g_state.conn, 100);
+            process_queued_rx(&opt);
+        }
     }
 
     if (opt.webdav) {

@@ -27,8 +27,10 @@
 #include <zephyr/storage/flash_map.h>
 #include <zephyr/sys/atomic.h>
 #include <zephyr/sys/ring_buffer.h>
+#include <zephyr/version.h>
 
 #include "wifi.h"
+#include "ws_bridge.h"
 
 LOG_MODULE_REGISTER(linkr_ble_bridge, LOG_LEVEL_INF);
 
@@ -53,8 +55,6 @@ LOG_MODULE_REGISTER(linkr_ble_bridge, LOG_LEVEL_INF);
 #define CONTROL_RESPONSE_QUEUE_DEPTH 16
 #define FACTORY_RESET_CONFIRM_MS 2000
 #define FACTORY_RESET_SAMPLE_MS 100
-#define PAIRING_PASSKEY 123456U
-
 #if DT_NODE_HAS_STATUS(DT_ALIAS(led0), okay)
 #define ACTIVITY_LED_NODE DT_ALIAS(led0)
 #endif
@@ -129,9 +129,6 @@ static struct k_mutex uart_config_lock;
 static struct k_work_delayable advertise_work;
 static atomic_t nus_notify_enabled;
 static atomic_t control_response_needs_settle;
-#if IS_ENABLED(CONFIG_BT_SMP)
-static atomic_t security_upgrade_pending;
-#endif
 static uint8_t linkr_identity = BT_ID_DEFAULT;
 static uint16_t control_frame_expected;
 static uint16_t control_frame_received;
@@ -155,6 +152,7 @@ static struct uart_config active_uart_config = {
 
 K_MSGQ_DEFINE(ble_to_uart_queue, sizeof(struct bridge_packet),
 		      CONFIG_LINKR_BLE_BRIDGE_BLE_TO_UART_QUEUE_DEPTH, 4);
+K_MUTEX_DEFINE(ble_to_uart_queue_lock);
 K_MSGQ_DEFINE(control_response_queue, sizeof(struct control_response),
 		      CONTROL_RESPONSE_QUEUE_DEPTH, 4);
 K_SEM_DEFINE(bridge_start_sem, 0, 5);
@@ -264,7 +262,7 @@ static int erase_factory_settings(void)
 	int err;
 
 	/* storage_partition is the settings/NVS area. Erase it before Bluetooth
-	 * starts so no previous bond, identity, or Linkr configuration is loaded. */
+	 * starts so no previous identity or Linkr configuration is loaded. */
 	err = flash_area_open(PARTITION_ID(storage_partition), &area);
 	if (err) {
 		LOG_ERR("Factory-reset storage open failed: %d", err);
@@ -278,12 +276,12 @@ static int erase_factory_settings(void)
 
 	LOG_WRN("Factory reset requested: erasing %u-byte settings/NVS area",
 		(unsigned int)area->fa_size);
-	printk("Factory reset: erasing settings/NVS; owner and configuration cleared\n");
+	printk("Factory reset: erasing settings/NVS and saved configuration\n");
 	err = flash_area_erase(area, 0, area->fa_size);
 	if (err) {
 		LOG_ERR("Factory-reset storage erase failed: %d", err);
 	} else {
-		printk("Factory reset complete; device is ready for a new owner\n");
+		printk("Factory reset complete; BLE identity will be regenerated\n");
 	}
 
 close_area:
@@ -344,28 +342,9 @@ static const struct bt_data sd[] = {
 	BT_DATA(BT_DATA_NAME_COMPLETE, DEVICE_NAME, DEVICE_NAME_LEN),
 };
 
-#if IS_ENABLED(CONFIG_BT_SMP)
-static void bond_counter(const struct bt_bond_info *info, void *user_data)
-{
-	bool *has_bond = user_data;
-
-	ARG_UNUSED(info);
-	*has_bond = true;
-}
-
-static bool identity_has_bond(uint8_t id)
-{
-	bool has_bond = false;
-
-	bt_foreach_bond(id, bond_counter, &has_bond);
-	return has_bond;
-}
-#endif
-
 /* Use a settings-backed random-static identity instead of the controller's
  * fixed public address. Erasing settings therefore gives a factory-reset unit
- * a new address, preventing hosts from reusing a stale CoreBluetooth name.
- * Preserve a bonded default identity during one-time upgrades. */
+ * a new address, preventing hosts from reusing stale CoreBluetooth metadata. */
 static int linkr_identity_init(void)
 {
 	bt_addr_le_t addrs[CONFIG_BT_ID_MAX];
@@ -380,15 +359,6 @@ static int linkr_identity_init(void)
 			break;
 		}
 	}
-
-#if IS_ENABLED(CONFIG_BT_SMP)
-	if (id < 0 && identity_has_bond(BT_ID_DEFAULT)) {
-		/* Older firmware bonded on identity 0. Keep it until the owner uses
-		 * factory reset, which erases that bond and permits identity creation. */
-		id = BT_ID_DEFAULT;
-		LOG_WRN("Using legacy default BLE identity to preserve existing owner");
-	}
-#endif
 
 	if (id < 0) {
 		if (count > 1 && bt_addr_le_eq(&addrs[1], BT_ADDR_LE_ANY)) {
@@ -556,9 +526,6 @@ static void connected(struct bt_conn *conn, uint8_t err)
 	}
 	current_conn = bt_conn_ref(conn);
 	k_mutex_unlock(&conn_lock);
-#if IS_ENABLED(CONFIG_BT_SMP)
-	atomic_clear(&security_upgrade_pending);
-#endif
 
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_BLE_DIAG_MARKER)
 	ble_diag.connected_count++;
@@ -580,10 +547,6 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 
 	atomic_clear(&nus_notify_enabled);
 	atomic_clear(&control_response_needs_settle);
-#if IS_ENABLED(CONFIG_BT_SMP)
-	atomic_clear(&security_upgrade_pending);
-#endif
-	k_msgq_purge(&ble_to_uart_queue);
 	while (k_msgq_get(&control_response_queue, &response, K_NO_WAIT) == 0) {
 		if (response.conn) {
 			bt_conn_unref(response.conn);
@@ -598,10 +561,9 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 	schedule_ble_diag_marker_write();
 #endif
 	LOG_INF("BLE disconnected: 0x%02x", reason);
-	/* Persistent advertising normally resumes automatically, but an SMP
-	 * disconnect can leave the controller between security and connection
-	 * teardown. Scheduling an explicit start is harmless when advertising has
-	 * already resumed (-EALREADY) and recovers the headless pairing path. */
+	/* Persistent advertising normally resumes automatically. Scheduling an
+	 * explicit start is harmless when it already resumed (-EALREADY), and also
+	 * recovers from controller-side disconnect edge cases. */
 	advertise_schedule(K_MSEC(100));
 }
 
@@ -611,101 +573,10 @@ static void recycled(void)
 	advertise_schedule(K_NO_WAIT);
 }
 
-#if IS_ENABLED(CONFIG_BT_SMP)
-#if IS_ENABLED(CONFIG_BT_SMP_APP_PAIRING_ACCEPT)
-static enum bt_security_err pairing_accept(struct bt_conn *conn,
-						   const struct bt_conn_pairing_feat *const feat)
-{
-	ARG_UNUSED(conn);
-	ARG_UNUSED(feat);
-	if (identity_has_bond(linkr_identity)) {
-		/* Factory-reset settings before transferring ownership. */
-		LOG_WRN("Rejecting pairing: bridge already has an owner");
-		return BT_SECURITY_ERR_PAIR_NOT_ALLOWED;
-	}
-
-	return BT_SECURITY_ERR_SUCCESS;
-}
-#endif
-
-static void pairing_cancelled(struct bt_conn *conn)
-{
-	ARG_UNUSED(conn);
-	atomic_clear(&security_upgrade_pending);
-	LOG_WRN("BLE pairing cancelled");
-}
-
-static void pairing_complete(struct bt_conn *conn, bool bonded)
-{
-	ARG_UNUSED(conn);
-	atomic_clear(&security_upgrade_pending);
-	LOG_INF("BLE pairing complete%s", bonded ? " (owner saved)" : "");
-}
-
-static void pairing_failed(struct bt_conn *conn, enum bt_security_err reason)
-{
-	ARG_UNUSED(conn);
-	atomic_clear(&security_upgrade_pending);
-	LOG_WRN("BLE pairing failed: %d", reason);
-}
-
-static void passkey_display(struct bt_conn *conn, unsigned int passkey)
-{
-	char addr[BT_ADDR_LE_STR_LEN];
-
-	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
-	printk("Linkr BLE pairing code for %s: %06u\n", addr, passkey);
-	LOG_INF("Enter BLE pairing code %06u on the central", passkey);
-}
-
-#if IS_ENABLED(CONFIG_BT_APP_PASSKEY)
-static uint32_t pairing_passkey(struct bt_conn *conn)
-{
-	ARG_UNUSED(conn);
-	return PAIRING_PASSKEY;
-}
-#endif
-
-static struct bt_conn_auth_cb auth_callbacks = {
-#if IS_ENABLED(CONFIG_BT_SMP_APP_PAIRING_ACCEPT)
-	.pairing_accept = pairing_accept,
-#endif
-	.passkey_display = passkey_display,
-	.cancel = pairing_cancelled,
-#if IS_ENABLED(CONFIG_BT_APP_PASSKEY)
-	.app_passkey = pairing_passkey,
-#endif
-};
-
-static struct bt_conn_auth_info_cb auth_info_callbacks = {
-	.pairing_complete = pairing_complete,
-	.pairing_failed = pairing_failed,
-};
-
-static void security_changed(struct bt_conn *conn, bt_security_t level,
-			     enum bt_security_err err)
-{
-	ARG_UNUSED(conn);
-
-	if (err) {
-		atomic_clear(&security_upgrade_pending);
-		LOG_WRN("BLE security failed: level %u err %u", level, err);
-	} else {
-		if (level >= BT_SECURITY_L3) {
-			atomic_clear(&security_upgrade_pending);
-		}
-		LOG_INF("BLE security level changed: %u", level);
-	}
-}
-#endif
-
 BT_CONN_CB_DEFINE(conn_callbacks) = {
 	.connected = connected,
 	.disconnected = disconnected,
 	.recycled = recycled,
-#if IS_ENABLED(CONFIG_BT_SMP)
-	.security_changed = security_changed,
-#endif
 };
 
 static void nus_notif_enabled(bool enabled, void *ctx)
@@ -947,6 +818,36 @@ static int apply_uart_config(const struct uart_config *cfg)
 	return err;
 }
 
+static void diagnostics_response(struct bt_conn *conn)
+{
+	char status[CONTROL_RESPONSE_MAX_LEN - 16];
+	uint32_t dropped = 0;
+	uint32_t buffered = ring_buf_size_get(&uart_rx_ring);
+	bt_security_t security = bt_conn_get_security(conn);
+
+#if !IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY)
+	dropped = (uint32_t)atomic_get(&uart_rx_dropped);
+#endif
+	(void)send_control_response(conn, "@info fw version=%s zephyr=%s\r\n",
+				    CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION,
+				    KERNEL_VERSION_STRING);
+	(void)send_control_response(conn,
+				    "@info sys uptime_ms=%lld owner=%u security=%u\r\n",
+				    (long long)k_uptime_get(), 0U,
+				    (unsigned int)security);
+	(void)send_control_response(conn,
+				    "@info uart dropped=%u buffer=%u/%u\r\n",
+				    dropped, buffered, UART_RX_BUFFER_SIZE);
+
+	(void)linkr_wifi_diagnostics(status, sizeof(status));
+	(void)send_control_response(conn, "@info wifi %s\r\n", status);
+	(void)linkr_upload_diagnostics(status, sizeof(status));
+	(void)send_control_response(conn, "@info upload %s\r\n", status);
+	(void)linkr_ws_diagnostics(status, sizeof(status));
+	(void)send_control_response(conn, "@info ws %s\r\n", status);
+	(void)send_control_response(conn, "@info done\r\n");
+}
+
 static bool handle_control_command_complete(struct bt_conn *conn,
 					    const uint8_t *data, uint16_t len)
 {
@@ -971,8 +872,8 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 		if (len == 2 && data[0] == '@' && data[1] == 'h') {
 			short_ch = 'h';
 		} else if (len >= 2 && data[0] == '@' &&
-			   (data[1] == 'u' || data[1] == 'w' ||
-			    data[1] == 'd') &&
+			   (data[1] == 'i' || data[1] == 'u' || data[1] == 'w' ||
+			    data[1] == 'd' || data[1] == 's') &&
 			   (len == 2 || data[2] == '?' ||
 			    data[2] == '=' || data[2] == ' ')) {
 			short_ch = data[1];
@@ -997,9 +898,15 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 
 	if (!strcmp(body, "help") || !strcmp(body, "h")) {
 		(void)send_control_response(conn,
-					    "OK cmds: @u?|@u=baud,data,par,stop,flow "
+					    "OK cmds: @i? @u?|@u=baud,data,par,stop,flow "
 					    "@w?|@w=ssid,pass|@w off|@w scan "
-					    "@d?|@d=http://host/path/|@d off\r\n");
+					    "@d?|@d=http://host/path/|@d off "
+					    "@s?|@s on|@s off\r\n");
+		return true;
+	}
+
+	if (!strcmp(body, "info?") || !strcmp(body, "i?")) {
+		diagnostics_response(conn);
 		return true;
 	}
 
@@ -1037,35 +944,6 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 	}
 
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_WIFI)
-	bool is_wifi_scan = !strcmp(body, "wifi scan") ||
-			    !strcmp(body, "w scan");
-
-	if (!is_wifi_scan &&
-	    (body[0] == 'w' || body[0] == 'd' ||
-	     !strncmp(body, "wifi", 4) || !strncmp(body, "webdav", 6)) &&
-	    bt_conn_get_security(conn) < BT_SECURITY_L3) {
-		err = 0;
-		if (atomic_cas(&security_upgrade_pending, 0, 1)) {
-			bt_security_t security = BT_SECURITY_L3;
-
-			/* A central may retain a stale bond after the bridge settings
-			 * were erased. With no local owner, force a fresh headless
-			 * passkey exchange instead of waiting for unusable old keys. */
-			if (!identity_has_bond(linkr_identity)) {
-				security |= BT_SECURITY_FORCE_PAIR;
-			}
-			err = bt_conn_set_security(conn, security);
-			if (err) {
-				atomic_clear(&security_upgrade_pending);
-			}
-		}
-		(void)send_control_response(conn,
-					    err ? "ERR pairing=%d\r\n"
-						: "ERR pairing required; enter 123456 then retry\r\n",
-					    err);
-		return true;
-	}
-
 	/* ---- WiFi (@w / @linkr wifi) ---- */
 	if (!strcmp(body, "wifi?") || !strcmp(body, "w?")) {
 		char status[80];
@@ -1158,6 +1036,30 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 		(void)send_control_response(conn,
 					    err ? "ERR webdav=%d\r\n"
 						: "OK webdav off\r\n",
+					    err);
+		return true;
+	}
+
+	/* ---- WebSocket bridge (@s / @linkr socket) ---- */
+	if (!strcmp(body, "socket?") || !strcmp(body, "s?")) {
+		char status[64];
+
+		linkr_ws_status(status, sizeof(status));
+		(void)send_control_response(conn, "OK %s\r\n", status);
+		return true;
+	}
+	if (!strcmp(body, "socket on") || !strcmp(body, "s on")) {
+		err = linkr_ws_set_enabled(true);
+		(void)send_control_response(conn,
+					    err ? "ERR ws=%d\r\n" : "OK ws on\r\n",
+					    err);
+		return true;
+	}
+	if (!strcmp(body, "socket off") || !strcmp(body, "s off")) {
+		err = linkr_ws_set_enabled(false);
+		(void)send_control_response(conn,
+					    err ? "ERR ws=%d\r\n"
+						: "OK ws off\r\n",
 					    err);
 		return true;
 	}
@@ -1273,7 +1175,6 @@ static bool handle_control_command(struct bt_conn *conn, const uint8_t *data,
 static void nus_received(struct bt_conn *conn, const void *data, uint16_t len,
 			 void *ctx)
 {
-	struct bridge_packet packet = { 0 };
 	const uint8_t *bytes = data;
 
 	ARG_UNUSED(ctx);
@@ -1284,11 +1185,18 @@ static void nus_received(struct bt_conn *conn, const void *data, uint16_t len,
 		return;
 	}
 
+#if !IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_BLE_ECHO)
+	if (linkr_uart_write(bytes, len) != 0) {
+		LOG_WRN("Dropping BLE->UART write; queue full");
+	}
+	return;
+#else
+	struct bridge_packet packet = { 0 };
+
 	while (len > 0) {
 		packet.len = MIN(len, sizeof(packet.data));
 		memcpy(packet.data, bytes, packet.len);
 
-#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_BLE_ECHO)
 		int err = bt_nus_send(conn, packet.data, packet.len);
 
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_BLE_DIAG_MARKER)
@@ -1307,16 +1215,11 @@ static void nus_received(struct bt_conn *conn, const void *data, uint16_t len,
 		} else {
 			signal_uart_activity();
 		}
-#else
-		if (k_msgq_put(&ble_to_uart_queue, &packet, K_NO_WAIT) != 0) {
-			LOG_WRN("Dropping BLE->UART packet; queue full");
-			return;
-		}
-#endif
 
 		bytes += packet.len;
 		len -= packet.len;
 	}
+#endif
 }
 
 static struct bt_nus_cb nus_callbacks = {
@@ -1353,6 +1256,44 @@ static void write_loopback_marker(bool ok, unsigned int pass_count,
 	}
 }
 #endif
+
+int linkr_uart_write(const uint8_t *data, size_t len)
+{
+	struct bridge_packet packet;
+	size_t packets_needed;
+	int err = 0;
+
+	if (!data && len) {
+		return -EINVAL;
+	}
+	if (!len) {
+		return 0;
+	}
+
+	packets_needed = DIV_ROUND_UP(len, sizeof(packet.data));
+	k_mutex_lock(&ble_to_uart_queue_lock, K_FOREVER);
+	if (k_msgq_num_free_get(&ble_to_uart_queue) < packets_needed) {
+		err = -ENOMEM;
+		goto out;
+	}
+
+	while (len > 0) {
+		packet.len = MIN(len, sizeof(packet.data));
+		memcpy(packet.data, data, packet.len);
+
+		err = k_msgq_put(&ble_to_uart_queue, &packet, K_NO_WAIT);
+		if (err) {
+			break;
+		}
+
+		data += packet.len;
+		len -= packet.len;
+	}
+
+out:
+	k_mutex_unlock(&ble_to_uart_queue_lock);
+	return err;
+}
 
 static void ble_to_uart_thread(void)
 {
@@ -1450,6 +1391,11 @@ static void control_response_thread(void)
 			LOG_WRN("Control notify failed: %d", err);
 		} else {
 			LOG_INF("Control notify sent: %u bytes", response.len);
+			/* WiFi and BLE share the ESP32-C3 radio and memory pools. A
+			 * short gap prevents a multi-line response (notably @i?) from
+			 * filling the controller TX path immediately after WiFi start.
+			 */
+			k_sleep(K_MSEC(10));
 		}
 		bt_conn_unref(response.conn);
 	}
@@ -1492,6 +1438,7 @@ static void uart_to_ble_thread(void)
 
 			if (len == sizeof(buf)) {
 				linkr_log_feed(buf, len);
+				linkr_ws_feed(buf, len);
 				(void)nus_send_chunk(buf, len);
 				len = 0;
 			}
@@ -1502,6 +1449,7 @@ static void uart_to_ble_thread(void)
 		if (len > 0 &&
 		    k_uptime_get() - last_rx >= CONFIG_LINKR_BLE_BRIDGE_UART_IDLE_MS) {
 			linkr_log_feed(buf, len);
+			linkr_ws_feed(buf, len);
 			(void)nus_send_chunk(buf, len);
 			len = 0;
 		}
@@ -1719,19 +1667,6 @@ int main(void)
 		return err;
 	}
 
-#if IS_ENABLED(CONFIG_BT_SMP)
-	err = bt_conn_auth_cb_register(&auth_callbacks);
-	if (err) {
-		LOG_ERR("BLE auth callback registration failed: %d", err);
-		return err;
-	}
-	err = bt_conn_auth_info_cb_register(&auth_info_callbacks);
-	if (err) {
-		LOG_ERR("BLE auth info callback registration failed: %d", err);
-		return err;
-	}
-#endif
-
 #if IS_ENABLED(CONFIG_SETTINGS)
 	err = settings_subsys_init();
 	if (err) {
@@ -1756,6 +1691,11 @@ int main(void)
 		LOG_WRN("WiFi init failed: %d (WiFi disabled)", err);
 	} else {
 		linkr_wifi_set_respond_fn(wifi_scan_respond);
+	}
+
+	err = linkr_ws_init();
+	if (err) {
+		LOG_WRN("WS bridge init failed: %d (WS bridge disabled)", err);
 	}
 
 	advertise_schedule(K_NO_WAIT);

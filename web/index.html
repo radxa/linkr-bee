@@ -4,10 +4,10 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Linkr BLE Terminal</title>
-    <meta name="theme-color" id="themeColorMeta" content="#0d1014" />
+    <meta name="theme-color" id="themeColorMeta" content="#090d14" />
     <link
       rel="icon"
-      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%234fb477'/%3E%3Cpath d='M7 7l10 10-4 4V3l4 4L7 17' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%233fc88a'/%3E%3Cpath d='M7 7l10 10-4 4V3l4 4L7 17' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"
     />
     <link
       rel="stylesheet"
@@ -75,6 +75,14 @@
           <div class="card-title">
             <span class="dot"></span><span data-i18n="connection">Connection</span>
           </div>
+          <div class="transport-switch" role="group" aria-label="Transport">
+            <button id="bleModeBtn" class="ts-btn active" type="button" data-i18n="bleMode">BLE</button>
+            <button id="lanModeBtn" class="ts-btn" type="button" data-i18n="lanMode">LAN</button>
+          </div>
+          <label class="field ws-host-field" id="wsHostField" hidden>
+            <span class="field-label" data-i18n="wsHost">Device address</span>
+            <input id="wsHostInput" type="text" data-i18n-ph="placeholderWsHost" placeholder="192.168.1.50" spellcheck="false" autocomplete="off">
+          </label>
           <div class="btn-grid">
             <button id="connectButton" class="btn btn-primary" type="button">
               <span class="spinner" aria-hidden="true"></span>
@@ -103,6 +111,46 @@
             </button>
           </div>
         </section>
+
+        <details id="diagnosticsPanel" class="card diagnostics-card">
+          <summary class="diagnostics-summary">
+            <span class="card-title">
+              <span class="dot"></span>
+              <span data-i18n="diagnostics">Device Diagnostics</span>
+            </span>
+          </summary>
+          <div class="diagnostics-content">
+            <div class="diagnostics-grid" id="diagnosticsGrid" aria-live="polite">
+              <div class="diagnostic-item">
+                <span data-i18n="diagFirmware">Firmware</span>
+                <strong id="diagFirmware">–</strong>
+              </div>
+              <div class="diagnostic-item">
+                <span data-i18n="diagUptime">Uptime</span>
+                <strong id="diagUptime">–</strong>
+              </div>
+              <div class="diagnostic-item">
+                <span data-i18n="diagOwner">BLE access</span>
+                <strong id="diagOwner">–</strong>
+              </div>
+              <div class="diagnostic-item">
+                <span data-i18n="diagUart">UART Buffer</span>
+                <strong id="diagUart">–</strong>
+              </div>
+              <div class="diagnostic-item">
+                <span data-i18n="diagWifi">WiFi</span>
+                <strong id="diagWifi">–</strong>
+              </div>
+              <div class="diagnostic-item">
+                <span data-i18n="diagUpload">Upload Queue</span>
+                <strong id="diagUpload">–</strong>
+              </div>
+            </div>
+            <button id="diagnosticsButton" class="btn btn-soft diagnostics-button" type="button" disabled="">
+              <span class="btn-label" data-i18n="refreshDiagnostics">Refresh diagnostics</span>
+            </button>
+          </div>
+        </details>
 
         <section class="card" aria-label="Terminal settings">
           <div class="card-title"><span class="dot"></span><span data-i18n="terminalSettings">Terminal Settings</span></div>
@@ -158,25 +206,54 @@
 
         <section class="card" aria-label="WiFi and WebDAV">
           <div class="card-title"><span class="dot"></span><span data-i18n="wifiWebdav">WiFi &amp; WebDAV</span></div>
-          <label class="field">
-            <span class="field-label" data-i18n="wifi">WiFi</span>
-            <span class="field-row">
-              <input id="wifiInput" type="text" list="wifiSsidList" data-i18n-ph="placeholderWifi" placeholder="SSID,pass" spellcheck="false" autocomplete="off">
-              <button id="wifiSetButton" class="btn btn-soft" type="button" disabled="">
-                <span class="btn-label" data-i18n="set">Set</span>
-              </button>
-            </span>
-            <datalist id="wifiSsidList"></datalist>
-          </label>
-          <div class="btn-grid compact">
+          <div id="wifiConnectedSummary" class="wifi-connected-summary" hidden>
+            <div class="wifi-connected-network">
+              <span class="wifi-connected-mark" aria-hidden="true"></span>
+              <span class="wifi-connected-copy">
+                <span class="wifi-connected-label" data-i18n="connectedNetwork">Connected network</span>
+                <strong id="wifiConnectedSsid">–</strong>
+              </span>
+            </div>
+            <div class="wifi-device-address">
+              <span data-i18n="deviceIp">Device IP</span>
+              <output id="wifiDeviceIp">–</output>
+            </div>
+          </div>
+          <div class="wifi-form">
+            <label class="field" for="wifiSsidInput">
+              <span class="field-label" data-i18n="wifiSsid">Network name</span>
+              <input id="wifiSsidInput" type="text" list="wifiSsidList" data-i18n-ph="placeholderWifiSsid" placeholder="SSID" spellcheck="false" autocomplete="off">
+              <datalist id="wifiSsidList"></datalist>
+            </label>
+            <label class="field" for="wifiPasswordInput">
+              <span class="field-label" data-i18n="wifiPassword">Password</span>
+              <span class="password-row">
+                <input id="wifiPasswordInput" type="password" data-i18n-ph="placeholderWifiPassword" placeholder="Leave blank for an open network" autocomplete="off">
+                <button id="wifiPasswordToggle" class="btn btn-soft password-toggle" type="button" data-i18n-aria="showPassword" aria-label="Show password" aria-pressed="false">
+                  <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12z"></path>
+                    <circle cx="12" cy="12" r="2.5"></circle>
+                  </svg>
+                </button>
+              </span>
+            </label>
+            <div id="wifiNetworkList" class="wifi-network-list" aria-live="polite"></div>
+            <p id="wifiFeedback" class="field-hint wifi-feedback" role="status" data-i18n="wifiScanHint">Scan to select a nearby 2.4 GHz network.</p>
+          </div>
+          <div class="btn-grid compact wifi-actions">
             <button id="wifiScanButton" class="btn btn-soft" type="button" disabled="">
               <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
               <span class="btn-label" data-i18n="scan">Scan</span>
             </button>
+            <button id="wifiSetButton" class="btn btn-primary" type="button" disabled="">
+              <span class="btn-label" data-i18n="connectWifi">Connect WiFi</span>
+            </button>
             <button id="wifiOffButton" class="btn btn-soft" type="button" disabled="">
               <span class="btn-label" data-i18n="off">Off</span>
             </button>
-            <button id="wifiQueryButton" class="btn btn-soft" type="button" disabled="">?</button>
+            <button id="wifiQueryButton" class="btn btn-soft" type="button" disabled="">
+              <span class="btn-label" data-i18n="wifiStatus">WiFi status</span>
+            </button>
           </div>
 
           <label class="field">
@@ -192,7 +269,9 @@
             <button id="webdavOffButton" class="btn btn-soft" type="button" disabled="">
               <span class="btn-label" data-i18n="off">Off</span>
             </button>
-            <button id="webdavQueryButton" class="btn btn-soft" type="button" disabled="">?</button>
+            <button id="webdavQueryButton" class="btn btn-soft" type="button" disabled="">
+              <span class="btn-label" data-i18n="webdavStatus">WebDAV status</span>
+            </button>
           </div>
         </section>
 
@@ -275,6 +354,6 @@
 
     <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/lib/xterm.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.11.0/lib/addon-fit.js"></script>
-    <script src="./app.js"></script>
+    <script src="./app.js?v=20260723-transport-fixes1"></script>
   </body>
 </html>

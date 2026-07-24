@@ -15,8 +15,8 @@ Linkr 卡片/设备集成有意留到后续层。
 
 - 固件目标：ESP32-C3 DevKitM、DevKitC 与 Super Mini
 - Zephyr：**v4.4.1**
-- 默认功能：BLE UART bridge、WiFi station 控制、匿名 HTTP WebDAV 日志上传
-- BLE-only 功能集：`CONFIG_LINKR_BLE_BRIDGE_WIFI=n`
+- 唯一固件功能：BLE UART bridge、WiFi station 控制、匿名 HTTP WebDAV 日志上传
+  与 UART-over-WebSocket 局域网访问
 
 ## 构建
 
@@ -40,6 +40,33 @@ ESP32-C3 Super Mini：
 ```sh
 west build -b esp32c3_supermini /Users/xiangzelong/Dev/linkr-ble
 ```
+
+### Gitea Actions 构建与刷写
+
+`.gitea/workflows/build.yml` 只构建一个量产固件：面向
+`esp32c3_supermini` 的默认 WiFi + BLE 配置。它会在 `main` push、版本 tag、
+pull request 和手动触发时运行，使用 Zephyr v4.4.1 与 Zephyr SDK 1.0.1。
+
+从完成的 Actions run 下载 `linkr-ble-esp32c3-supermini` artifact，解压后在
+macOS 或 Linux 安装
+[`esptool`](https://docs.espressif.com/projects/esptool/en/latest/esp32c3/)，
+连接设备并执行：
+
+```sh
+./flash_firmware.sh
+```
+
+连接了多个串口设备时显式指定端口：
+
+```sh
+./flash_firmware.sh --port /dev/cu.usbmodemXXXX
+```
+
+脚本会把合并后的 ESP32-C3 镜像写入 `0x0`，但不执行整片擦除。它只重写镜像
+覆盖的扇区，不会触碰位于 `0x3b0000` 的 settings 分区，因此普通升级会保留
+BLE identity 和已保存配置；需要清除它们时仍使用 GPIO0 + GND 恢复
+出厂。artifact 还包含 `FLASHING.txt`、`firmware.json`、ELF、linker map、
+最终 Kconfig、runner metadata 与 `SHA256SUMS`，便于调试和追溯。
 
 ## UART 选择
 
@@ -86,12 +113,9 @@ ERR format: @u=115200,8,n,1,n
 
 ## WiFi 与 WebDAV 日志上传
 
-WiFi + WebDAV 功能默认启用（`CONFIG_LINKR_BLE_BRIDGE_WIFI=y`），但无线电默认关闭，直到用户发送 `@w=ssid,pass`。该 Kconfig 开关会选择网络、WiFi、DNS 和 HTTP 依赖；构建 BLE-only 镜像时会一并移除：
-
-```sh
-west build -p always -b esp32c3_supermini /Users/xiangzelong/Dev/linkr-ble -- \
-  -DCONFIG_LINKR_BLE_BRIDGE_WIFI=n
-```
+项目只维护一个同时包含 WiFi、WebDAV 和 WebSocket 的固件。WiFi 无线电默认
+关闭，直到用户发送 `@w=ssid,pass`；未配网设备仍可直接作为 BLE UART bridge
+使用，不再需要单独的纯 BLE 镜像。
 
 WiFi 凭据默认只保存在 RAM，重启即丢失。仅在量产设备已经启用 secure boot 和 flash encryption 时，才应设置 `CONFIG_LINKR_BLE_BRIDGE_PERSIST_CREDENTIALS=y`：该选项会将 PSK 写入 Zephyr settings/NVS；未加密 flash 上可被读取。启用后才会在重启时自动连接。匿名 WebDAV URL 和上传 boot 计数器独立持久化，避免重启后文件名冲突。
 
@@ -110,49 +134,80 @@ ESP32-C3 SoC WiFi 驱动是 `CONFIG_WIFI_ESP32`（定义于 `drivers/wifi/esp32/
 
 `src/wifi.c` 中的应用代码使用标准 `net_mgmt` / `wifi_mgmt` API（`NET_REQUEST_WIFI_CONNECT`、`NET_EVENT_WIFI_CONNECT_RESULT`），并在连接成功时自行启动 DHCPv4，因此无需 `CONFIG_NET_CONFIG_AUTO_INIT`。
 
-### BLE 配对、owner、持久化与恢复出厂
+### UART over WebSocket(局域网桥)
 
-BLE 配对保护的是**管理面**，不是通用 NUS UART 数据流。WiFi/WebDAV 管理命令（包括 `@w?` 和 `@d?`）都要求 BLE Security Level 3：链路已加密，并通过配对码完成认证。唯一例外是只读的 `@w scan`，它可在配对前发现附近 SSID，但不会读取或修改已保存凭据。若其他管理命令到达时安全级别不足，固件会请求提升安全级别、返回“需要配对”的响应；完成配对后必须重试原命令。原始 NUS UART 数据和 `@u...` UART 配置刻意不在这个门禁内；若 SBC console 含敏感信息，必须确认这种访问模型可接受。
+WiFi 拿到 IP 地址后,固件还会把桥接 UART 暴露为 WebSocket 端点,局域网客户端可完全绕过 BLE 的距离与 MTU 限制:
 
-设备没有显示屏，因此使用固定 BLE 配对码 **123456**；在浏览器或操作系统弹出的密码框中输入即可。成功后的 BLE bond 由 Zephyr settings/NVS 保存。固件将“存在任意 bond”视为已经有 owner：只接受一个已绑定中心设备，并拒绝之后所有新的配对请求。因此，在手机或电脑端“忽略/删除此设备”不会解除 bridge 上的 owner；移交给新 owner 前需要恢复出厂。由于固定配对码已经公开，首次配对的有效信任边界仍是可控物理距离、单 owner 与 GPIO0 恢复出厂机制。
+- 端点:`ws://<设备 IP>/ws`(端口由 `CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_PORT` 决定,默认 80)
+- 协议:二进制 WebSocket 帧双向承载原始 UART 字节,没有任何额外封装——发什么就写进 UART,UART 收到什么就广播给所有已连接客户端
+- 客户端数:最多 `CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_MAX_CLIENTS` 个(默认 2),每个客户端独立 TX 环形缓冲;慢客户端丢弃最旧数据,不会拖慢桥
+- 运行时控制:`@s on|off|?`;开关状态持久化到 settings。`@i?` 诊断包含 `@info ws state=up port=80 clients=N tx=… rx=… dropped=…`
+- 可选门槛:`CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_AUTH_TOKEN` 要求客户端在 3 秒内把 token 作为首条文本帧发送
+- 整体关闭:`-DCONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE=n`
+
+Web 终端(`web/`)的「连接」卡片里有 BLE/局域网切换;局域网模式连接 `ws://<主机>/ws`,终端输入、快捷命令、计数器照常工作,仅 BLE 专属的控制按钮(`@u`/`@w`/`@d`/`@i?`)被禁用。当 BLE 诊断拿到 IP 时,局域网地址输入框会自动预填。WebDAV 日志上传并行运行不受影响。
+
+### 开放 BLE 访问、持久化与恢复出厂
+
+为保证当前开发流程稳定，固件暂时关闭 BLE 配对、bond 与 owner 门禁。附近任何能够连接 NUS 服务的中心设备，都可以使用 UART 数据流以及 WiFi、WebDAV、WebSocket 等全部管理命令。不要把含敏感信息的 console 接到此开发固件，也不要在不可信的无线环境中部署。
 
 | 项目 | 默认值 / 持久化规则 | 清除或移交方式 |
 | --- | --- | --- |
-| BLE bond 与 owner | 始终由 `CONFIG_BT_SETTINGS` 持久化到 NVS | 仅 GPIO0 恢复出厂；没有可通过 BLE 调用的解除 owner 命令 |
-| BLE identity/address | 随机静态 Linkr identity 持久化在 NVS，正常重启继续复用 | GPIO0 恢复出厂会生成新的 identity/address，避免系统沿用旧名称或 bond 缓存 |
+| BLE identity/address | 随机静态 Linkr identity 持久化在 NVS，正常重启继续复用 | GPIO0 恢复出厂会生成新的 identity/address，避免系统沿用旧名称缓存 |
 | WiFi SSID/PSK | 默认仅 RAM；`CONFIG_LINKR_BLE_BRIDGE_PERSIST_CREDENTIALS=y` 才保存并在启动时重连 | `@w off` 停用并断开；恢复出厂会擦除 |
 | WebDAV 目标 | 匿名 URL 独立于 WiFi 凭据持久化设置，默认也会保存 | `@d off` 停用；恢复出厂会擦除 |
 | 上传 boot ID | 上传器分配新的 boot ID 时保存，避免重启后复用文件名 | 恢复出厂会擦除 |
 
-保存的 WiFi 和 WebDAV 配置都是单条、带版本的 settings 记录；启动时会忽略无效或不安全的记录。凭据持久化 Kconfig 是量产前提，不是运行时检测：只有在 secure boot 与 flash encryption 确实已完成烧录时才能开启。未加密设备把 SSID/PSK 写入 NVS 后，仍可能被从 flash 读取。`@w off` 是功能性清除，不是经过验证的安全擦除；设备报废或 owner 移交时应使用恢复出厂。
+保存的 WiFi 和 WebDAV 配置都是单条、带版本的 settings 记录；启动时会忽略无效或不安全的记录。凭据持久化 Kconfig 是量产前提，不是运行时检测：只有在 secure boot 与 flash encryption 确实已完成烧录时才能开启。未加密设备把 SSID/PSK 写入 NVS 后，仍可能被从 flash 读取。`@w off` 是功能性清除，不是经过验证的安全擦除；设备报废或重新配置时应使用恢复出厂。
 
-恢复出厂时，在设备复位或上电后将 **GPIO0 与 GND 短接**，并持续保持两秒。固件会在 Bluetooth 与 settings 加载前擦除整个 `storage_partition`，清除 BLE owner/bond、Bluetooth identity 数据、Linkr 的 WiFi/WebDAV 配置和上传 boot 计数器。设备将以未绑定状态启动，BLE identity 也可能重新生成。不要让 GPIO0 永久接地，并将该焊盘或按键的物理访问视为恢复出厂权限。该操作不会擦除固件、测试 marker 分区或 coredump 存储。
+恢复出厂时，在设备复位或上电后将 **GPIO0 与 GND 短接**，并持续保持两秒。固件会在 Bluetooth 与 settings 加载前擦除整个 `storage_partition`，清除 Bluetooth identity 数据、Linkr 的 WiFi/WebDAV 配置和上传 boot 计数器，并生成新的随机静态 BLE identity/address。不要让 GPIO0 永久接地，并将该焊盘或按键的物理访问视为恢复出厂权限。该操作不会擦除固件、测试 marker 分区或 coredump 存储。
 
-Python 工具对 WiFi/WebDAV 操作会自动配对（或使用 `--pair`）；C 工具需要运行中的 BlueZ pairing agent；Web Bluetooth 会显示浏览器或系统原生配对框，配对码为 **123456**，完成后需重新点击原操作。BLE 配对不会加密后续 WebDAV 上传：当前上传器仅接受匿名 HTTP，因此只能在可信局域网使用。
+Python、C 与 Web Bluetooth 客户端都会直接发送管理命令；`--pair` 仅作为兼容参数保留，当前是无操作。WebDAV 上传器也只接受匿名 HTTP，因此只能在可信局域网使用。
 
 UART RX 字节（SBC console 输出）会被缓存，并定期 HTTP PUT 到 `<webdav_url>log-<boot-id>-<sequence>-<uptime>.txt`。上传会等待 IPv4 地址、重试连接失败、为失败批次保留稳定文件名；更改目标或停用时会丢弃已排队旧数据。
 
 控制命令（短形式可放进 MTU 交换前默认 20 字节 BLE 写入）：
 
 ```text
+@i?                          读取设备诊断信息
+@w scan                      扫描附近 2.4 GHz WiFi（无需配对）
 @w?                          查询 WiFi 状态
 @w=MySSID,secret             连接 WiFi（默认仅保存到 RAM）
 @w off                       清除 WiFi 配置并断开
 @d?                          查询 WebDAV 状态
-@d=http://host/dav/             设置匿名 WebDAV 目标并启用上传
+@d=http://host/dav/          设置匿名 WebDAV 目标并启用上传
 @d off                       停用 WebDAV 上传
 ```
 
-长形式 `@linkr wifi?`、`@linkr wifi=...`、`@linkr webdav=...` 也被接受。响应通过 NUS TX 通知特征回传：
+长形式 `@linkr info?`、`@linkr wifi scan`、`@linkr wifi?`、
+`@linkr wifi=...` 和 `@linkr webdav=...` 也被接受。响应通过 NUS TX
+通知特征回传：
 
 ```text
 OK wifi=connected,ssid=MySSID
 OK webdav=on,url=http://host/dav/
 ```
 
+诊断命令是只读操作。它会返回应用与 Zephyr 版本、运行时间、开放的 BLE
+访问/安全状态、UART 缓冲区使用量和丢字节数、WiFi/IP 状态，以及
+WebDAV 队列、丢弃、HTTP、失败和成功计数：
+
+```text
+@info fw version=0.2.0 zephyr=4.4.1
+@info sys uptime_ms=123456 owner=0 security=1
+@info uart dropped=0 buffer=0/16384
+@info wifi state=connected ip=ready error=0
+@info upload state=on queue=0 dropped=0 http=201 failures=0 successes=4
+@info done
+```
+
+应用版本由 `CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION` 设置。
+
 从 Python 终端：
 
 ```sh
+python3 tools/linkr_ble_terminal.py --query-info --no-terminal
+python3 tools/linkr_ble_terminal.py --wifi-scan --no-terminal
 python3 tools/linkr_ble_terminal.py --wifi MySSID,secret --query-wifi
 python3 tools/linkr_ble_terminal.py --webdav http://host/dav/
 ```
@@ -163,13 +218,16 @@ python3 tools/linkr_ble_terminal.py --webdav http://host/dav/
 
 当前上传器只接受匿名 HTTP 端点。固件会拒绝 Basic Auth 凭据，避免密码通过明文 HTTP 暴露在网络上。该模式仅适用于可信局域网；需要认证或公网部署时，应使用后续支持 HTTPS 且预置 CA 信任锚的构建。
 
-Web Bluetooth 终端以 `Set WiFi` / `WiFi ?` / `Set WebDAV` / `WebDAV ?` 按钮提供相同控制；C 参考终端接受 `--wifi`、`--wifi-off`、`--query-wifi`、`--webdav`、`--webdav-off`、`--query-webdav`。
+Web Bluetooth 终端提供独立的 SSID/密码输入框、WiFi 扫描列表、设备诊断和
+WebDAV 控制。C 参考终端接受 `--query-info`、`--wifi-scan`、`--wifi`、
+`--wifi-off`、`--query-wifi`、`--webdav`、`--webdav-off` 和
+`--query-webdav`。
 
 ## 测试选项
 
 所有测试选项默认关闭。
 
-可重复执行的本地回归检查会构建 WiFi 与 BLE-only 两种镜像，并检查 Python 和 shell
+可重复执行的本地回归检查只构建唯一的 WiFi + BLE 固件，并检查 Python 与 shell
 语法：
 
 ```sh
@@ -197,7 +255,7 @@ west build -p always -b esp32c3_devkitm /Users/xiangzelong/Dev/linkr-ble -- \
   -DEXTRA_CONF_FILE=test_loopback.conf
 ```
 
-BLE-only NUS echo 诊断不需要 UART 接线：
+使用同一完整固件功能集的 BLE NUS echo 诊断不需要 UART 接线：
 
 ```sh
 west build -p always -b esp32c3_supermini /Users/xiangzelong/Dev/linkr-ble -- \
@@ -300,6 +358,8 @@ ls -l /sys/class/bluetooth
 C 终端接受与 Python 终端相同的 Linkr BLE 默认值：
 
 ```sh
+./linkr_ble_terminal_c --query-info --no-terminal
+./linkr_ble_terminal_c --wifi-scan --no-terminal
 ./linkr_ble_terminal_c --query-uart --no-terminal
 ./linkr_ble_terminal_c --uart 115200,8,n,1,n
 ./linkr_ble_terminal_c --loopback-test A --no-terminal
@@ -358,6 +418,8 @@ GPIO21 短接到 GPIO20 时，运行 BLE→UART→BLE 回环检查：
 常用选项：
 
 - `Ctrl-]`：退出终端
+- `--query-info --no-terminal`：读取固件和运行时诊断
+- `--wifi-scan --no-terminal`：通过 bridge 列出附近 2.4 GHz WiFi
 - `--loopback-test A --no-terminal`：发送 `A` 并要求收到 `A`
 - `--scan --no-terminal`：列出附近 BLE 设备
 - `--address <BLE-address-or-UUID>`：按地址连接，跳过名称扫描
@@ -384,18 +446,35 @@ tools/serve_web.sh
 http://127.0.0.1:8765/
 ```
 
-使用 Chrome 或其他支持 Web Bluetooth 的 Chromium 浏览器。Web Bluetooth 要求安全上下文，因此用 `localhost` 或 HTTPS。设备选择必须从页面的 `Connect` 按钮触发；浏览器不允许网页静默扫描并连接。
+使用 Chrome 或其他支持 Web Bluetooth 的 Chromium 浏览器。Web Bluetooth
+要求安全上下文，因此用 `localhost` 或 HTTPS。首次授权设备仍须从页面的
+`Connect` 按钮打开系统设备选择器；浏览器不允许网页静默扫描并连接。授权
+完成后，支持 `navigator.bluetooth.getDevices()` 的浏览器会在刷新页面时恢复
+上次设备，之后点击 `Connect` 或 `Reconnect` 即可快速重连，无需再次打开选择器。
+如果保存的设备已不可用，页面会清除记录，并在下一次连接时回退到系统选择器；
+不支持 `getDevices()` 的浏览器始终使用系统选择器。
+
+固件将 NUS 服务 UUID 放在主广播包中，将 `Linkr BLE UART-3` 名称放在扫描
+响应中。页面按 NUS 服务 UUID 过滤浏览器设备选择器，这在 macOS Chromium
+浏览器上比只按名称过滤更可靠。
 
 页面可以：
 
-- 连接匹配 `Linkr BLE UART*` 名称前缀的设备
+- 连接广播 Linkr NUS 服务 UUID 的设备
+- 浏览器支持 `navigator.bluetooth.getDevices()` 时，在刷新后恢复上次已授权
+  的 Linkr 设备并快速重连
 - 订阅 TX 通知
-- 将终端输入写入 RX 特征
+- 默认折叠固件/运行时诊断；展开时才查询设备，也可按需手动刷新
+- 扫描附近 2.4 GHz WiFi，将结果填入独立的 SSID/密码输入框；密码不会写入
+  应用的 `localStorage`
+- 在 xterm.js 内直接捕获输入并写入 RX 特征，因此远端 shell 可使用系统原生
+  Tab 补全、命令历史方向键、退格、Ctrl-C 和粘贴
 - 用 `@u?` 和 `@u=...` 查询或设置 UART 模式
 - 调整换行和 BLE 写入块大小
 - 在系统等宽字体与常见本地 Nerd Font 之间切换，并预览 Powerline/Nerd
   字形；所选字体会按当前浏览器来源持久化，但网页不内置字体文件
 - 通过 xterm.js 渲染终端控制序列，包括光标移动、行擦除、readline 重绘、16 色、256 色和真彩色 SGR
+- 全屏显示终端，并在 viewport 或控制面板宽度变化时自动重新计算行列
 - 显示可选的本地回显和调试 I/O 跟踪
 - 将接收字节保存为日志文件
 

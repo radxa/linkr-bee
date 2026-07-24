@@ -69,6 +69,10 @@ jobs:
           grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WIFI=y' "${config}"
           grep -qx 'CONFIG_WIFI=y' "${config}"
           grep -qx 'CONFIG_NETWORKING=y' "${config}"
+          grep -qx 'CONFIG_NET_TCP=y' "${config}"
+          grep -qx 'CONFIG_HTTP_SERVER=y' "${config}"
+          grep -qx 'CONFIG_HTTP_SERVER_WEBSOCKET=y' "${config}"
+          grep -qx 'CONFIG_ZVFS_EVENTFD_MAX=2' "${config}"
           grep -qx 'CONFIG_BT=y' "${config}"
           grep -qx 'CONFIG_BUILD_OUTPUT_BIN=y' "${config}"
 
@@ -89,9 +93,34 @@ jobs:
             "${output}/linkr-ble-esp32c3-supermini.map"
           cp "${zephyr}/.config" "${output}/firmware.config"
           cp "${zephyr}/runners.yaml" "${output}/runners.yaml"
+          cp "${GITHUB_WORKSPACE}/app/tools/flash_firmware.sh" \
+            "${output}/flash_firmware.sh"
+          chmod +x "${output}/flash_firmware.sh"
 
           cd "${output}"
           sha256sum linkr-ble-esp32c3-supermini.bin > SHA256SUMS
+          version="$(sed -n 's/^CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION=\"\\(.*\\)\"/\\1/p' firmware.config)"
+          cat > firmware.json <<EOF
+          {
+            "project": "linkr-ble",
+            "version": "${version}",
+            "board": "esp32c3_supermini",
+            "chip": "esp32c3",
+            "flash_address": "0x0",
+            "image": "linkr-ble-esp32c3-supermini.bin",
+            "git_commit": "${GITHUB_SHA}"
+          }
+          EOF
+          cat > FLASHING.txt <<'EOF'
+          macOS / Linux:
+            ./flash_firmware.sh
+
+          Select a port explicitly when more than one device is connected:
+            ./flash_firmware.sh --port /dev/cu.usbmodemXXXX
+
+          The script preserves the settings partition. GPIO0 + GND factory
+          reset remains the supported way to clear owner and configuration.
+          EOF
 
       - name: Upload firmware
         uses: actions/upload-artifact@v3

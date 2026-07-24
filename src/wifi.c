@@ -58,6 +58,7 @@ static char webdav_pass[CRED_MAX + 1];
 
 static struct k_mutex cfg_lock;
 static struct net_mgmt_event_callback wifi_mgmt_cb;
+static struct net_mgmt_event_callback ip_mgmt_cb;
 static struct net_mgmt_event_callback wifi_scan_cb;
 static struct net_if *wifi_iface;
 
@@ -67,13 +68,30 @@ static struct net_if *wifi_iface;
 static linkr_wifi_respond_fn scan_respond;
 static struct bt_conn *scan_conn;
 static atomic_t scan_in_progress;
-static atomic_t scan_result_count;
 static struct k_work wifi_scan_work;
+static struct k_mutex scan_cache_lock;
+static struct k_work_delayable wifi_retry_work;
 static atomic_t wifi_connected;
 static atomic_t wifi_ip_ready;
+static atomic_t wifi_last_error;
 static atomic_t wifi_reconnect_enabled;
 static atomic_t webdav_configured;
 static atomic_t webdav_generation;
+static atomic_t log_dropped_bytes;
+static atomic_t upload_pending_bytes;
+static atomic_t upload_last_http_status;
+static atomic_t upload_failures;
+static atomic_t upload_successes;
+
+struct wifi_scan_cache_entry {
+    char ssid[WIFI_SSID_MAX_LEN + 1];
+    uint8_t channel;
+    int8_t rssi;
+    enum wifi_security_type security;
+};
+
+static struct wifi_scan_cache_entry scan_cache[WIFI_SCAN_MAX_RESULTS];
+static size_t scan_cache_count;
 
 RING_BUF_DECLARE(log_ring, LOG_RING_SIZE);
 static struct k_mutex log_lock;
@@ -128,6 +146,119 @@ struct webdav_url {
 };
 
 static int parse_webdav_url(const char *url, struct webdav_url *out);
+
+static void wifi_scan_cache_clear(void)
+{
+    k_mutex_lock(&scan_cache_lock, K_FOREVER);
+    memset(scan_cache, 0, sizeof(scan_cache));
+    scan_cache_count = 0;
+    k_mutex_unlock(&scan_cache_lock);
+}
+
+static void wifi_scan_cache_update(const struct wifi_scan_result *result)
+{
+    struct wifi_scan_cache_entry *entry = NULL;
+    char ssid[WIFI_SSID_MAX_LEN + 1];
+    size_t weakest = 0;
+    size_t ssid_len;
+
+    if (!result || result->ssid_length == 0 || result->ssid[0] == '\0') {
+        return;
+    }
+
+    ssid_len = MIN(result->ssid_length, WIFI_SSID_MAX_LEN);
+    memcpy(ssid, result->ssid, ssid_len);
+    for (size_t i = 0; i < ssid_len; i++) {
+        if ((unsigned char)ssid[i] < 0x20 || ssid[i] == 0x7f) {
+            ssid[i] = '?';
+        }
+    }
+    ssid[ssid_len] = '\0';
+
+    k_mutex_lock(&scan_cache_lock, K_FOREVER);
+    for (size_t i = 0; i < scan_cache_count; i++) {
+        if (strcmp(scan_cache[i].ssid, ssid) == 0) {
+            entry = &scan_cache[i];
+            break;
+        }
+    }
+
+    if (!entry && scan_cache_count < ARRAY_SIZE(scan_cache)) {
+        entry = &scan_cache[scan_cache_count++];
+        entry->rssi = INT8_MIN;
+    } else if (!entry) {
+        for (size_t i = 1; i < scan_cache_count; i++) {
+            if (scan_cache[i].rssi < scan_cache[weakest].rssi) {
+                weakest = i;
+            }
+        }
+        if (result->rssi > scan_cache[weakest].rssi) {
+            entry = &scan_cache[weakest];
+            entry->rssi = INT8_MIN;
+        }
+    }
+
+    if (entry && result->rssi > entry->rssi) {
+        memcpy(entry->ssid, ssid, ssid_len + 1);
+        entry->channel = result->channel;
+        entry->rssi = result->rssi;
+        entry->security = result->security;
+    }
+    k_mutex_unlock(&scan_cache_lock);
+}
+
+static const char *wifi_security_name(enum wifi_security_type security)
+{
+    switch (security) {
+    case WIFI_SECURITY_TYPE_NONE:
+        return "open";
+    case WIFI_SECURITY_TYPE_WEP:
+        return "wep";
+    case WIFI_SECURITY_TYPE_WPA_PSK:
+        return "wpa";
+    case WIFI_SECURITY_TYPE_PSK:
+        return "wpa2";
+    case WIFI_SECURITY_TYPE_PSK_SHA256:
+        return "wpa2-sha256";
+    case WIFI_SECURITY_TYPE_SAE:
+    case WIFI_SECURITY_TYPE_SAE_H2E:
+    case WIFI_SECURITY_TYPE_SAE_AUTO:
+        return "wpa3";
+    case WIFI_SECURITY_TYPE_EAP:
+        return "eap";
+    case WIFI_SECURITY_TYPE_WAPI:
+        return "wapi";
+    default:
+        return "unknown";
+    }
+}
+
+static void wifi_scan_cache_emit(void)
+{
+    char line[WIFI_SSID_MAX_LEN + 48];
+
+    k_mutex_lock(&scan_cache_lock, K_FOREVER);
+    for (size_t i = 1; i < scan_cache_count; i++) {
+        struct wifi_scan_cache_entry entry = scan_cache[i];
+        size_t j = i;
+
+        while (j > 0 && scan_cache[j - 1].rssi < entry.rssi) {
+            scan_cache[j] = scan_cache[j - 1];
+            j--;
+        }
+        scan_cache[j] = entry;
+    }
+
+    for (size_t i = 0; i < scan_cache_count; i++) {
+        snprintk(line, sizeof(line),
+                 "@scan result %.*s %s ch=%u %ddBm",
+                 WIFI_SSID_MAX_LEN, scan_cache[i].ssid,
+                 wifi_security_name(scan_cache[i].security),
+                 scan_cache[i].channel, scan_cache[i].rssi);
+        scan_respond(scan_conn, line);
+    }
+    k_mutex_unlock(&scan_cache_lock);
+}
 
 /* ------------------------------------------------------------------------ */
 /* Settings persistence                                                      */
@@ -305,6 +436,18 @@ static int advance_log_boot_id(void)
     return 0;
 }
 
+#define WIFI_CONNECT_STACK  8192
+#define WIFI_CONNECT_PRIO   10
+
+struct wifi_connect_msg {
+	char ssid[SSID_MAX + 1];
+	char psk[PSK_MAX + 1];
+};
+
+K_MSGQ_DEFINE(wifi_connect_msgq, sizeof(struct wifi_connect_msg), 2, 4);
+static struct k_thread wifi_connect_thread;
+static K_THREAD_STACK_DEFINE(wifi_connect_stack, WIFI_CONNECT_STACK);
+
 /* ------------------------------------------------------------------------ */
 /* WiFi management                                                          */
 /* ------------------------------------------------------------------------ */
@@ -317,28 +460,42 @@ static void schedule_wifi_retry(void)
     }
 }
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-variable"
 static void wifi_retry_work_handler(struct k_work *work)
 {
-    char ssid[sizeof(wifi_ssid)];
-    char psk[sizeof(wifi_psk)];
+	struct wifi_connect_msg msg;
+	char ssid[sizeof(wifi_ssid)];
+	char psk[sizeof(wifi_psk)];
 
-    ARG_UNUSED(work);
+	ARG_UNUSED(work);
 
-    if (!atomic_get(&wifi_reconnect_enabled)) {
-        return;
-    }
+	if (!atomic_get(&wifi_reconnect_enabled)) {
+		return;
+	}
 
-    k_mutex_lock(&cfg_lock, K_FOREVER);
-    strncpy(ssid, wifi_ssid, sizeof(ssid) - 1);
-    ssid[sizeof(ssid) - 1] = '\0';
-    strncpy(psk, wifi_psk, sizeof(psk) - 1);
-    psk[sizeof(psk) - 1] = '\0';
-    k_mutex_unlock(&cfg_lock);
+	k_mutex_lock(&cfg_lock, K_FOREVER);
+	strncpy(ssid, wifi_ssid, sizeof(ssid) - 1);
+	ssid[sizeof(ssid) - 1] = '\0';
+	strncpy(psk, wifi_psk, sizeof(psk) - 1);
+	psk[sizeof(psk) - 1] = '\0';
+	k_mutex_unlock(&cfg_lock);
 
-    if (!ssid[0] || linkr_wifi_connect(ssid, psk) != 0) {
-        schedule_wifi_retry();
-    }
+	if (!ssid[0]) {
+		schedule_wifi_retry();
+		return;
+	}
+
+	memset(&msg, 0, sizeof(msg));
+	strncpy(msg.ssid, ssid, sizeof(msg.ssid) - 1);
+	msg.ssid[sizeof(msg.ssid) - 1] = '\0';
+	strncpy(msg.psk, psk, sizeof(msg.psk) - 1);
+	msg.psk[sizeof(msg.psk) - 1] = '\0';
+	if (k_msgq_put(&wifi_connect_msgq, &msg, K_NO_WAIT) != 0) {
+		schedule_wifi_retry();
+	}
 }
+#pragma GCC diagnostic pop
 
 static void wifi_event_handler(struct net_mgmt_event_callback *cb,
                                unsigned long long mgmt_event,
@@ -357,6 +514,7 @@ static void wifi_event_handler(struct net_mgmt_event_callback *cb,
         if (status && status->status == 0) {
             atomic_set(&wifi_connected, 1);
             atomic_set(&wifi_ip_ready, 0);
+            atomic_clear(&wifi_last_error);
             LOG_INF("WiFi connected to \"%s\"", wifi_ssid);
             /* Start DHCPv4 ourselves (no CONFIG_NET_CONFIG_AUTO_INIT). */
             if (iface) {
@@ -365,11 +523,18 @@ static void wifi_event_handler(struct net_mgmt_event_callback *cb,
         } else {
             atomic_set(&wifi_connected, 0);
             atomic_set(&wifi_ip_ready, 0);
+            atomic_set(&wifi_last_error, status ? status->status : -1);
             LOG_WRN("WiFi connect failed: %d",
                     status ? status->status : -1);
             schedule_wifi_retry();
         }
     } else if (mgmt_event == NET_EVENT_WIFI_DISCONNECT_RESULT) {
+        /* The application owns DHCP when ESP32 auto-DHCP is disabled. Stop
+         * it here so a later reconnect starts a fresh lease transaction and
+         * produces a new IPv4 address event. */
+        if (iface) {
+            net_dhcpv4_stop(iface);
+        }
         atomic_set(&wifi_connected, 0);
         atomic_set(&wifi_ip_ready, 0);
         LOG_INF("WiFi disconnected");
@@ -386,6 +551,10 @@ static void wifi_event_handler(struct net_mgmt_event_callback *cb,
 int linkr_wifi_connect(const char *ssid, const char *psk)
 {
     struct wifi_connect_req_params params;
+    struct wifi_ps_params ps_params = {
+        .enabled = WIFI_PS_DISABLED,
+        .type = WIFI_PS_PARAM_STATE,
+    };
     int err;
 
     if (!ssid || !ssid[0] || !wifi_iface) {
@@ -405,15 +574,34 @@ int linkr_wifi_connect(const char *ssid, const char *psk)
     params.channel = WIFI_CHANNEL_ANY;
     params.band = WIFI_FREQ_BAND_2_4_GHZ;
 
+    LOG_INF("WiFi connect request: ssid=\"%s\" security=%s psk_len=%u",
+            ssid, psk && psk[0] ? "psk" : "open",
+            (unsigned int)params.psk_length);
+
     atomic_set(&wifi_connected, 0);
     atomic_set(&wifi_ip_ready, 0);
     err = net_mgmt(NET_REQUEST_WIFI_CONNECT, wifi_iface,
                    &params, sizeof(params));
     if (err) {
+        atomic_set(&wifi_last_error, err);
         LOG_WRN("WiFi connect request failed: %d", err);
         schedule_wifi_retry();
+        return err;
     }
-    return err;
+
+    /* Keep authentication latency deterministic while BLE is active. Use the
+     * public Zephyr API so local and CI builds do not depend on a patched
+     * esp_wifi_drv.c. The ESP32 driver has already started WiFi by the time the
+     * synchronous connect request returns. */
+    err = net_mgmt(NET_REQUEST_WIFI_PS, wifi_iface,
+                   &ps_params, sizeof(ps_params));
+    if (err) {
+        LOG_WRN("could not disable WiFi power save: %d", err);
+    } else {
+        LOG_INF("WiFi power save disabled");
+    }
+
+    return 0;
 }
 
 int linkr_wifi_disconnect(void)
@@ -447,45 +635,24 @@ static void wifi_scan_event_handler(struct net_mgmt_event_callback *cb,
     if (mgmt_event == NET_EVENT_WIFI_SCAN_RESULT) {
         const struct wifi_scan_result *result =
             (const struct wifi_scan_result *)cb->info;
-        char line[WIFI_SSID_MAX_LEN + 32];
-        size_t ssid_len;
 
         if (!result) {
             return;
         }
-        if (atomic_inc(&scan_result_count) >= WIFI_SCAN_MAX_RESULTS) {
-            return;
-        }
-        if (result->ssid_length == 0 || result->ssid[0] == '\0') {
-            /* Hidden network; report it without leaking the raw buffer. */
-            snprintk(line, sizeof(line), "@scan result <hidden> %ddBm",
-                     result->rssi);
-        } else {
-            char ssid[WIFI_SSID_MAX_LEN + 1];
-
-            ssid_len = MIN(result->ssid_length, WIFI_SSID_MAX_LEN);
-            memcpy(ssid, result->ssid, ssid_len);
-            for (size_t i = 0; i < ssid_len; i++) {
-                if ((unsigned char)ssid[i] < 0x20 || ssid[i] == 0x7f) {
-                    ssid[i] = '?';
-                }
-            }
-            ssid[ssid_len] = '\0';
-            snprintk(line, sizeof(line), "@scan result %.*s %ddBm",
-                     (int)ssid_len, ssid, result->rssi);
-        }
-        scan_respond(scan_conn, line);
+        wifi_scan_cache_update(result);
     } else if (mgmt_event == NET_EVENT_WIFI_SCAN_DONE) {
         const struct wifi_status *status =
             (const struct wifi_status *)cb->info;
         bool ok = status ? (status->status == 0) : true;
 
+        if (ok) {
+            wifi_scan_cache_emit();
+        }
         scan_respond(scan_conn, ok ? "@scan done" : "@scan error");
         if (scan_conn) {
             bt_conn_unref(scan_conn);
             scan_conn = NULL;
         }
-        atomic_clear(&scan_result_count);
         atomic_set(&scan_in_progress, 0);
     }
 }
@@ -496,7 +663,6 @@ static void wifi_scan_release(void)
         bt_conn_unref(scan_conn);
         scan_conn = NULL;
     }
-    atomic_clear(&scan_result_count);
     atomic_set(&scan_in_progress, 0);
 }
 
@@ -508,7 +674,7 @@ static void wifi_scan_work_handler(struct k_work *work)
     ARG_UNUSED(work);
     memset(&params, 0, sizeof(params));
     params.bands = BIT(WIFI_FREQ_BAND_2_4_GHZ);
-    params.max_bss_cnt = WIFI_SCAN_MAX_RESULTS;
+    params.max_bss_cnt = 0;
 
     /* esp_wifi_start()/esp_wifi_scan_start() can consume more stack than the
      * Bluetooth RX workqueue owns. Start the scan on the 4 KiB system
@@ -544,7 +710,7 @@ int linkr_wifi_scan(struct bt_conn *conn)
     }
 
     scan_conn = conn ? bt_conn_ref(conn) : NULL;
-    atomic_clear(&scan_result_count);
+    wifi_scan_cache_clear();
 
     err = k_work_submit(&wifi_scan_work);
     if (err < 0) {
@@ -560,63 +726,110 @@ bool linkr_wifi_is_connected(void)
     return atomic_get(&wifi_connected) != 0;
 }
 
+bool linkr_wifi_has_ip(void)
+{
+    return atomic_get(&wifi_ip_ready) != 0;
+}
+
+static void wifi_connect_thread_fn(void *p1, void *p2, void *p3)
+{
+	struct wifi_connect_msg msg;
+
+	ARG_UNUSED(p1);
+	ARG_UNUSED(p2);
+	ARG_UNUSED(p3);
+
+	for (;;) {
+		if (k_msgq_get(&wifi_connect_msgq, &msg, K_FOREVER) != 0) {
+			continue;
+		}
+
+		if (msg.ssid[0]) {
+			int err;
+
+			LOG_INF("WiFi connect thread: %s", msg.ssid);
+			err = linkr_wifi_connect(msg.ssid, msg.psk);
+			LOG_INF("WiFi connect thread result: %d", err);
+		} else {
+			LOG_INF("WiFi disconnect thread");
+			atomic_set(&wifi_reconnect_enabled, 0);
+			(void)k_work_cancel_delayable(&wifi_retry_work);
+			(void)linkr_wifi_disconnect();
+		}
+	}
+}
+
 int linkr_wifi_set_config(const char *ssid, const char *psk)
 {
-    char ssid_local[sizeof(wifi_ssid)];
-    char psk_local[sizeof(wifi_psk)];
-    int err;
+	struct wifi_connect_msg msg;
+	int err;
 
-    if (!ssid || !ssid[0] || strlen(ssid) > SSID_MAX) {
-        return -EINVAL;
-    }
-    if (psk && strlen(psk) > PSK_MAX) {
-        return -EINVAL;
-    }
+	if (!ssid || !ssid[0] || strlen(ssid) > SSID_MAX) {
+		return -EINVAL;
+	}
+	if (psk && strlen(psk) > PSK_MAX) {
+		return -EINVAL;
+	}
 
-    if (IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_PERSIST_CREDENTIALS)) {
-        err = save_wifi_settings(ssid, psk ? psk : "");
-        if (err) {
-            LOG_WRN("save WiFi settings failed: %d", err);
-            return err;
-        }
-    }
+	if (IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_PERSIST_CREDENTIALS)) {
+		err = save_wifi_settings(ssid, psk ? psk : "");
+		if (err) {
+			LOG_WRN("save WiFi settings failed: %d", err);
+			return err;
+		}
+	}
 
-    k_mutex_lock(&cfg_lock, K_FOREVER);
-    strncpy(wifi_ssid, ssid, sizeof(wifi_ssid) - 1);
-    wifi_ssid[sizeof(wifi_ssid) - 1] = '\0';
-    strncpy(wifi_psk, psk ? psk : "", sizeof(wifi_psk) - 1);
-    wifi_psk[sizeof(wifi_psk) - 1] = '\0';
-    strncpy(ssid_local, wifi_ssid, sizeof(ssid_local));
-    strncpy(psk_local, wifi_psk, sizeof(psk_local));
-    k_mutex_unlock(&cfg_lock);
+	k_mutex_lock(&cfg_lock, K_FOREVER);
+	strncpy(wifi_ssid, ssid, sizeof(wifi_ssid) - 1);
+	wifi_ssid[sizeof(wifi_ssid) - 1] = '\0';
+	strncpy(wifi_psk, psk ? psk : "", sizeof(wifi_psk) - 1);
+	wifi_psk[sizeof(wifi_psk) - 1] = '\0';
+	k_mutex_unlock(&cfg_lock);
 
-    atomic_set(&wifi_reconnect_enabled, 1);
-    return linkr_wifi_connect(ssid_local, psk_local);
+	memset(&msg, 0, sizeof(msg));
+	strncpy(msg.ssid, ssid, sizeof(msg.ssid) - 1);
+	msg.ssid[sizeof(msg.ssid) - 1] = '\0';
+	strncpy(msg.psk, psk ? psk : "", sizeof(msg.psk) - 1);
+	msg.psk[sizeof(msg.psk) - 1] = '\0';
+
+	atomic_set(&wifi_reconnect_enabled, 1);
+	err = k_msgq_put(&wifi_connect_msgq, &msg, K_NO_WAIT);
+	if (err) {
+		LOG_WRN("WiFi connect msgq put failed: %d", err);
+		return err;
+	}
+	return 0;
 }
 
 int linkr_wifi_clear_config(void)
 {
-    int err = 0;
+	struct wifi_connect_msg msg = { 0 };
+	int err = 0;
 
-    if (IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_PERSIST_CREDENTIALS)) {
-        err = save_wifi_settings(NULL, NULL);
-        if (err) {
-            LOG_WRN("clear WiFi settings failed: %d", err);
-            return err;
-        }
-    }
+	if (IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_PERSIST_CREDENTIALS)) {
+		err = save_wifi_settings(NULL, NULL);
+		if (err) {
+			LOG_WRN("clear WiFi settings failed: %d", err);
+			return err;
+		}
+	}
 
-    atomic_set(&wifi_reconnect_enabled, 0);
-    (void)k_work_cancel_delayable(&wifi_retry_work);
-    k_mutex_lock(&cfg_lock, K_FOREVER);
-    wifi_ssid[0] = '\0';
-    wifi_psk[0] = '\0';
-    k_mutex_unlock(&cfg_lock);
+	k_mutex_lock(&cfg_lock, K_FOREVER);
+	wifi_ssid[0] = '\0';
+	wifi_psk[0] = '\0';
+	k_mutex_unlock(&cfg_lock);
 
-    atomic_set(&wifi_connected, 0);
-    atomic_set(&wifi_ip_ready, 0);
-    (void)linkr_wifi_disconnect();
-    return 0;
+	/* Make "off" authoritative immediately. Remove pending connect/retry work
+	 * before queuing the disconnect so an older request cannot reconnect after
+	 * this command has reported success. */
+	atomic_set(&wifi_reconnect_enabled, 0);
+	(void)k_work_cancel_delayable(&wifi_retry_work);
+	k_msgq_purge(&wifi_connect_msgq);
+	err = k_msgq_put(&wifi_connect_msgq, &msg, K_NO_WAIT);
+	if (err) {
+		LOG_WRN("WiFi disconnect msgq put failed: %d", err);
+	}
+	return err;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -678,6 +891,7 @@ int linkr_webdav_set_config(const char *url, const char *user, const char *pass)
 
     if (target_changed) {
         discard_log_buffer();
+        atomic_clear(&upload_pending_bytes);
     }
     k_mutex_unlock(&upload_lock);
 
@@ -705,6 +919,7 @@ int linkr_webdav_clear_config(void)
     k_mutex_unlock(&cfg_lock);
 
     discard_log_buffer();
+    atomic_clear(&upload_pending_bytes);
     k_mutex_unlock(&upload_lock);
     return 0;
 }
@@ -726,6 +941,8 @@ void linkr_log_feed(const uint8_t *data, size_t len)
     /* Best-effort: preserve the newest bytes without blocking the UART path. */
     k_mutex_lock(&log_lock, K_FOREVER);
     if (keep > LOG_RING_SIZE) {
+        atomic_add(&log_dropped_bytes,
+                   (atomic_val_t)(keep - LOG_RING_SIZE));
         src += keep - LOG_RING_SIZE;
         keep = LOG_RING_SIZE;
     }
@@ -738,6 +955,7 @@ void linkr_log_feed(const uint8_t *data, size_t len)
         if (dropped == 0) {
             break;
         }
+        atomic_add(&log_dropped_bytes, (atomic_val_t)dropped);
         needed -= dropped;
     }
     (void)ring_buf_put(&log_ring, (uint8_t *)src, keep);
@@ -844,6 +1062,7 @@ static int http_put(const struct webdav_url *u, const uint8_t *payload,
     int sock = -1;
     int ret = -EIO;
 
+    atomic_clear(&upload_last_http_status);
     snprintk(port_str, sizeof(port_str), "%u", u->port);
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_INET;
@@ -880,6 +1099,7 @@ static int http_put(const struct webdav_url *u, const uint8_t *payload,
         .response = http_response,
     };
     ret = http_client_req(sock, &req, 10000, &result);
+    atomic_set(&upload_last_http_status, result.status_code);
     if (ret < 0) {
         LOG_WRN("HTTP PUT failed: %d", ret);
     } else if (result.status_code < 200 || result.status_code >= 300) {
@@ -948,6 +1168,7 @@ static void upload_thread(void *a, void *b, void *c)
                 atomic_get(&webdav_generation) != upload_generation) {
                 /* A clear or retarget makes this private retry batch stale. */
                 pending_total = 0;
+                atomic_clear(&upload_pending_bytes);
                 break;
             }
 
@@ -964,6 +1185,8 @@ static void upload_thread(void *a, void *b, void *c)
                 }
                 k_mutex_unlock(&log_lock);
                 if (pending_total) {
+                    atomic_set(&upload_pending_bytes,
+                               (atomic_val_t)pending_total);
                     pending_sequence = ++log_sequence;
                     if (pending_sequence == 0) {
                         pending_sequence = ++log_sequence;
@@ -999,15 +1222,19 @@ static void upload_thread(void *a, void *b, void *c)
                 atomic_get(&webdav_generation) != upload_generation) {
                 k_mutex_unlock(&upload_lock);
                 pending_total = 0;
+                atomic_clear(&upload_pending_bytes);
                 break;
             }
             int err = http_put(&per, chunk, pending_total);
             k_mutex_unlock(&upload_lock);
             if (err != 0) {
+                atomic_inc(&upload_failures);
                 /* Keep this batch in place so retries preserve byte order. */
                 break;
             }
+            atomic_inc(&upload_successes);
             pending_total = 0;
+            atomic_clear(&upload_pending_bytes);
         }
     }
 }
@@ -1016,16 +1243,34 @@ static void upload_thread(void *a, void *b, void *c)
 /* Status strings                                                           */
 /* ------------------------------------------------------------------------ */
 
+static const char *wifi_ip_status(char *buf, size_t len)
+{
+    struct net_in_addr *addr;
+
+    if (!atomic_get(&wifi_ip_ready) || !wifi_iface) {
+        return "down";
+    }
+
+    addr = net_if_ipv4_get_global_addr(wifi_iface, NET_ADDR_PREFERRED);
+    if (!addr || !net_addr_ntop(AF_INET, addr, buf, len)) {
+        return "ready";
+    }
+
+    return buf;
+}
+
 int linkr_wifi_status(char *buf, size_t len)
 {
+    char ip[NET_IPV4_ADDR_LEN];
+    const char *ip_status = wifi_ip_status(ip, sizeof(ip));
     const char *ssid;
     int n;
 
     k_mutex_lock(&cfg_lock, K_FOREVER);
     ssid = wifi_ssid;
-    n = snprintk(buf, len, "wifi=%s,ssid=%s",
+    n = snprintk(buf, len, "wifi=%s,ssid=%s,ip=%s",
                  atomic_get(&wifi_connected) ? "connected" : "off",
-                 ssid[0] ? ssid : "-");
+                 ssid[0] ? ssid : "-", ip_status);
     k_mutex_unlock(&cfg_lock);
     return n;
 }
@@ -1044,6 +1289,34 @@ int linkr_webdav_status(char *buf, size_t len)
     return n;
 }
 
+int linkr_wifi_diagnostics(char *buf, size_t len)
+{
+    char ip[NET_IPV4_ADDR_LEN];
+
+    return snprintk(buf, len, "state=%s ip=%s error=%d",
+                    atomic_get(&wifi_connected) ? "connected" : "off",
+                    wifi_ip_status(ip, sizeof(ip)),
+                    (int)atomic_get(&wifi_last_error));
+}
+
+int linkr_upload_diagnostics(char *buf, size_t len)
+{
+    uint32_t queued;
+
+    k_mutex_lock(&log_lock, K_FOREVER);
+    queued = ring_buf_size_get(&log_ring);
+    k_mutex_unlock(&log_lock);
+
+    return snprintk(buf, len,
+                    "state=%s queue=%u dropped=%u http=%u failures=%u successes=%u",
+                    atomic_get(&webdav_configured) ? "on" : "off",
+                    queued + (uint32_t)atomic_get(&upload_pending_bytes),
+                    (uint32_t)atomic_get(&log_dropped_bytes),
+                    (uint32_t)atomic_get(&upload_last_http_status),
+                    (uint32_t)atomic_get(&upload_failures),
+                    (uint32_t)atomic_get(&upload_successes));
+}
+
 /* ------------------------------------------------------------------------ */
 /* Init                                                                     */
 /* ------------------------------------------------------------------------ */
@@ -1057,8 +1330,17 @@ int linkr_wifi_init(void)
     k_mutex_init(&cfg_lock);
     k_mutex_init(&log_lock);
     k_mutex_init(&upload_lock);
+    k_mutex_init(&scan_cache_lock);
     k_work_init_delayable(&wifi_retry_work, wifi_retry_work_handler);
     k_work_init(&wifi_scan_work, wifi_scan_work_handler);
+
+    k_thread_create(&wifi_connect_thread, wifi_connect_stack,
+                    K_THREAD_STACK_SIZEOF(wifi_connect_stack),
+                    wifi_connect_thread_fn, NULL, NULL, NULL,
+                    K_PRIO_PREEMPT(WIFI_CONNECT_PRIO), 0, K_NO_WAIT);
+    if (IS_ENABLED(CONFIG_THREAD_NAME)) {
+        k_thread_name_set(&wifi_connect_thread, "wifi_connect");
+    }
 
     wifi_iface = net_if_get_default();
     if (!wifi_iface) {
@@ -1066,12 +1348,20 @@ int linkr_wifi_init(void)
         return -ENODEV;
     }
 
+    net_if_up(wifi_iface);
+
     net_mgmt_init_event_callback(&wifi_mgmt_cb, wifi_event_handler,
                                  NET_EVENT_WIFI_CONNECT_RESULT |
-                                 NET_EVENT_WIFI_DISCONNECT_RESULT |
+                                 NET_EVENT_WIFI_DISCONNECT_RESULT);
+    net_mgmt_add_event_callback(&wifi_mgmt_cb);
+
+    /* Event masks may combine commands only within the same net_mgmt layer.
+     * Keep IPv4 events separate from WiFi events so neither layer identifier
+     * is corrupted by the bitwise OR. */
+    net_mgmt_init_event_callback(&ip_mgmt_cb, wifi_event_handler,
                                  NET_EVENT_IPV4_ADDR_ADD |
                                  NET_EVENT_IPV4_ADDR_DEL);
-    net_mgmt_add_event_callback(&wifi_mgmt_cb);
+    net_mgmt_add_event_callback(&ip_mgmt_cb);
 
     net_mgmt_init_event_callback(&wifi_scan_cb, wifi_scan_event_handler,
                                  NET_EVENT_WIFI_SCAN_RESULT |

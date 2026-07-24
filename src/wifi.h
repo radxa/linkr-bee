@@ -10,6 +10,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <zephyr/sys/printk.h>
 #include <zephyr/sys/util.h>
 
 struct bt_conn;
@@ -33,6 +34,9 @@ int linkr_wifi_init(void);
 
 bool linkr_wifi_is_connected(void);
 
+/* True once the WiFi interface holds a usable IPv4 address. */
+bool linkr_wifi_has_ip(void);
+
 /* One-shot connect / disconnect (RAM only, not persisted). */
 int linkr_wifi_connect(const char *ssid, const char *psk);
 int linkr_wifi_disconnect(void);
@@ -52,6 +56,8 @@ void linkr_log_feed(const uint8_t *data, size_t len);
 /* Write a human-readable status line, returns length written. */
 int linkr_wifi_status(char *buf, size_t len);
 int linkr_webdav_status(char *buf, size_t len);
+int linkr_wifi_diagnostics(char *buf, size_t len);
+int linkr_upload_diagnostics(char *buf, size_t len);
 
 /* Register the response sink. Must be called before the first scan request. */
 void linkr_wifi_set_respond_fn(linkr_wifi_respond_fn fn);
@@ -65,6 +71,7 @@ int linkr_wifi_scan(struct bt_conn *conn);
 
 static inline int  linkr_wifi_init(void) { return 0; }
 static inline bool linkr_wifi_is_connected(void) { return false; }
+static inline bool linkr_wifi_has_ip(void) { return false; }
 static inline int  linkr_wifi_connect(const char *ssid, const char *psk) { (void)ssid; (void)psk; return -ENOTSUP; }
 static inline int  linkr_wifi_disconnect(void) { return -ENOTSUP; }
 static inline int  linkr_wifi_set_config(const char *ssid, const char *psk) { (void)ssid; (void)psk; return -ENOTSUP; }
@@ -74,6 +81,8 @@ static inline int  linkr_webdav_clear_config(void) { return -ENOTSUP; }
 static inline void linkr_log_feed(const uint8_t *data, size_t len) { (void)data; (void)len; }
 static inline int  linkr_wifi_status(char *buf, size_t len) { (void)buf; (void)len; return 0; }
 static inline int  linkr_webdav_status(char *buf, size_t len) { (void)buf; (void)len; return 0; }
+static inline int  linkr_wifi_diagnostics(char *buf, size_t len) { return snprintk(buf, len, "state=disabled ip=down error=0"); }
+static inline int  linkr_upload_diagnostics(char *buf, size_t len) { return snprintk(buf, len, "state=disabled queue=0 dropped=0 http=0 failures=0 successes=0"); }
 static inline void linkr_wifi_set_respond_fn(linkr_wifi_respond_fn fn) { (void)fn; }
 static inline int  linkr_wifi_scan(struct bt_conn *conn) { (void)conn; return -ENOTSUP; }
 

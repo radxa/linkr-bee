@@ -16,9 +16,8 @@ The Linkr card/device integration is intentionally left for a later layer.
 
 - Firmware: ESP32-C3 DevKitM, DevKitC, and Super Mini
 - Zephyr: **v4.4.1**
-- Default feature set: BLE UART bridge, WiFi station control, and anonymous
-  HTTP WebDAV log upload
-- BLE-only feature set: `CONFIG_LINKR_BLE_BRIDGE_WIFI=n`
+- Single firmware feature set: BLE UART bridge, WiFi station control,
+  anonymous HTTP WebDAV log upload, and UART-over-WebSocket LAN access
 
 ## Build
 
@@ -58,9 +57,28 @@ Actions run. Its flashable image is:
 linkr-ble-esp32c3-supermini.bin
 ```
 
-The artifact also contains the ELF, linker map, final Kconfig, runner metadata,
-and `SHA256SUMS` for debugging and traceability. The workflow fails if the
-default WiFi, networking, Bluetooth, or binary-output configuration is absent.
+On macOS or Linux, extract the artifact, install
+[`esptool`](https://docs.espressif.com/projects/esptool/en/latest/esp32c3/),
+connect the ESP32-C3 Super Mini, and run:
+
+```sh
+./flash_firmware.sh
+```
+
+If more than one serial device is connected, select it explicitly:
+
+```sh
+./flash_firmware.sh --port /dev/cu.usbmodemXXXX
+```
+
+The script writes the merged ESP32-C3 image at `0x0` without a full-chip erase.
+Only the image sectors are rewritten; the settings partition at `0x3b0000`
+is left untouched, so normal upgrades preserve the BLE identity and saved
+configuration. Use the GPIO0 + GND factory-reset procedure when those
+settings must be cleared. The artifact also contains `FLASHING.txt`,
+`firmware.json`, the ELF, linker map, final Kconfig, runner metadata, and
+`SHA256SUMS` for debugging and traceability. The workflow fails if the default
+WiFi, networking, Bluetooth, or binary-output configuration is absent.
 
 ## UART selection
 
@@ -117,15 +135,10 @@ ERR format: @u=115200,8,n,1,n
 
 ## WiFi and WebDAV log upload
 
-The WiFi + WebDAV feature is **enabled by default** through
-`CONFIG_LINKR_BLE_BRIDGE_WIFI=y`. The radio stays off until the user sends
-`@w=ssid,pass`. Its Kconfig option selects the networking, WiFi, DNS, and HTTP
-dependencies; a BLE-only build removes all of them:
-
-```sh
-west build -p always -b esp32c3_supermini /Users/xiangzelong/Dev/linkr-ble -- \
-  -DCONFIG_LINKR_BLE_BRIDGE_WIFI=n
-```
+The single supported firmware always includes WiFi, WebDAV, and WebSocket
+support. The WiFi radio stays off until the user sends `@w=ssid,pass`, so an
+unprovisioned unit still behaves as a BLE UART bridge without requiring a
+separate image.
 
 WiFi credentials are RAM-only by default and are discarded on reboot. Set
 `CONFIG_LINKR_BLE_BRIDGE_PERSIST_CREDENTIALS=y` only on production devices
@@ -158,33 +171,43 @@ The application code in `src/wifi.c` uses the standard `net_mgmt` /
 and starts DHCPv4 itself on connect, so no `CONFIG_NET_CONFIG_AUTO_INIT` is
 needed.
 
-### BLE pairing, owner, persistence, and factory reset
+### UART over WebSocket (LAN bridge)
 
-Pairing protects the **management plane**, not the general NUS UART stream.
-Every WiFi or WebDAV management command, including `@w?` and `@d?`, requires
-BLE Security Level 3 (encrypted and authenticated with passkey pairing). The
-read-only `@w scan` discovery command is the sole exception and works before
-pairing; it never reads or changes saved credentials. If another management
-command arrives below Level 3, the firmware starts a security upgrade, returns
-a pairing-required response, and the caller must finish pairing then retry it.
-Raw NUS UART traffic and `@u...` UART configuration are deliberately outside
-this gate; do not attach a sensitive console unless that access model is
-acceptable.
+When WiFi holds an IP address, the firmware also serves the bridge UART over a
+WebSocket endpoint so LAN clients bypass BLE range and MTU limits entirely:
 
-The bridge is headless, so it uses the fixed pairing code **123456** instead of
-a code shown on a local display. Enter that code in the browser or operating
-system prompt. The resulting BLE bond is stored in Zephyr settings/NVS. The
-firmware treats the presence of *any* bond as an owner: it accepts one bonded
-central and rejects every new pairing request. This also means that deleting
-the device from the owner's phone or computer does not release ownership on
-the bridge; use factory reset before moving to a new owner. Because the fixed
-code is documented, the one-owner/factory-reset model and controlled physical
-proximity remain the effective trust boundary for first pairing.
+- Endpoint: `ws://<device-ip>/ws` (port from
+  `CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_PORT`, default 80)
+- Protocol: binary WebSocket frames carry raw UART bytes in both directions;
+  there is no framing — what you send is written to the UART, what the UART
+  receives is broadcast to every connected client
+- Clients: up to `CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_MAX_CLIENTS` (default 2),
+  each with its own TX ring buffer; a slow client drops oldest data instead of
+  stalling the bridge
+- Runtime control: `@s on|off|?`; the enabled flag is persisted in settings.
+  `@i?` reports
+  `@info ws state=up port=80 clients=N tx=… rx=… dropped=…`
+- Optional deterrent: `CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_AUTH_TOKEN` requires
+  clients to send the token as their first text frame within 3 s
+- Disable entirely with `-DCONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE=n`
+
+The Web Bluetooth terminal (`web/`) has a BLE/LAN switch in the Connection
+card; LAN mode connects to `ws://<host>/ws`, keeps terminal input, quick-send
+chips and counters working, and disables management controls that require BLE
+(`@u`/`@w`/`@d`/`@i?`). When BLE diagnostics report an IP, the LAN address
+field is prefilled with it. The WebDAV log upload keeps running in parallel.
+
+### Open BLE access, persistence, and factory reset
+
+BLE pairing, bonding, and owner enforcement are currently disabled to keep the
+development workflow reliable. Any nearby central that connects to the NUS
+service can use the UART stream and all management commands, including WiFi,
+WebDAV, and WebSocket settings. Do not attach a sensitive console or deploy
+this development build in an untrusted radio environment.
 
 | Item | Default / persistence rule | Clear or transfer |
 | --- | --- | --- |
-| BLE bond and owner | Always persisted by `CONFIG_BT_SETTINGS` in NVS | GPIO0 factory reset only; no BLE command unpairs the owner |
-| BLE identity/address | A random-static Linkr identity is persisted in NVS and reused across normal reboots | GPIO0 factory reset generates a new identity/address so hosts do not reuse stale device-name or bond caches |
+| BLE identity/address | A random-static Linkr identity is persisted in NVS and reused across normal reboots | GPIO0 factory reset generates a new identity/address so hosts do not reuse stale device-name caches |
 | WiFi SSID/PSK | RAM-only by default; `CONFIG_LINKR_BLE_BRIDGE_PERSIST_CREDENTIALS=y` saves it and reconnects on boot | `@w off` disables it and disconnects; factory reset erases it |
 | WebDAV target | Anonymous URL is persisted independently of WiFi credential persistence | `@d off` disables it; factory reset erases it |
 | Upload boot ID | Persisted when the uploader reserves a new boot ID, preventing filename reuse after reboot | Factory reset erases it |
@@ -195,24 +218,22 @@ Kconfig option is a deployment promise, not a runtime check: enable it only
 after secure boot and flash encryption have actually been provisioned. On an
 unencrypted device, an SSID/PSK written to NVS can be recovered from flash.
 `@w off` is a functional clear, not a validated secure-flash wipe; use factory
-reset before disposal or ownership transfer.
+reset before disposal or reprovisioning.
 
 To factory-reset a physical unit, reset or power-cycle it with **GPIO0 shorted
 to GND** and keep the short in place for two seconds. The firmware erases the
-entire `storage_partition` before Bluetooth or settings load, clearing the BLE
-owner/bond, Bluetooth identity data, Linkr WiFi/WebDAV configuration, and the
-upload boot counter. The device then starts unowned and advertises with a newly
-generated random-static BLE identity/address. This makes macOS, Chrome, and
-other centrals create a fresh device record instead of retaining the old
-owner's cached name or bond. Do not tie GPIO0 to GND permanently, and treat
+entire `storage_partition` before Bluetooth or settings load, clearing Bluetooth
+identity data, Linkr WiFi/WebDAV configuration, and the upload boot counter.
+The device then advertises with a newly generated random-static BLE
+identity/address. This makes macOS, Chrome, and other centrals create a fresh
+device record instead of retaining stale cached metadata. Do not tie GPIO0 to
+GND permanently, and treat
 access to that pad or switch as access to factory reset. It does not erase
 firmware, the test-marker partition, or coredump storage.
 
-The Python tool pairs automatically for WiFi/WebDAV actions (or use `--pair`);
-the C tool needs a running BlueZ pairing agent; Web Bluetooth shows the native
-pairing prompt, where the code is **123456**, then the action must be retried.
-BLE pairing does not encrypt the subsequent WebDAV upload: the current uploader
-accepts anonymous HTTP only, so use it solely on a trusted local network.
+The Python, C, and Web Bluetooth clients send management commands directly;
+`--pair` is retained only as a deprecated no-op. The current WebDAV uploader
+also accepts anonymous HTTP only, so use it solely on a trusted local network.
 
 UART RX bytes are buffered and periodically HTTP-PUT to
 `<webdav_url>log-<boot-id>-<sequence>-<uptime>.txt`. Upload waits for an IPv4
@@ -223,25 +244,47 @@ Control commands (short form fits the default 20-byte BLE write before MTU
 exchange):
 
 ```text
+@i?                          read device diagnostics
+@w scan                      scan nearby 2.4 GHz WiFi networks (pairing-free)
 @w?                          query WiFi status
 @w=MySSID,secret             join WiFi (RAM-only unless persistence is enabled)
 @w off                       clear WiFi configuration and disconnect
 @d?                          query WebDAV status
-@d=http://host/dav/             set anonymous WebDAV target and enable upload
+@d=http://host/dav/          set anonymous WebDAV target and enable upload
 @d off                       disable WebDAV upload
 ```
 
-Long forms `@linkr wifi?`, `@linkr wifi=...`, `@linkr webdav=...` are also
-accepted. Responses come back over the NUS TX notification characteristic:
+Long forms `@linkr info?`, `@linkr wifi scan`, `@linkr wifi?`,
+`@linkr wifi=...`, and `@linkr webdav=...` are also accepted. Responses come
+back over the NUS TX notification characteristic:
 
 ```text
 OK wifi=connected,ssid=MySSID
 OK webdav=on,url=http://host/dav/
 ```
 
+The diagnostic command is read-only. It reports the application and Zephyr
+versions, uptime, the open BLE access/security state, UART buffer usage and
+dropped-byte count, WiFi/IP state, and WebDAV
+queue, drop, HTTP, failure, and success counters:
+
+```text
+@info fw version=0.2.0 zephyr=4.4.1
+@info sys uptime_ms=123456 owner=0 security=1
+@info uart dropped=0 buffer=0/16384
+@info wifi state=connected ip=ready error=0
+@info upload state=on queue=0 dropped=0 http=201 failures=0 successes=4
+@info done
+```
+
+The application version comes from
+`CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION`.
+
 From the Python terminal:
 
 ```sh
+python3 tools/linkr_ble_terminal.py --query-info --no-terminal
+python3 tools/linkr_ble_terminal.py --wifi-scan --no-terminal
 python3 tools/linkr_ble_terminal.py --wifi MySSID,secret --query-wifi
 python3 tools/linkr_ble_terminal.py --webdav http://host/dav/
 ```
@@ -257,17 +300,17 @@ network. Use this mode only on a trusted local network; authenticated or
 internet-facing deployments require a future HTTPS build with a provisioned CA
 trust anchor.
 
-The Web Bluetooth terminal exposes the same controls as `Set WiFi` /
-`WiFi ?` / `Set WebDAV` / `WebDAV ?` buttons, and the C reference terminal
-accepts `--wifi`, `--wifi-off`, `--query-wifi`, `--webdav`, `--webdav-off`,
-`--query-webdav`.
+The Web Bluetooth terminal exposes structured SSID/password fields, a WiFi
+scan list, device diagnostics, and the same WebDAV controls. The C reference
+terminal accepts `--query-info`, `--wifi-scan`, `--wifi`, `--wifi-off`,
+`--query-wifi`, `--webdav`, `--webdav-off`, and `--query-webdav`.
 
 ## Test options
 
 All test options default to off.
 
-Run the repeatable local regression check (WiFi build, BLE-only build, Python
-syntax, and shell syntax) with:
+Run the repeatable local regression check (the single WiFi + BLE firmware,
+Python syntax, and shell syntax) with:
 
 ```sh
 tools/verify.sh
@@ -297,7 +340,8 @@ west build -p always -b esp32c3_devkitm /Users/xiangzelong/Dev/linkr-ble -- \
   -DEXTRA_CONF_FILE=test_loopback.conf
 ```
 
-For a BLE-only NUS echo diagnostic (no UART wiring required):
+For a BLE NUS echo diagnostic using the same full firmware feature set (no
+UART wiring required):
 
 ```sh
 west build -p always -b esp32c3_supermini /Users/xiangzelong/Dev/linkr-ble -- \
@@ -416,6 +460,8 @@ ls -l /sys/class/bluetooth
 The C terminal accepts the same Linkr BLE defaults as the Python terminal:
 
 ```sh
+./linkr_ble_terminal_c --query-info --no-terminal
+./linkr_ble_terminal_c --wifi-scan --no-terminal
 ./linkr_ble_terminal_c --query-uart --no-terminal
 ./linkr_ble_terminal_c --uart 115200,8,n,1,n
 ./linkr_ble_terminal_c --loopback-test A --no-terminal
@@ -475,6 +521,8 @@ With GPIO21 shorted to GPIO20, run a BLE-to-UART-to-BLE loopback check:
 Useful options:
 
 - `Ctrl-]`: exit the terminal
+- `--query-info --no-terminal`: read firmware and runtime diagnostics
+- `--wifi-scan --no-terminal`: list nearby 2.4 GHz WiFi networks through the bridge
 - `--loopback-test A --no-terminal`: send `A` and require `A` back
 - `--scan --no-terminal`: list nearby BLE devices
 - `--address <BLE-address-or-UUID>`: connect without scanning by name
@@ -506,7 +554,12 @@ http://127.0.0.1:8765/
 Use Chrome or another Chromium browser with Web Bluetooth support.  Web
 Bluetooth requires a secure context, so use `localhost` or HTTPS.  Device
 selection must be triggered from the page's `Connect` button; browsers do not
-allow a web page to scan and connect silently.
+allow a web page to scan and connect silently.  After the user authorizes a
+device once, browsers that implement `navigator.bluetooth.getDevices()` let the
+page restore that device after a refresh.  `Connect` or `Reconnect` can then
+reuse the authorization without reopening the chooser.  If the saved device is
+no longer available, the page clears it and falls back to the normal chooser on
+the next attempt.  Browsers without `getDevices()` always use the chooser.
 
 The firmware places the NUS service UUID in the primary advertising packet and
 the `Linkr BLE UART-3` name in the scan response.  The page filters the browser
@@ -516,7 +569,13 @@ filtering on macOS Chromium browsers.
 The page can:
 
 - connect to devices advertising the Linkr NUS service UUID
+- restore the last authorized Linkr device after a page refresh for quick
+  reconnect, when the browser supports `navigator.bluetooth.getDevices()`
 - subscribe to TX notifications
+- keep firmware/runtime diagnostics collapsed by default; expanding the panel
+  queries the device, and the data can also be refreshed on demand
+- scan nearby 2.4 GHz WiFi networks and fill separate SSID/password fields
+  without writing the password to the application's `localStorage`
 - capture input directly inside xterm.js and write each keystroke to the RX
   characteristic; remote shells therefore receive native Tab completion,
   command-history arrows, backspace, Ctrl-C, and pasted text

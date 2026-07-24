@@ -6,15 +6,20 @@ const NUS_TX = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
 const BLE_DEVICE_NAME_PREFIX = "Linkr BLE UART";
 const WIFI_SCAN_CMD = "@w scan";
 const WIFI_SCAN_PREFIX = "@scan ";
+const WS_CONNECT_TIMEOUT_MS = 15000;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+let rxDecoder = new TextDecoder();
 
 const state = {
   device: null,
   server: null,
   rxChar: null,
   txChar: null,
+  mode: "ble",
+  ws: null,
+  wsHost: "",
   term: null,
   fitAddon: null,
   resizeObserver: null,
@@ -28,12 +33,19 @@ const state = {
   txBytes: 0,
   writeQueue: Promise.resolve(),
   writeGeneration: 0,
+  deviceRestored: false,
   sidebarCollapsed: false,
   scanning: false,
   scanResults: [],
   scanTimer: null,
+  wifiRefreshTimers: [],
+  wifiStatus: { connected: false, ssid: "", ip: "down" },
   rxBuffer: "",
+  diagnostics: {},
+  logSize: 0,
 };
+
+const LOG_CAP_BYTES = 4 * 1024 * 1024;
 
 const $ = (id) => document.getElementById(id);
 
@@ -46,6 +58,14 @@ const elements = {
   disconnectButton: $("disconnectButton"),
   reconnectButton: $("reconnectButton"),
   queryButton: $("queryButton"),
+  diagnosticsPanel: $("diagnosticsPanel"),
+  diagnosticsButton: $("diagnosticsButton"),
+  diagFirmware: $("diagFirmware"),
+  diagUptime: $("diagUptime"),
+  diagOwner: $("diagOwner"),
+  diagUart: $("diagUart"),
+  diagWifi: $("diagWifi"),
+  diagUpload: $("diagUpload"),
   setUartButton: $("setUartButton"),
   clearButton: $("clearButton"),
   saveButton: $("saveButton"),
@@ -59,7 +79,14 @@ const elements = {
   fontPreview: $("fontPreview"),
   localEchoInput: $("localEchoInput"),
   debugInput: $("debugInput"),
-  wifiInput: $("wifiInput"),
+  wifiSsidInput: $("wifiSsidInput"),
+  wifiPasswordInput: $("wifiPasswordInput"),
+  wifiPasswordToggle: $("wifiPasswordToggle"),
+  wifiNetworkList: $("wifiNetworkList"),
+  wifiFeedback: $("wifiFeedback"),
+  wifiConnectedSummary: $("wifiConnectedSummary"),
+  wifiConnectedSsid: $("wifiConnectedSsid"),
+  wifiDeviceIp: $("wifiDeviceIp"),
   wifiSetButton: $("wifiSetButton"),
   wifiOffButton: $("wifiOffButton"),
   wifiQueryButton: $("wifiQueryButton"),
@@ -86,11 +113,18 @@ const elements = {
   drawerClose: $("drawerClose"),
   drawerBackdrop: $("drawerBackdrop"),
   themeColorMeta: $("themeColorMeta"),
+  bleModeBtn: $("bleModeBtn"),
+  lanModeBtn: $("lanModeBtn"),
+  wsHostField: $("wsHostField"),
+  wsHostInput: $("wsHostInput"),
 };
 
 const THEME_KEY = "linkr-theme";
 const LANG_KEY = "linkr-lang";
 const FONT_FAMILY_KEY = "linkr-font-family";
+const LAST_DEVICE_ID_KEY = "linkr-last-device-id";
+const TRANSPORT_KEY = "linkr-transport";
+const WS_HOST_KEY = "linkr-ws-host";
 
 const SYSTEM_TERMINAL_FONT =
   'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace';
@@ -114,10 +148,10 @@ const TERMINAL_FONTS = {
 };
 
 const XTERM_DARK = {
-  background: "#07090c",
+  background: "#05080d",
   foreground: "#d8f3dc",
   cursor: "#d8f3dc",
-  selectionBackground: "#315a42",
+  selectionBackground: "#2b5340",
 };
 
 const XTERM_LIGHT = {
@@ -133,11 +167,30 @@ const I18N = {
     checking: "Checking Web Bluetooth…",
     supported: "Chrome/Chromium Web Bluetooth over HTTPS or localhost",
     unsupported: "Web Bluetooth unavailable in this browser",
+    bleMode: "BLE",
+    lanMode: "LAN",
+    wsHost: "Device address",
+    placeholderWsHost: "192.168.1.50 or ws://host/ws",
+    lanHint: "LAN mode: reach the device's WebSocket over your network",
+    wsMissingHost: "Enter the device address first.",
+    wsUnreachable: "WebSocket {url} is unreachable.",
+    wsTimeout: "WebSocket connection timed out after 15 seconds.",
     xtermFail: "xterm.js failed to load; check network access to jsDelivr",
     connected: "Connected",
     disconnected: "Disconnected",
+    authorizedDeviceReady: "Authorized device restored; click Connect to reconnect",
+    authorizedDeviceFailed: "Saved device unavailable; choose it again",
     connection: "Connection",
     terminalSettings: "Terminal Settings",
+    diagnostics: "Device Diagnostics",
+    diagFirmware: "Firmware",
+    diagUptime: "Uptime",
+    diagOwner: "BLE access",
+    diagUart: "UART Buffer",
+    diagWifi: "WiFi",
+    diagUpload: "Upload Queue",
+    refreshDiagnostics: "Refresh diagnostics",
+    diagnosticsUpdated: "Diagnostics updated",
     wifiWebdav: "WiFi & WebDAV",
     connect: "Connect",
     disconnect: "Disconnect",
@@ -162,13 +215,27 @@ const I18N = {
     localEcho: "Local echo",
     debugIO: "Debug I/O",
     wifi: "WiFi",
+    wifiSsid: "Network name",
+    wifiPassword: "Password",
+    connectWifi: "Connect WiFi",
+    wifiStatus: "WiFi status",
+    showPassword: "Show password",
+    hidePassword: "Hide password",
+    wifiScanHint: "Scan to select a nearby 2.4 GHz network.",
+    wifiSelectHint: "Select a network or enter its SSID.",
+    wifiMissingSsid: "Enter or select a network name.",
+    connectedNetwork: "Connected network",
+    deviceIp: "Device IP",
+    awaitingIp: "Obtaining address…",
     webdav: "WebDAV",
+    webdavStatus: "WebDAV status",
     serialOutput: "Serial Terminal",
     terminalAria: "Interactive serial terminal",
     xterm: "xterm.js",
     terminalInputHint: "Type here · Tab completes · Arrow keys browse history",
     terminalInputDisconnected: "Connect a device to enable terminal input",
-    placeholderWifi: "SSID,pass",
+    placeholderWifiSsid: "SSID",
+    placeholderWifiPassword: "Leave blank for an open network",
     placeholderWebdav: "http://host/path/ (anonymous)",
     enterRaw: "Raw",
     enterCr: "CR",
@@ -195,7 +262,7 @@ const I18N = {
     rx: "RX",
     tx: "TX",
     baud: "Baud",
-    welcome: "Linkr BLE Terminal ready. Press Connect to pair a device.",
+    welcome: "Linkr BLE Terminal ready. Press Connect to open a device.",
     connecting: "Connecting…",
     saved: "Log saved",
     uartSet: "UART configured",
@@ -217,11 +284,30 @@ const I18N = {
     checking: "正在检测 Web Bluetooth…",
     supported: "Chrome/Chromium 需通过 HTTPS 或 localhost 使用 Web Bluetooth",
     unsupported: "当前浏览器不支持 Web Bluetooth",
+    bleMode: "BLE",
+    lanMode: "局域网",
+    wsHost: "设备地址",
+    placeholderWsHost: "192.168.1.50 或 ws://host/ws",
+    lanHint: "局域网模式:通过设备的 WebSocket 直连串口",
+    wsMissingHost: "请先输入设备地址。",
+    wsUnreachable: "无法连接 WebSocket {url}。",
+    wsTimeout: "WebSocket 连接超过 15 秒未响应。",
     xtermFail: "xterm.js 加载失败，请检查对 jsDelivr 的网络访问",
     connected: "已连接",
     disconnected: "未连接",
+    authorizedDeviceReady: "已恢复授权设备，点击「连接」即可快速重连",
+    authorizedDeviceFailed: "已授权设备不可用，请重新选择设备",
     connection: "连接",
     terminalSettings: "终端设置",
+    diagnostics: "设备诊断",
+    diagFirmware: "固件",
+    diagUptime: "运行时间",
+    diagOwner: "BLE 访问",
+    diagUart: "UART 缓冲",
+    diagWifi: "WiFi",
+    diagUpload: "上传队列",
+    refreshDiagnostics: "刷新诊断",
+    diagnosticsUpdated: "诊断信息已更新",
     wifiWebdav: "WiFi 与 WebDAV",
     connect: "连接",
     disconnect: "断开",
@@ -246,13 +332,27 @@ const I18N = {
     localEcho: "本地回显",
     debugIO: "调试 I/O",
     wifi: "WiFi",
+    wifiSsid: "网络名称",
+    wifiPassword: "密码",
+    connectWifi: "连接 WiFi",
+    wifiStatus: "WiFi 状态",
+    showPassword: "显示密码",
+    hidePassword: "隐藏密码",
+    wifiScanHint: "扫描并选择附近的 2.4 GHz 网络。",
+    wifiSelectHint: "选择一个网络，或手动输入 SSID。",
+    wifiMissingSsid: "请输入或选择网络名称。",
+    connectedNetwork: "当前网络",
+    deviceIp: "设备 IP",
+    awaitingIp: "正在获取地址…",
     webdav: "WebDAV",
+    webdavStatus: "WebDAV 状态",
     serialOutput: "串口终端",
     terminalAria: "交互式串口终端",
     xterm: "xterm.js",
     terminalInputHint: "直接输入 · Tab 补全 · 方向键浏览历史",
     terminalInputDisconnected: "连接设备后即可在终端内直接输入",
-    placeholderWifi: "SSID,密码",
+    placeholderWifiSsid: "SSID",
+    placeholderWifiPassword: "开放网络可留空",
     placeholderWebdav: "http://host/path/ (匿名)",
     enterRaw: "原始",
     enterCr: "CR",
@@ -279,7 +379,7 @@ const I18N = {
     rx: "收",
     tx: "发",
     baud: "波特率",
-    welcome: "Linkr BLE 终端已就绪，点击「连接」配对设备。",
+    welcome: "Linkr BLE 终端已就绪，点击「连接」打开设备。",
     connecting: "连接中…",
     saved: "日志已保存",
     uartSet: "UART 已配置",
@@ -408,7 +508,7 @@ function updateToggleLabels() {
 function applyTheme() {
   document.documentElement.setAttribute("data-theme", theme);
   if (elements.themeColorMeta) {
-    elements.themeColorMeta.content = theme === "dark" ? "#0d1014" : "#eef2f8";
+    elements.themeColorMeta.content = theme === "dark" ? "#090d14" : "#eef2f7";
   }
   document.title = t("title");
   updateXtermTheme();
@@ -420,9 +520,26 @@ function setSupportText() {
     elements.supportText.textContent = t("xtermFail");
     return;
   }
+  if (state.mode === "ws") {
+    elements.supportText.textContent = t("lanHint");
+    return;
+  }
   elements.supportText.textContent = navigator.bluetooth
     ? t("supported")
     : t("unsupported");
+}
+
+function setTransportMode(mode) {
+  if (state.connected || mode === state.mode) {
+    return;
+  }
+  state.mode = mode;
+  saveSetting(TRANSPORT_KEY, mode);
+  elements.bleModeBtn.classList.toggle("active", mode === "ble");
+  elements.lanModeBtn.classList.toggle("active", mode === "ws");
+  elements.wsHostField.hidden = mode !== "ws";
+  setConnected(false);
+  setSupportText();
 }
 
 function refreshDynamicTexts() {
@@ -546,6 +663,8 @@ function applyLang() {
   updateToggleLabels();
   renderRefLists();
   refreshDynamicTexts();
+  renderDiagnostics();
+  updateWifiConnectionView();
   updateFullscreenButton();
 }
 
@@ -558,6 +677,17 @@ function fitTerminal() {
   } catch (_error) {
     // The fit addon can throw while the terminal container is hidden/resizing.
   }
+}
+
+let fitRaf = 0;
+function scheduleFit() {
+  if (fitRaf) {
+    return;
+  }
+  fitRaf = requestAnimationFrame(() => {
+    fitRaf = 0;
+    fitTerminal();
+  });
 }
 
 function isTerminalFullscreen() {
@@ -644,6 +774,7 @@ function initTerminal() {
     fontSize: state.fontSize,
     lineHeight: 1,
     scrollback: 10000,
+    smoothScrollDuration: 100,
     tabStopWidth: 8,
     theme: theme === "dark" ? XTERM_DARK : XTERM_LIGHT,
   });
@@ -654,9 +785,9 @@ function initTerminal() {
   applyTerminalFont(state.fontFamily);
   fitTerminal();
 
-  window.addEventListener("resize", fitTerminal);
+  window.addEventListener("resize", scheduleFit);
   if (globalThis.ResizeObserver) {
-    state.resizeObserver = new ResizeObserver(fitTerminal);
+    state.resizeObserver = new ResizeObserver(scheduleFit);
     state.resizeObserver.observe(elements.terminalOutput);
   }
 
@@ -667,7 +798,9 @@ function appendOutput(data) {
   if (!state.term) {
     const text =
       data instanceof Uint8Array ? decoder.decode(data) : String(data);
-    elements.terminalOutput.append(document.createTextNode(text));
+    elements.terminalOutput.append(
+      document.createTextNode(text.replace(/\x1b\[[0-9;]*m/g, "")),
+    );
     elements.terminalOutput.scrollTop = elements.terminalOutput.scrollHeight;
     return;
   }
@@ -675,7 +808,15 @@ function appendOutput(data) {
 }
 
 function appendLine(text) {
-  appendOutput(`${text}\r\n`);
+  let color = "\x1b[90m";
+  if (text.startsWith("[error]")) {
+    color = "\x1b[91m";
+  } else if (text.startsWith("[warn]") || text.startsWith("[disconnected]")) {
+    color = "\x1b[93m";
+  } else if (text === "[ready]") {
+    color = "\x1b[92m";
+  }
+  appendOutput(`${color}${text}\x1b[0m\r\n`);
 }
 
 function debugLine(text) {
@@ -700,41 +841,261 @@ function toast(message) {
   }, 2200);
 }
 
+let counterRaf = 0;
 function updateCounters() {
-  if (elements.rxCount) {
-    elements.rxCount.textContent = state.rxBytes.toLocaleString();
+  if (counterRaf) {
+    return;
   }
-  if (elements.txCount) {
-    elements.txCount.textContent = state.txBytes.toLocaleString();
+  counterRaf = requestAnimationFrame(() => {
+    counterRaf = 0;
+    if (elements.rxCount) {
+      elements.rxCount.textContent = state.rxBytes.toLocaleString();
+    }
+    if (elements.txCount) {
+      elements.txCount.textContent = state.txBytes.toLocaleString();
+    }
+  });
+}
+
+function appendLogBytes(bytes) {
+  state.logBytes.push(bytes);
+  state.logSize += bytes.length;
+  while (state.logSize > LOG_CAP_BYTES && state.logBytes.length > 1) {
+    state.logSize -= state.logBytes.shift().byteLength;
   }
 }
 
 function updateWifiDatalist() {
   const list = elements.wifiSsidList;
-  if (!list) {
+  const networkList = elements.wifiNetworkList;
+  if (!list || !networkList) {
     return;
   }
-  list.innerHTML = state.scanResults
-    .map((s) => `<option value="${escapeHtml(s)}"></option>`)
-    .join("");
+
+  const networks = [...state.scanResults].sort(
+    (a, b) => (b.rssi ?? -999) - (a.rssi ?? -999),
+  );
+  list.replaceChildren(
+    ...networks.map((network) => {
+      const option = document.createElement("option");
+      option.value = network.ssid;
+      return option;
+    }),
+  );
+  networkList.replaceChildren(
+    ...networks.map((network) => {
+      const button = document.createElement("button");
+      const name = document.createElement("span");
+      const rssi = document.createElement("span");
+
+      button.type = "button";
+      button.className = "wifi-network";
+      button.dataset.ssid = network.ssid;
+      name.className = "wifi-network-name";
+      name.textContent = network.ssid;
+      rssi.className = "wifi-network-rssi";
+      rssi.textContent = Number.isFinite(network.rssi)
+        ? `${network.rssi} dBm`
+        : "";
+      button.append(name, rssi);
+      return button;
+    }),
+  );
 }
 
-function parseSsid(raw) {
-  let s = String(raw).trim();
-  if (!s || s.length > 32) {
+function updateWifiConnectionView() {
+  const wifi = state.wifiStatus;
+  const connected = Boolean(wifi.connected);
+  const wifiForm = document.querySelector(".wifi-form");
+
+  if (elements.wifiConnectedSummary) {
+    elements.wifiConnectedSummary.hidden = !connected;
+  }
+  if (wifiForm) {
+    wifiForm.hidden = connected;
+  }
+  elements.wifiScanButton.hidden = connected;
+  elements.wifiSetButton.hidden = connected;
+
+  if (!connected) {
+    return;
+  }
+
+  state.scanResults = [];
+  updateWifiDatalist();
+  elements.wifiConnectedSsid.textContent = wifi.ssid || "—";
+  elements.wifiDeviceIp.textContent = /^\d{1,3}(\.\d{1,3}){3}$/.test(wifi.ip)
+    ? wifi.ip
+    : t("awaitingIp");
+}
+
+function handleWifiStatusLine(line) {
+  const value = String(line).trim();
+
+  if (value === "OK wifi off") {
+    state.wifiStatus = { connected: false, ssid: "", ip: "down" };
+    updateWifiConnectionView();
+    return true;
+  }
+  if (!value.startsWith("OK wifi=")) {
+    return false;
+  }
+
+  let payload = value.slice("OK ".length);
+  let ip = "down";
+  const ipIndex = payload.lastIndexOf(",ip=");
+  if (ipIndex >= 0) {
+    ip = payload.slice(ipIndex + 4).trim();
+    payload = payload.slice(0, ipIndex);
+  }
+  const match = payload.match(/^wifi=([^,]+),ssid=(.*)$/);
+  if (!match) {
+    return false;
+  }
+
+  state.wifiStatus.connected = match[1] === "connected";
+  state.wifiStatus.ssid = match[2] === "-" ? "" : match[2];
+  state.wifiStatus.ip = ip;
+  updateWifiConnectionView();
+  return true;
+}
+
+function clearWifiRefreshTimers() {
+  for (const timer of state.wifiRefreshTimers) {
+    clearTimeout(timer);
+  }
+  state.wifiRefreshTimers = [];
+}
+
+function requestWifiState() {
+  if (!state.connected || state.mode !== "ble") {
+    return Promise.resolve();
+  }
+  return Promise.all([sendControl("@w?"), requestDiagnostics()]);
+}
+
+function scheduleWifiStateRefresh() {
+  clearWifiRefreshTimers();
+  state.wifiRefreshTimers = [1500, 3500, 7000].map((delay) =>
+    setTimeout(() => {
+      requestWifiState().catch((error) =>
+        appendLine(`[error] ${error.message}`),
+      );
+    }, delay),
+  );
+}
+
+function parseWifiScanResult(raw) {
+  let value = String(raw).trim();
+  const rssiMatch = value.match(/\s+(-?\d+)\s*dBm?$/i);
+  const rssi = rssiMatch ? Number(rssiMatch[1]) : null;
+  let channel = null;
+  let security = null;
+
+  if (rssiMatch) {
+    value = value.slice(0, rssiMatch.index).trim();
+  }
+  const channelMatch = value.match(/\s+ch=(\d+)$/i);
+  if (channelMatch) {
+    channel = Number(channelMatch[1]);
+    value = value.slice(0, channelMatch.index).trim();
+  }
+  const securityMatch = value.match(
+    /\s+(open|wep|wpa|wpa2|wpa2-sha256|wpa3|eap|wapi|unknown)$/i,
+  );
+  if (securityMatch) {
+    security = securityMatch[1].toLowerCase();
+    value = value.slice(0, securityMatch.index).trim();
+  }
+  if (!value || value.length > 32) {
     return null;
   }
-  if (/^[[@]/.test(s)) {
+  if (/^[[@]/.test(value)) {
     return null;
   }
-  s = s.replace(/^\d+[).]\s*/, "");
-  s = s.replace(/\s+-\d+\s*dBm?$/i, "");
-  s = s.replace(/^["']|["']$/g, "");
-  s = s.trim();
-  if (!s || s === "<hidden>") {
+  value = value.replace(/^\d+[).]\s*/, "");
+  value = value.replace(/^["']|["']$/g, "").trim();
+  if (!value || value === "<hidden>") {
     return null;
   }
-  return s;
+  return { ssid: value, rssi, channel, security };
+}
+
+function formatUptime(value) {
+  const totalSeconds = Math.max(0, Math.floor(Number(value || 0) / 1000));
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  return days
+    ? `${days}d ${hours}h`
+    : hours
+      ? `${hours}h ${minutes}m`
+      : `${minutes}m ${seconds}s`;
+}
+
+function renderDiagnostics() {
+  const diag = state.diagnostics;
+  const fw = diag.fw || {};
+  const sys = diag.sys || {};
+  const uart = diag.uart || {};
+  const wifi = diag.wifi || {};
+  const upload = diag.upload || {};
+
+  elements.diagFirmware.textContent = fw.version
+    ? `${fw.version} · Z${fw.zephyr || "?"}`
+    : "—";
+  elements.diagUptime.textContent = sys.uptime_ms
+    ? formatUptime(sys.uptime_ms)
+    : "—";
+  elements.diagOwner.textContent = sys.owner != null
+    ? `open · L${sys.security || "?"}`
+    : "—";
+  elements.diagUart.textContent = uart.buffer
+    ? `${uart.buffer} · drop ${uart.dropped || "0"}`
+    : "—";
+  elements.diagWifi.textContent = wifi.state
+    ? `${wifi.state} · IP ${wifi.ip || "?"} · err ${wifi.error || "0"}`
+    : "—";
+  if (wifi.state) {
+    state.wifiStatus.connected = wifi.state === "connected";
+    state.wifiStatus.ip = wifi.ip || "down";
+    updateWifiConnectionView();
+  }
+  if (
+    elements.wsHostInput &&
+    !elements.wsHostInput.value &&
+    /^\d{1,3}(\.\d{1,3}){3}$/.test(wifi.ip || "")
+  ) {
+    elements.wsHostInput.value = wifi.ip;
+  }
+  elements.diagUpload.textContent = upload.queue != null
+    ? `${upload.queue} B · HTTP ${upload.http || "0"} · fail ${upload.failures || "0"}`
+    : "—";
+}
+
+function handleInfoLine(line) {
+  const payload = line.slice("@info ".length).trim();
+  if (payload === "done") {
+    renderDiagnostics();
+    toast(t("diagnosticsUpdated"));
+    return;
+  }
+
+  const parts = payload.split(/\s+/);
+  const group = parts.shift();
+  if (!group) {
+    return;
+  }
+  const fields = {};
+  for (const token of parts) {
+    const separator = token.indexOf("=");
+    if (separator > 0) {
+      fields[token.slice(0, separator)] = token.slice(separator + 1);
+    }
+  }
+  state.diagnostics[group] = fields;
 }
 
 function feedRx(text) {
@@ -747,10 +1108,17 @@ function feedRx(text) {
 }
 
 function handleRxLine(line) {
+  const scanLine = String(line).trim();
+  if (scanLine.startsWith("@info ")) {
+    handleInfoLine(scanLine);
+    return;
+  }
+  if (handleWifiStatusLine(scanLine)) {
+    return;
+  }
   if (!state.scanning) {
     return;
   }
-  const scanLine = String(line).trim();
   const resultPrefix = WIFI_SCAN_PREFIX + "result ";
   if (/^ERR\b/i.test(scanLine) || scanLine === "@scan error") {
     finishScan(true);
@@ -763,9 +1131,19 @@ function handleRxLine(line) {
   if (!scanLine.startsWith(resultPrefix)) {
     return;
   }
-  const ssid = parseSsid(scanLine.slice(resultPrefix.length));
-  if (ssid && !state.scanResults.includes(ssid)) {
-    state.scanResults.push(ssid);
+  const network = parseWifiScanResult(scanLine.slice(resultPrefix.length));
+  if (network) {
+    const existing = state.scanResults.find(
+      (item) => item.ssid === network.ssid,
+    );
+    if (!existing) {
+      state.scanResults.push(network);
+    } else if (
+      Number.isFinite(network.rssi) &&
+      (!Number.isFinite(existing.rssi) || network.rssi > existing.rssi)
+    ) {
+      existing.rssi = network.rssi;
+    }
     updateWifiDatalist();
   }
 }
@@ -776,8 +1154,8 @@ async function scanWifi() {
   }
   state.scanning = true;
   state.scanResults = [];
-  state.rxBuffer = "";
   updateWifiDatalist();
+  elements.wifiFeedback.textContent = t("scanning");
   elements.wifiScanButton.disabled = true;
   clearTimeout(state.scanTimer);
   state.scanTimer = setTimeout(finishScan, 10000);
@@ -799,12 +1177,15 @@ function finishScan(failed = false) {
   updateWifiDatalist();
   elements.wifiScanButton.disabled = !state.connected;
   if (failed) {
+    elements.wifiFeedback.textContent = t("scanFailed");
     toast(t("scanFailed"));
     return;
   }
   if (state.scanResults.length) {
+    elements.wifiFeedback.textContent = t("wifiSelectHint");
     toast(t("foundN").replace("{n}", String(state.scanResults.length)));
   } else {
+    elements.wifiFeedback.textContent = t("noNetworks");
     toast(t("noNetworks"));
   }
 }
@@ -833,6 +1214,8 @@ function setConnecting(connecting) {
   const btn = elements.connectButton;
   btn.classList.toggle("loading", connecting);
   btn.disabled = connecting || state.connected;
+  elements.bleModeBtn.disabled = connecting || state.connected;
+  elements.lanModeBtn.disabled = connecting || state.connected;
   const label = btn.querySelector(".btn-label");
   if (connecting) {
     if (label) {
@@ -844,7 +1227,10 @@ function setConnecting(connecting) {
 }
 
 function setConnected(connected) {
-  const canConnect = Boolean(navigator.bluetooth) && Boolean(state.term);
+  const isWs = state.mode === "ws";
+  const canConnect =
+    Boolean(state.term) && (isWs || Boolean(navigator.bluetooth));
+  const canControl = connected && !isWs;
 
   state.writeGeneration += 1;
   state.connected = connected;
@@ -857,26 +1243,32 @@ function setConnected(connected) {
       connected ? "connected" : "disconnected",
     );
   }
-  elements.deviceName.textContent = connected && state.device
-    ? state.device.name || state.device.id
-    : "";
+  elements.deviceName.textContent = isWs
+    ? state.wsHost || ""
+    : state.device
+      ? state.device.name || state.device.id
+      : "";
   elements.connectButton.disabled = connected || !canConnect;
   elements.disconnectButton.disabled = !connected;
-  elements.reconnectButton.disabled = !state.device || connected;
-  elements.queryButton.disabled = !connected;
-  elements.setUartButton.disabled = !connected;
+  elements.reconnectButton.disabled =
+    connected || (!isWs && !state.device);
+  elements.bleModeBtn.disabled = connected;
+  elements.lanModeBtn.disabled = connected;
+  elements.queryButton.disabled = !canControl;
+  elements.diagnosticsButton.disabled = !canControl;
+  elements.setUartButton.disabled = !canControl;
   elements.breakButton.disabled = !connected;
   elements.terminalOutput.classList.toggle("connected", connected);
   elements.terminalInputHint.textContent = t(
     connected ? "terminalInputHint" : "terminalInputDisconnected",
   );
-  elements.wifiSetButton.disabled = !connected;
-  elements.wifiOffButton.disabled = !connected;
-  elements.wifiQueryButton.disabled = !connected;
-  elements.wifiScanButton.disabled = !connected;
-  elements.webdavSetButton.disabled = !connected;
-  elements.webdavOffButton.disabled = !connected;
-  elements.webdavQueryButton.disabled = !connected;
+  elements.wifiSetButton.disabled = !canControl;
+  elements.wifiOffButton.disabled = !canControl;
+  elements.wifiQueryButton.disabled = !canControl;
+  elements.wifiScanButton.disabled = !canControl;
+  elements.webdavSetButton.disabled = !canControl;
+  elements.webdavOffButton.disabled = !canControl;
+  elements.webdavQueryButton.disabled = !canControl;
   if (elements.presetChips) {
     elements.presetChips
       .querySelectorAll(".preset-chip")
@@ -886,6 +1278,60 @@ function setConnected(connected) {
     setAutoScroll(true, true);
     state.term.focus();
   }
+}
+
+function rememberDevice(device, restored = false) {
+  if (!device) {
+    return;
+  }
+  if (state.device && state.device !== device) {
+    state.device.removeEventListener(
+      "gattserverdisconnected",
+      onDisconnected,
+    );
+  }
+  state.device = device;
+  state.deviceRestored = restored;
+  device.removeEventListener("gattserverdisconnected", onDisconnected);
+  device.addEventListener("gattserverdisconnected", onDisconnected);
+  saveSetting(LAST_DEVICE_ID_KEY, device.id);
+  setConnected(false);
+}
+
+async function restoreAuthorizedDevice() {
+  if (!navigator.bluetooth?.getDevices) {
+    return;
+  }
+  try {
+    const devices = await navigator.bluetooth.getDevices();
+    const lastDeviceId = localStorage.getItem(LAST_DEVICE_ID_KEY);
+    const candidates = devices.filter(
+      (device) =>
+        device.id === lastDeviceId ||
+        (device.name && device.name.startsWith(BLE_DEVICE_NAME_PREFIX)),
+    );
+    const device =
+      candidates.find((candidate) => candidate.id === lastDeviceId) ||
+      candidates[0];
+
+    if (!device) {
+      return;
+    }
+    rememberDevice(device, true);
+    appendLine(`[restore] ${device.name || device.id}`);
+    toast(t("authorizedDeviceReady"));
+  } catch (error) {
+    debugLine(`[restore] ${error.message}`);
+  }
+}
+
+function requestDiagnostics() {
+  if (!state.connected) {
+    return Promise.resolve();
+  }
+  state.diagnostics = {};
+  renderDiagnostics();
+  return sendControl("@i?");
 }
 
 function normalizeEnter(text) {
@@ -911,6 +1357,23 @@ function chunkSize() {
 }
 
 async function writeBytes(bytes, sensitive = false) {
+  if (state.mode === "ws") {
+    if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+      throw new Error("WebSocket is not connected");
+    }
+    if (elements.debugInput.checked) {
+      appendLine(
+        sensitive
+          ? `TX <redacted ${bytes.length} bytes>`
+          : `TX ${bytes.length}: ${JSON.stringify(decoder.decode(bytes))}`,
+      );
+    }
+    state.ws.send(bytes);
+    state.txBytes += bytes.length;
+    updateCounters();
+    return;
+  }
+
   if (!state.rxChar) {
     throw new Error("RX characteristic is not ready");
   }
@@ -918,11 +1381,13 @@ async function writeBytes(bytes, sensitive = false) {
   const size = chunkSize();
   for (let offset = 0; offset < bytes.length; offset += size) {
     const chunk = bytes.slice(offset, offset + size);
-    debugLine(
-      sensitive
-        ? `TX <redacted ${chunk.length} bytes>`
-        : `TX ${chunk.length}: ${JSON.stringify(decoder.decode(chunk))}`,
-    );
+    if (elements.debugInput.checked) {
+      appendLine(
+        sensitive
+          ? `TX <redacted ${chunk.length} bytes>`
+          : `TX ${chunk.length}: ${JSON.stringify(decoder.decode(chunk))}`,
+      );
+    }
     try {
       if (
         state.rxChar.properties.writeWithoutResponse &&
@@ -999,39 +1464,135 @@ async function sendControl(command) {
   await enqueueBytes(frame, sensitive);
 }
 
-function onNotification(event) {
-  const view = event.target.value;
-  const bytes = new Uint8Array(
-    view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength),
-  );
-  state.logBytes.push(bytes);
+function handleIncomingBytes(bytes) {
+  appendLogBytes(bytes);
   state.rxBytes += bytes.length;
   updateCounters();
-  const text = decoder.decode(bytes);
-  debugLine(`RX ${bytes.length}: ${JSON.stringify(text)}`);
+  const text = rxDecoder.decode(bytes, { stream: true });
+  if (elements.debugInput.checked) {
+    appendLine(`RX ${bytes.length}: ${JSON.stringify(text)}`);
+  }
   feedRx(text);
   appendOutput(bytes);
+}
+
+function onNotification(event) {
+  const view = event.target.value;
+  handleIncomingBytes(
+    new Uint8Array(
+      view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength),
+    ),
+  );
 }
 
 function onDisconnected() {
   state.rxChar = null;
   state.txChar = null;
   state.server = null;
+  state.ws = null;
   state.scanning = false;
+  state.rxBuffer = "";
+  state.diagnostics = {};
+  rxDecoder = new TextDecoder();
+  clearWifiRefreshTimers();
   clearTimeout(state.scanTimer);
   state.scanResults = [];
   updateWifiDatalist();
+  renderDiagnostics();
   setConnected(false);
   appendLine("[disconnected]");
 }
 
+function connectWs() {
+  return new Promise((resolve, reject) => {
+    const host = elements.wsHostInput.value.trim();
+    if (!host) {
+      reject(new Error(t("wsMissingHost")));
+      return;
+    }
+    saveSetting(WS_HOST_KEY, host);
+    const url = /^wss?:\/\//.test(host) ? host : `ws://${host}/ws`;
+    const ws = new WebSocket(url);
+    let opened = false;
+    let settled = false;
+
+    const clearConnectTimer = () => clearTimeout(connectTimer);
+    const failConnect = (message) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearConnectTimer();
+      if (state.ws === ws) {
+        state.ws = null;
+      }
+      reject(new Error(message));
+    };
+    const connectTimer = setTimeout(() => {
+      failConnect(t("wsTimeout"));
+      ws.close();
+    }, WS_CONNECT_TIMEOUT_MS);
+
+    state.ws = ws;
+    state.wsHost = url;
+    ws.binaryType = "arraybuffer";
+    appendLine(`[connect] ${url}`);
+
+    ws.onopen = () => {
+      if (settled) {
+        ws.close();
+        return;
+      }
+      settled = true;
+      clearConnectTimer();
+      opened = true;
+      setConnected(true);
+      appendLine("[ready]");
+      resolve();
+    };
+    ws.onmessage = (event) => {
+      if (event.data instanceof ArrayBuffer) {
+        handleIncomingBytes(new Uint8Array(event.data));
+      } else if (typeof event.data === "string") {
+        handleIncomingBytes(encoder.encode(event.data));
+      }
+    };
+    ws.onclose = () => {
+      if (opened) {
+        onDisconnected();
+      } else {
+        failConnect(t("wsUnreachable").replace("{url}", url));
+      }
+    };
+    ws.onerror = () => {
+      if (!opened) {
+        failConnect(t("wsUnreachable").replace("{url}", url));
+      }
+    };
+  });
+}
+
 async function connect() {
+  if (state.mode === "ws") {
+    setConnecting(true);
+    try {
+      await connectWs();
+    } catch (error) {
+      appendLine(`[error] ${error.message}`);
+      setConnected(false);
+    } finally {
+      setConnecting(false);
+    }
+    return;
+  }
+
   if (!navigator.bluetooth) {
     appendLine("[error] Web Bluetooth is not available in this browser");
     return;
   }
 
   setConnecting(true);
+  const restoredAttempt = Boolean(state.device && state.deviceRestored);
   try {
     let device = state.device;
     if (!device) {
@@ -1040,8 +1601,7 @@ async function connect() {
         filters: [{ services: [NUS_SERVICE] }],
         optionalServices: [NUS_SERVICE],
       });
-      state.device = device;
-      device.addEventListener("gattserverdisconnected", onDisconnected);
+      rememberDevice(device);
     }
 
     appendLine(`[connect] ${device.name || device.id}`);
@@ -1049,13 +1609,29 @@ async function connect() {
     const service = await state.server.getPrimaryService(NUS_SERVICE);
     state.rxChar = await service.getCharacteristic(NUS_RX);
     state.txChar = await service.getCharacteristic(NUS_TX);
-
     await state.txChar.startNotifications();
     state.txChar.addEventListener("characteristicvaluechanged", onNotification);
+    state.deviceRestored = false;
     setConnected(true);
     appendLine("[ready]");
+    requestWifiState().catch((error) =>
+      appendLine(`[error] ${error.message}`),
+    );
   } catch (error) {
     appendLine(`[error] ${error.message}`);
+    if (restoredAttempt) {
+      localStorage.removeItem(LAST_DEVICE_ID_KEY);
+      if (state.device) {
+        state.device.removeEventListener(
+          "gattserverdisconnected",
+          onDisconnected,
+        );
+      }
+      state.device = null;
+      state.deviceRestored = false;
+      appendLine(`[restore] ${t("authorizedDeviceFailed")}`);
+      toast(t("authorizedDeviceFailed"));
+    }
     setConnected(false);
   } finally {
     setConnecting(false);
@@ -1063,6 +1639,15 @@ async function connect() {
 }
 
 async function disconnect() {
+  if (state.mode === "ws") {
+    if (state.ws) {
+      state.ws.close();
+    } else {
+      onDisconnected();
+    }
+    return;
+  }
+
   if (state.txChar) {
     try {
       await state.txChar.stopNotifications();
@@ -1131,6 +1716,10 @@ function loadPersisted() {
   state.fontFamily = TERMINAL_FONTS[fontFamily] ? fontFamily : "system";
   applyTerminalFont(state.fontFamily);
   state.sidebarCollapsed = localStorage.getItem("linkr-sidebar") === "collapsed";
+  const savedHost = localStorage.getItem(WS_HOST_KEY);
+  if (savedHost && elements.wsHostInput) {
+    elements.wsHostInput.value = savedHost;
+  }
   updateBaudLabel();
 }
 
@@ -1210,6 +1799,19 @@ function bind() {
     sendControl("@u?").catch((error) => appendLine(`[error] ${error.message}`));
   });
 
+  elements.diagnosticsButton.addEventListener("click", () => {
+    requestDiagnostics().catch((error) =>
+      appendLine(`[error] ${error.message}`),
+    );
+  });
+  elements.diagnosticsPanel.addEventListener("toggle", () => {
+    if (elements.diagnosticsPanel.open && state.connected) {
+      requestDiagnostics().catch((error) =>
+        appendLine(`[error] ${error.message}`),
+      );
+    }
+  });
+
   elements.setUartButton.addEventListener("click", () => {
     const value = elements.uartInput.value.trim();
     sendControl(`@u=${value}`)
@@ -1223,6 +1825,7 @@ function bind() {
   elements.clearButton.addEventListener("click", () => {
     clearTerminalOutput(true);
     state.logBytes = [];
+    state.logSize = 0;
     toast(t("cleared"));
   });
 
@@ -1235,12 +1838,46 @@ function bind() {
   });
 
   elements.wifiSetButton.addEventListener("click", () => {
-    sendControl(`@w=${elements.wifiInput.value.trim()}`)
-      .then(() => toast(t("wifiSet")))
+    const ssid = elements.wifiSsidInput.value.trim();
+    const password = elements.wifiPasswordInput.value;
+
+    if (!ssid) {
+      elements.wifiFeedback.textContent = t("wifiMissingSsid");
+      elements.wifiSsidInput.focus();
+      return;
+    }
+    sendControl(`@w=${ssid},${password}`)
+      .then(() => {
+        state.wifiStatus.ssid = ssid;
+        toast(t("wifiSet"));
+        scheduleWifiStateRefresh();
+      })
       .catch((error) => appendLine(`[error] ${error.message}`));
   });
+  elements.wifiPasswordToggle.addEventListener("click", () => {
+    const show = elements.wifiPasswordInput.type === "password";
+    elements.wifiPasswordInput.type = show ? "text" : "password";
+    elements.wifiPasswordToggle.setAttribute("aria-pressed", String(show));
+    elements.wifiPasswordToggle.setAttribute(
+      "aria-label",
+      t(show ? "hidePassword" : "showPassword"),
+    );
+  });
+  elements.wifiNetworkList.addEventListener("click", (event) => {
+    const button = event.target.closest(".wifi-network[data-ssid]");
+    if (!button) {
+      return;
+    }
+    elements.wifiSsidInput.value = button.dataset.ssid || "";
+    elements.wifiPasswordInput.focus();
+  });
   elements.wifiOffButton.addEventListener("click", () => {
-    sendControl("@w off").catch((error) => appendLine(`[error] ${error.message}`));
+    sendControl("@w off")
+      .then(() => {
+        state.wifiStatus = { connected: false, ssid: "", ip: "down" };
+        updateWifiConnectionView();
+      })
+      .catch((error) => appendLine(`[error] ${error.message}`));
   });
   elements.wifiQueryButton.addEventListener("click", () => {
     sendControl("@w?").catch((error) => appendLine(`[error] ${error.message}`));
@@ -1322,6 +1959,9 @@ function bind() {
     applyLang();
   });
 
+  elements.bleModeBtn.addEventListener("click", () => setTransportMode("ble"));
+  elements.lanModeBtn.addEventListener("click", () => setTransportMode("ws"));
+
   elements.panelToggle.addEventListener("click", toggleSidebar);
   elements.drawerClose.addEventListener("click", () => {
     document.querySelector(".app-shell").classList.remove("sidebar-open");
@@ -1375,6 +2015,9 @@ function init() {
   applyTheme();
   applyLang();
   applySidebar();
+  if (localStorage.getItem(TRANSPORT_KEY) === "ws") {
+    setTransportMode("ws");
+  }
   setConnected(false);
   bind();
   syncSidebarForViewport();
@@ -1382,10 +2025,15 @@ function init() {
   if (state.term) {
     const vp = elements.terminalOutput.querySelector(".xterm-viewport");
     if (vp) {
-      vp.addEventListener("scroll", onViewportScroll);
+      vp.addEventListener("scroll", onViewportScroll, { passive: true });
     }
   }
   appendLine(t("welcome"));
+  if (state.mode === "ble") {
+    restoreAuthorizedDevice().catch((error) =>
+      debugLine(`[restore] ${error.message}`),
+    );
+  }
 }
 
 init();

@@ -271,7 +271,8 @@ async def run(args: argparse.Namespace) -> None:
     if args.scan:
         await scan_devices(args.timeout)
         has_control_action = any((
-            args.query_uart, args.uart, args.wifi, args.wifi_off,
+            args.query_info, args.query_uart, args.uart, args.wifi,
+            args.wifi_scan, args.wifi_off,
             args.query_wifi, args.webdav, args.webdav_off,
             args.query_webdav, args.loopback_test is not None,
         ))
@@ -279,10 +280,6 @@ async def run(args: argparse.Namespace) -> None:
             return
 
     target = await find_device(args.name, args.address, args.timeout)
-    needs_pairing = args.pair or any((
-        args.wifi, args.wifi_off, args.query_wifi, args.webdav,
-        args.webdav_off, args.query_webdav,
-    ))
     cfg = TerminalConfig(
         escape=args.escape,
         enter=args.enter,
@@ -305,8 +302,11 @@ async def run(args: argparse.Namespace) -> None:
 
     try:
         async with BleakClient(target, disconnected_callback=on_disconnect,
-                               timeout=args.timeout, pair=needs_pairing) as client:
+                               timeout=args.timeout) as client:
             stderr(f"Connected: {client.address}")
+
+            if args.pair:
+                stderr("Pairing is disabled by this firmware; --pair is a no-op")
 
             def on_notify(_char, data: bytearray) -> None:
                 payload = bytes(data)
@@ -321,6 +321,9 @@ async def run(args: argparse.Namespace) -> None:
             await client.start_notify(NUS_TX_UUID, on_notify)
             await asyncio.sleep(0.3)
             configure_ble_write_size(client, cfg, args.ble_write_size)
+
+            if args.query_info:
+                await send_control(client, b"@i?", cfg, delay=1.5)
 
             if args.uart:
                 spec = normalize_uart_spec(args.uart)
@@ -337,6 +340,9 @@ async def run(args: argparse.Namespace) -> None:
 
             if args.query_wifi:
                 await send_control(client, b"@w?", cfg)
+
+            if args.wifi_scan:
+                await send_control(client, b"@w scan", cfg, delay=5.0)
 
             if args.webdav:
                 await send_control(client, f"@d={args.webdav}".encode(), cfg)
@@ -389,16 +395,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--address", help="BLE address/UUID; skips name scan")
     parser.add_argument("--scan", action="store_true", help="list nearby BLE devices")
     parser.add_argument("--timeout", type=float, default=8.0, help="scan timeout seconds")
+    parser.add_argument("--query-info", action="store_true",
+                        help="send @i? device diagnostics before terminal")
     parser.add_argument("--query-uart", action="store_true", help="send @u? before terminal")
     parser.add_argument("--uart", help="set UART as baud,data,parity,stop,flow")
     parser.add_argument("--wifi", help="connect ESP32 to WiFi as ssid,pass")
     parser.add_argument("--wifi-off", action="store_true", help="forget saved WiFi")
     parser.add_argument("--query-wifi", action="store_true", help="send @w? before terminal")
+    parser.add_argument("--wifi-scan", action="store_true",
+                        help="scan nearby 2.4 GHz WiFi networks")
     parser.add_argument("--webdav", help="set anonymous HTTP WebDAV upload URL")
     parser.add_argument("--webdav-off", action="store_true", help="disable WebDAV upload")
     parser.add_argument("--query-webdav", action="store_true", help="send @d? before terminal")
     parser.add_argument("--pair", action="store_true",
-                        help="pair before opening the terminal (required for WiFi/WebDAV)")
+                        help="deprecated no-op; BLE pairing is disabled")
     parser.add_argument("--loopback-test", nargs="?", const="A",
                         help="send payload and require the same bytes back")
     parser.add_argument("--loopback-timeout", type=float, default=3.0,
