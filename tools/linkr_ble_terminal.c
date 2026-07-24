@@ -45,9 +45,8 @@
 #define MAX_PATH_LEN    256
 #define MAX_UUID_LEN    40
 #define MAX_NAME_LEN    128
-/* Current firmware defaults to 20-byte writes; 62 is the supported ceiling
- * when a future build and the central negotiate a larger ATT MTU. */
-#define BLE_MAX_NUS_PAYLOAD 62
+/* ATT MTU 247 leaves up to 244 bytes for a GATT value. */
+#define BLE_MAX_NUS_PAYLOAD 244
 
 struct options {
     const char *name;
@@ -1694,6 +1693,12 @@ int main(int argc, char **argv)
     pthread_mutex_init(&g_state.stdout_lock, NULL);
 
     parse_args(argc, argv, &opt);
+
+    if (opt.query_info || opt.query_uart || opt.uart || opt.wifi ||
+        opt.wifi_off || opt.query_wifi || opt.wifi_scan || opt.webdav ||
+        opt.webdav_off || opt.query_webdav) {
+        fatal("management flags require API v1; use linkr_ble_terminal.py");
+    }
 
     dbus_error_init(&err);
     g_state.conn = dbus_bus_get(DBUS_BUS_SYSTEM, &err);

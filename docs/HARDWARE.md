@@ -112,8 +112,9 @@ ESP32-C3 在系统中承担三重角色：
   - 服务：`6e400001-b5a3-f393-e0a9-e50e24dcca9e`
   - RX 写特征：`6e400002-b5a3-f393-e0a9-e50e24dcca9e`
   - TX 通知特征：`6e400003-b5a3-f393-e0a9-e50e24dcca9e`
-- 默认 ATT/L2CAP MTU 23，客户端使用 20 字节安全分片；只有中心明确报告更大
-  写入能力时才可提升，UART 数据始终由固件按实际链路能力分段
+- 正式配置提供 ATT/L2CAP MTU 247 与 LE Data Length 251；Reliable UART 的
+  12 字节帧头和最多 232 字节 payload 可在协商成功时单包传输，较小 MTU
+  仍自动分片并保留 20 字节兼容路径
 - 控制命令：
   - `@u?` / `@u=baud,data,parity,stop,flow`（UART）
   - `@w=ssid,pass` / `@w off` / `@w?`（WiFi）

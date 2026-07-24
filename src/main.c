@@ -29,6 +29,8 @@
 #include <zephyr/sys/ring_buffer.h>
 #include <zephyr/version.h>
 
+#include "ble_mgmt.h"
+#include "ble_uart_reliable.h"
 #include "wifi.h"
 #include "ws_bridge.h"
 
@@ -49,10 +51,7 @@ LOG_MODULE_REGISTER(linkr_ble_bridge, LOG_LEVEL_INF);
 #define UART_RX_BUFFER_SIZE CONFIG_LINKR_BLE_BRIDGE_UART_RX_BUFFER_SIZE
 
 #define CONTROL_CMD_PREFIX "@linkr "
-#define CONTROL_FRAME_PREFIX "@!"
 #define CONTROL_CMD_MAX_LEN 416
-#define CONTROL_RESPONSE_MAX_LEN 128
-#define CONTROL_RESPONSE_QUEUE_DEPTH 16
 #define FACTORY_RESET_CONFIRM_MS 2000
 #define FACTORY_RESET_SAMPLE_MS 100
 #if DT_NODE_HAS_STATUS(DT_ALIAS(led0), okay)
@@ -75,12 +74,6 @@ BUILD_ASSERT(CONFIG_BT_ID_MAX >= 2,
 struct bridge_packet {
 	uint16_t len;
 	uint8_t data[BLE_TO_UART_MAX_LEN];
-};
-
-struct control_response {
-	struct bt_conn *conn;
-	uint16_t len;
-	uint8_t data[CONTROL_RESPONSE_MAX_LEN];
 };
 
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_UART_DATA_BITS_5)
@@ -128,17 +121,23 @@ static struct k_mutex conn_lock;
 static struct k_mutex uart_config_lock;
 static struct k_work_delayable advertise_work;
 static atomic_t nus_notify_enabled;
-static atomic_t control_response_needs_settle;
 static uint8_t linkr_identity = BT_ID_DEFAULT;
-static uint16_t control_frame_expected;
-static uint16_t control_frame_received;
-static int64_t control_frame_started_at;
-static uint8_t control_frame_data[CONTROL_CMD_MAX_LEN];
+static atomic_t wifi_scan_request_id;
 /* NUS receive callbacks run serially on the Bluetooth workqueue.  Keep the
  * command scratch buffer out of that workqueue's small thread stack: placing
  * it in handle_control_command_complete() consumed more than half of the
  * stack on every terminal keystroke. */
 static char control_command_data[CONTROL_CMD_MAX_LEN];
+static struct {
+	bool active;
+	bool overflow;
+	struct bt_conn *conn;
+	uint32_t request_id;
+	size_t len;
+	bool release_wifi_operation;
+	bool start_wifi_scan;
+	char data[LINKR_MGMT_MAX_PAYLOAD];
+} mgmt_capture;
 #if !IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY)
 static atomic_t uart_rx_dropped;
 #endif
@@ -153,8 +152,6 @@ static struct uart_config active_uart_config = {
 K_MSGQ_DEFINE(ble_to_uart_queue, sizeof(struct bridge_packet),
 		      CONFIG_LINKR_BLE_BRIDGE_BLE_TO_UART_QUEUE_DEPTH, 4);
 K_MUTEX_DEFINE(ble_to_uart_queue_lock);
-K_MSGQ_DEFINE(control_response_queue, sizeof(struct control_response),
-		      CONTROL_RESPONSE_QUEUE_DEPTH, 4);
 K_SEM_DEFINE(bridge_start_sem, 0, 5);
 RING_BUF_DECLARE(uart_rx_ring, UART_RX_BUFFER_SIZE);
 K_SEM_DEFINE(uart_rx_sem, 0, 1);
@@ -335,7 +332,7 @@ static void ble_diag_marker_thread(void)
 
 static const struct bt_data ad[] = {
 	BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
-	BT_DATA_BYTES(BT_DATA_UUID128_ALL, BT_UUID_NUS_SRV_VAL),
+	BT_DATA_BYTES(BT_DATA_UUID128_ALL, BT_UUID_LINKR_MGMT_SERVICE_VAL),
 };
 
 static const struct bt_data sd[] = {
@@ -536,8 +533,6 @@ static void connected(struct bt_conn *conn, uint8_t err)
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
-	struct control_response response;
-
 	k_mutex_lock(&conn_lock, K_FOREVER);
 	if (current_conn) {
 		bt_conn_unref(current_conn);
@@ -546,15 +541,8 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 	k_mutex_unlock(&conn_lock);
 
 	atomic_clear(&nus_notify_enabled);
-	atomic_clear(&control_response_needs_settle);
-	while (k_msgq_get(&control_response_queue, &response, K_NO_WAIT) == 0) {
-		if (response.conn) {
-			bt_conn_unref(response.conn);
-		}
-	}
-	control_frame_expected = 0;
-	control_frame_received = 0;
-	control_frame_started_at = 0;
+	linkr_mgmt_disconnected(conn);
+	linkr_uart_reliable_disconnected(conn);
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_BLE_DIAG_MARKER)
 	ble_diag.disconnected_count++;
 	ble_diag.notify_enabled = 0;
@@ -579,16 +567,23 @@ BT_CONN_CB_DEFINE(conn_callbacks) = {
 	.recycled = recycled,
 };
 
+static void att_mtu_updated(struct bt_conn *conn, uint16_t tx, uint16_t rx)
+{
+	ARG_UNUSED(conn);
+	LOG_INF("BLE ATT MTU updated: tx=%u rx=%u", tx, rx);
+}
+
+static struct bt_gatt_cb gatt_callbacks = {
+	.att_mtu_updated = att_mtu_updated,
+};
+
 static void nus_notif_enabled(bool enabled, void *ctx)
 {
 	ARG_UNUSED(ctx);
 
 	atomic_set(&nus_notify_enabled, enabled);
 	if (enabled) {
-		/* The first response may race the CCC write; later responses need not. */
-		atomic_set(&control_response_needs_settle, 1);
-	} else {
-		atomic_clear(&control_response_needs_settle);
+		linkr_uart_reliable_nus_selected();
 	}
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_BLE_DIAG_MARKER)
 	ble_diag.notify_enabled = enabled ? 1 : 0;
@@ -657,31 +652,33 @@ static const char *uart_flow_ctrl_name(enum uart_config_flow_control flow_ctrl)
 
 static int send_control_response(struct bt_conn *conn, const char *fmt, ...)
 {
-	struct control_response response = { 0 };
 	va_list args;
 	int len;
-	int err;
 
-	va_start(args, fmt);
-	len = vsnprintk(response.data, sizeof(response.data),
-			fmt, args);
-	va_end(args);
+	if (mgmt_capture.active && mgmt_capture.conn == conn) {
+		size_t available = sizeof(mgmt_capture.data) - mgmt_capture.len;
 
-	if (len < 0) {
-		return len;
-	}
-
-	response.conn = conn ? bt_conn_ref(conn) : NULL;
-	response.len = MIN(len, (int)sizeof(response.data) - 1);
-	err = k_msgq_put(&control_response_queue, &response, K_NO_WAIT);
-	if (err) {
-		if (response.conn) {
-			bt_conn_unref(response.conn);
+		if (available == 0) {
+			mgmt_capture.overflow = true;
+			return -EMSGSIZE;
 		}
-		LOG_WRN("Dropping control response; queue full");
+		va_start(args, fmt);
+		len = vsnprintk(mgmt_capture.data + mgmt_capture.len,
+				available, fmt, args);
+		va_end(args);
+		if (len < 0) {
+			return len;
+		}
+		if ((size_t)len >= available) {
+			mgmt_capture.len = sizeof(mgmt_capture.data) - 1;
+			mgmt_capture.overflow = true;
+			return -EMSGSIZE;
+		}
+		mgmt_capture.len += (size_t)len;
+		return 0;
 	}
 
-	return err;
+	return -ENOTCONN;
 }
 
 static int uart_status_response(struct bt_conn *conn, const char *prefix)
@@ -700,10 +697,53 @@ static int uart_status_response(struct bt_conn *conn, const char *prefix)
 				     uart_flow_ctrl_name(cfg.flow_ctrl));
 }
 
-/* Forwards WiFi scan results from wifi.c into the NUS control-response queue. */
+/* WiFi scan results are asynchronous Management Service events. */
 static void wifi_scan_respond(struct bt_conn *conn, const char *line)
 {
-	(void)send_control_response(conn, "%s\r\n", line);
+	char payload[96];
+	uint32_t request_id = (uint32_t)atomic_get(&wifi_scan_request_id);
+	int len = snprintk(payload, sizeof(payload), "%s\r\n", line);
+	uint16_t flags = strstr(line, "done") || strstr(line, "error") ?
+			 LINKR_MGMT_FLAG_FINAL : 0;
+
+	if (len > 0) {
+		(void)linkr_mgmt_event(conn, request_id, flags, payload,
+				       MIN(len, (int)sizeof(payload) - 1));
+	}
+	if (flags & LINKR_MGMT_FLAG_FINAL) {
+		atomic_clear(&wifi_scan_request_id);
+	}
+}
+
+static void wifi_state_event(uint32_t operation_id,
+			     enum linkr_wifi_state state, int error)
+{
+	struct bt_conn *conn;
+	char status[96];
+	char payload[144];
+	int len;
+
+	k_mutex_lock(&conn_lock, K_FOREVER);
+	conn = current_conn ? bt_conn_ref(current_conn) : NULL;
+	k_mutex_unlock(&conn_lock);
+	if (!conn) {
+		return;
+	}
+
+	(void)linkr_wifi_diagnostics(status, sizeof(status));
+	len = snprintk(payload, sizeof(payload),
+			"@event wifi operation=%u phase=%s result=%d %s\r\n",
+			operation_id, linkr_wifi_state_name(state), error, status);
+	if (len > 0) {
+		(void)linkr_mgmt_event(conn, operation_id,
+				       state == LINKR_WIFI_STATE_READY ||
+				       state == LINKR_WIFI_STATE_FAILED ||
+				       state == LINKR_WIFI_STATE_OFF ?
+				       LINKR_MGMT_FLAG_FINAL : 0,
+				       payload,
+				       MIN(len, (int)sizeof(payload) - 1));
+	}
+	bt_conn_unref(conn);
 }
 
 static char *trim_spaces(char *s)
@@ -820,7 +860,7 @@ static int apply_uart_config(const struct uart_config *cfg)
 
 static void diagnostics_response(struct bt_conn *conn)
 {
-	char status[CONTROL_RESPONSE_MAX_LEN - 16];
+	char status[192];
 	uint32_t dropped = 0;
 	uint32_t buffered = ring_buf_size_get(&uart_rx_ring);
 	bt_security_t security = bt_conn_get_security(conn);
@@ -964,25 +1004,30 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 			return true;
 		}
 		*comma = '\0';
-		err = linkr_wifi_set_config(value, comma + 1);
+		err = linkr_wifi_set_config_op(value, comma + 1,
+				mgmt_capture.active ?
+				mgmt_capture.request_id : 0);
 		if (err) {
 			(void)send_control_response(conn,
 						    "ERR wifi=%d\r\n", err);
 		} else {
-			char status[80];
-
-			linkr_wifi_status(status, sizeof(status));
-			(void)send_control_response(conn, "OK %s\r\n",
-						    status);
+			mgmt_capture.release_wifi_operation = true;
+			(void)send_control_response(conn,
+						    "OK wifi=accepted,ssid=%s\r\n",
+						    value);
 		}
 		return true;
 	}
 	if (!strcmp(body, "wifi off") || !strcmp(body, "w off")) {
-		err = linkr_wifi_clear_config();
+		err = linkr_wifi_clear_config_op(mgmt_capture.active ?
+						 mgmt_capture.request_id : 0);
 		(void)send_control_response(conn,
 					    err ? "ERR wifi=%d\r\n"
 						: "OK wifi off\r\n",
 					    err);
+		if (!err) {
+			mgmt_capture.release_wifi_operation = true;
+		}
 		return true;
 	}
 	if (!strcmp(body, "wifi scan") || !strcmp(body, "w scan")) {
@@ -990,6 +1035,11 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 		if (err) {
 			(void)send_control_response(conn,
 						    "ERR scan=%d\r\n", err);
+		} else {
+			atomic_set(&wifi_scan_request_id,
+				   mgmt_capture.active ?
+				   mgmt_capture.request_id : 0);
+			mgmt_capture.start_wifi_scan = true;
 		}
 		/* On success the SSIDs stream in via the scan sink, terminated by
 		 * a "scan done" line, so no immediate OK is echoed here. */
@@ -998,7 +1048,7 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 
 	/* ---- WebDAV (@d / @linkr webdav) ---- */
 	if (!strcmp(body, "webdav?") || !strcmp(body, "d?")) {
-		char status[120];
+		char status[CONFIG_LINKR_BLE_BRIDGE_WEBDAV_URL_MAX + 32];
 
 		linkr_webdav_status(status, sizeof(status));
 		(void)send_control_response(conn, "OK %s\r\n", status);
@@ -1023,7 +1073,7 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 			(void)send_control_response(conn,
 						    "ERR webdav=%d\r\n", err);
 		} else {
-			char status[120];
+			char status[CONFIG_LINKR_BLE_BRIDGE_WEBDAV_URL_MAX + 32];
 
 			linkr_webdav_status(status, sizeof(status));
 			(void)send_control_response(conn, "OK %s\r\n",
@@ -1075,101 +1125,46 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 #endif
 }
 
-static bool handle_control_command(struct bt_conn *conn, const uint8_t *data,
-				   uint16_t len)
+static void mgmt_request_received(struct bt_conn *conn, uint32_t request_id,
+				  const uint8_t *payload,
+				  uint16_t payload_len)
 {
-#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_CONTROL_COMMANDS)
-	if (control_frame_expected > 0 &&
-	    k_uptime_get() - control_frame_started_at > 2000) {
-		control_frame_expected = 0;
-		control_frame_received = 0;
+	bool handled;
+	uint16_t flags = LINKR_MGMT_FLAG_FINAL;
+
+	memset(&mgmt_capture, 0, sizeof(mgmt_capture));
+	mgmt_capture.active = true;
+	mgmt_capture.conn = conn;
+	mgmt_capture.request_id = request_id;
+
+	handled = handle_control_command_complete(conn, payload, payload_len);
+	if (!handled) {
+		(void)send_control_response(conn, "ERR unknown command\r\n");
 	}
+	if (mgmt_capture.overflow) {
+		static const char too_large[] = "ERR response too large\r\n";
 
-	if (control_frame_expected > 0) {
-		uint16_t remaining = control_frame_expected - control_frame_received;
-
-		if (len > remaining) {
-			control_frame_expected = 0;
-			control_frame_received = 0;
-			(void)send_control_response(conn, "ERR malformed control frame\r\n");
-			return true;
-		}
-
-		memcpy(control_frame_data + control_frame_received, data, len);
-		control_frame_received += len;
-		if (control_frame_received == control_frame_expected) {
-			uint16_t complete_len = control_frame_expected;
-
-			control_frame_expected = 0;
-			control_frame_received = 0;
-			return handle_control_command_complete(conn, control_frame_data,
-							       complete_len);
-		}
-		return true;
+		memcpy(mgmt_capture.data, too_large, sizeof(too_large) - 1);
+		mgmt_capture.len = sizeof(too_large) - 1;
 	}
+	if (mgmt_capture.len == 0) {
+		static const char accepted[] = "OK accepted\r\n";
 
-	if (len >= 4 && !memcmp(data, CONTROL_FRAME_PREFIX,
-				      strlen(CONTROL_FRAME_PREFIX))) {
-		const uint8_t *colon = memchr(data + 2, ':', len - 2);
-		uint32_t expected = 0;
-		size_t header_len;
-		size_t payload_len;
-
-		if (!colon || colon == data + 2) {
-			(void)send_control_response(conn, "ERR malformed control frame\r\n");
-			return true;
-		}
-		for (const uint8_t *p = data + 2; p < colon; p++) {
-			uint32_t digit;
-
-			if (*p < '0' || *p > '9') {
-				(void)send_control_response(conn,
-							    "ERR malformed control frame\r\n");
-				return true;
-			}
-			digit = (uint32_t)(*p - '0');
-			if (expected > (sizeof(control_frame_data) - 1U - digit) / 10U) {
-				(void)send_control_response(conn,
-							    "ERR command too long\r\n");
-				return true;
-			}
-			expected = expected * 10U + digit;
-			if (expected >= sizeof(control_frame_data)) {
-				(void)send_control_response(conn,
-							    "ERR command too long\r\n");
-				return true;
-			}
-		}
-
-		header_len = (size_t)(colon - data) + 1U;
-		payload_len = len - header_len;
-		if (expected == 0 || payload_len > expected) {
-			(void)send_control_response(conn, "ERR malformed control frame\r\n");
-			return true;
-		}
-
-		memcpy(control_frame_data, data + header_len, payload_len);
-		control_frame_expected = (uint16_t)expected;
-		control_frame_received = (uint16_t)payload_len;
-		control_frame_started_at = k_uptime_get();
-		if (control_frame_received == control_frame_expected) {
-			uint16_t complete_len = control_frame_expected;
-
-			control_frame_expected = 0;
-			control_frame_received = 0;
-			return handle_control_command_complete(conn, control_frame_data,
-							       complete_len);
-		}
-		return true;
+		memcpy(mgmt_capture.data, accepted, sizeof(accepted) - 1);
+		mgmt_capture.len = sizeof(accepted) - 1;
 	}
-
-	return handle_control_command_complete(conn, data, len);
-#else
-	ARG_UNUSED(conn);
-	ARG_UNUSED(data);
-	ARG_UNUSED(len);
-	return false;
-#endif
+	if (!strncmp(mgmt_capture.data, "ERR ", 4)) {
+		flags |= LINKR_MGMT_FLAG_ERROR;
+	}
+	(void)linkr_mgmt_respond(conn, request_id, flags, mgmt_capture.data,
+				 mgmt_capture.len);
+	if (mgmt_capture.release_wifi_operation) {
+		linkr_wifi_release_operation(request_id);
+	}
+	if (mgmt_capture.start_wifi_scan) {
+		linkr_wifi_release_scan();
+	}
+	memset(&mgmt_capture, 0, sizeof(mgmt_capture));
 }
 
 static void nus_received(struct bt_conn *conn, const void *data, uint16_t len,
@@ -1180,10 +1175,6 @@ static void nus_received(struct bt_conn *conn, const void *data, uint16_t len,
 	ARG_UNUSED(ctx);
 
 	LOG_DBG("BLE RX write: %u bytes", len);
-
-	if (handle_control_command(conn, bytes, len)) {
-		return;
-	}
 
 #if !IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_BLE_ECHO)
 	if (linkr_uart_write(bytes, len) != 0) {
@@ -1362,44 +1353,47 @@ static int nus_send_chunk(const uint8_t *data, uint16_t len)
 	bt_conn_unref(conn);
 	return err;
 }
-#endif
 
-static void control_response_thread(void)
+static int reliable_send_chunk(const uint8_t *data, uint16_t len)
 {
-	struct control_response response;
+	struct bt_conn *conn;
+	int err;
 
-	for (;;) {
-		int err = -ENOTCONN;
-
-		k_msgq_get(&control_response_queue, &response, K_FOREVER);
-		/* Let the CCC write settle before the first notification only. */
-		if (atomic_cas(&control_response_needs_settle, 1, 0)) {
-			k_sleep(K_MSEC(200));
-		}
-
-		if (!response.conn) {
-			continue;
-		}
-		for (int retry = 0; retry < 5; retry++) {
-			err = nus_send_conn(response.conn, response.data, response.len);
-			if (!err) {
-				break;
-			}
-			k_sleep(K_MSEC(50));
-		}
-		if (err) {
-			LOG_WRN("Control notify failed: %d", err);
-		} else {
-			LOG_INF("Control notify sent: %u bytes", response.len);
-			/* WiFi and BLE share the ESP32-C3 radio and memory pools. A
-			 * short gap prevents a multi-line response (notably @i?) from
-			 * filling the controller TX path immediately after WiFi start.
-			 */
-			k_sleep(K_MSEC(10));
-		}
-		bt_conn_unref(response.conn);
+	k_mutex_lock(&conn_lock, K_FOREVER);
+	conn = current_conn ? bt_conn_ref(current_conn) : NULL;
+	k_mutex_unlock(&conn_lock);
+	if (!conn) {
+		return -ENOTCONN;
 	}
+	err = linkr_uart_reliable_send(conn, data, len);
+	bt_conn_unref(conn);
+	return err;
 }
+
+static int uart_forward_chunk(const uint8_t *data, uint16_t len,
+			      bool *accounted)
+{
+	int err;
+
+	if (!*accounted) {
+		linkr_log_feed(data, len);
+		linkr_ws_feed(data, len);
+		*accounted = true;
+	}
+	if (!linkr_uart_reliable_mode()) {
+		/* NUS is the compatibility, best-effort path. Preserve its previous
+		 * behavior: UART capture must not stall when no NUS central exists. */
+		(void)nus_send_chunk(data, len);
+		return 0;
+	}
+
+	err = reliable_send_chunk(data, len);
+	if (err && err != -ENOTCONN) {
+		LOG_WRN("Reliable UART delivery retry: %d", err);
+	}
+	return err;
+}
+#endif
 
 static void uart_to_ble_thread(void)
 {
@@ -1413,6 +1407,7 @@ static void uart_to_ble_thread(void)
 	uint8_t buf[UART_RX_CHUNK];
 	size_t len = 0;
 	int64_t last_rx = 0;
+	bool accounted = false;
 
 	k_sem_take(&bridge_start_sem, K_FOREVER);
 
@@ -1427,6 +1422,16 @@ static void uart_to_ble_thread(void)
 				dropped);
 		}
 
+		if (len == sizeof(buf)) {
+			if (!uart_forward_chunk(buf, len, &accounted)) {
+				len = 0;
+				accounted = false;
+			} else {
+				k_sleep(K_MSEC(10));
+			}
+			continue;
+		}
+
 		key = irq_lock();
 		got = ring_buf_get(&uart_rx_ring, buf + len, sizeof(buf) - len);
 		irq_unlock(key);
@@ -1436,22 +1441,15 @@ static void uart_to_ble_thread(void)
 			len += got;
 			last_rx = k_uptime_get();
 
-			if (len == sizeof(buf)) {
-				linkr_log_feed(buf, len);
-				linkr_ws_feed(buf, len);
-				(void)nus_send_chunk(buf, len);
-				len = 0;
-			}
-
 			continue;
 		}
 
 		if (len > 0 &&
 		    k_uptime_get() - last_rx >= CONFIG_LINKR_BLE_BRIDGE_UART_IDLE_MS) {
-			linkr_log_feed(buf, len);
-			linkr_ws_feed(buf, len);
-			(void)nus_send_chunk(buf, len);
-			len = 0;
+			if (!uart_forward_chunk(buf, len, &accounted)) {
+				len = 0;
+				accounted = false;
+			}
 		}
 
 		(void)k_sem_take(&uart_rx_sem, K_MSEC(1));
@@ -1588,8 +1586,6 @@ K_THREAD_DEFINE(ble_to_uart_tid, 1024, ble_to_uart_thread, NULL, NULL, NULL,
 		7, 0, 0);
 K_THREAD_DEFINE(uart_to_ble_tid, 2048, uart_to_ble_thread, NULL, NULL, NULL,
 		7, 0, 0);
-K_THREAD_DEFINE(control_response_tid, 1024, control_response_thread,
-		NULL, NULL, NULL, 7, 0, 0);
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_TX)
 K_THREAD_DEFINE(uart_test_tx_tid, 1024, uart_test_tx_thread, NULL, NULL, NULL,
 		7, 0, 0);
@@ -1666,6 +1662,7 @@ int main(void)
 		LOG_ERR("Bluetooth init failed: %d", err);
 		return err;
 	}
+	bt_gatt_cb_register(&gatt_callbacks);
 
 #if IS_ENABLED(CONFIG_SETTINGS)
 	err = settings_subsys_init();
@@ -1686,11 +1683,23 @@ int main(void)
 		return err;
 	}
 
+	err = linkr_mgmt_init(mgmt_request_received);
+	if (err) {
+		LOG_ERR("Management Service init failed: %d", err);
+		return err;
+	}
+	err = linkr_uart_reliable_init(linkr_uart_write);
+	if (err) {
+		LOG_ERR("Reliable UART init failed: %d", err);
+		return err;
+	}
+
 	err = linkr_wifi_init();
 	if (err) {
 		LOG_WRN("WiFi init failed: %d (WiFi disabled)", err);
 	} else {
 		linkr_wifi_set_respond_fn(wifi_scan_respond);
+		linkr_wifi_set_event_fn(wifi_state_event);
 	}
 
 	err = linkr_ws_init();

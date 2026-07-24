@@ -95,7 +95,8 @@ BLE identity 和已保存配置；需要清除它们时仍使用 GPIO0 + GND 恢
 
 ESP32-C3 Super Mini overlay 目前只接了 RX/TX，因此该板保持流控为 `none`。RTS/CTS 需要额外引脚和板级 pinctrl 支持。
 
-当 `CONFIG_LINKR_BLE_BRIDGE_CONTROL_COMMANDS=y` 时，以 `@u`、`@h` 或 `@linkr ` 开头的 BLE 写入会在本地处理，不转发到 SBC UART。优先使用短形式，因为在 MTU 交换前它们能放进默认 20 字节 BLE 写入载荷：
+当 `CONFIG_LINKR_BLE_BRIDGE_CONTROL_COMMANDS=y` 时，Management Service v1
+接受以下 UART 配置 payload：
 
 ```text
 @u?
@@ -105,9 +106,9 @@ ESP32-C3 Super Mini overlay 目前只接了 RX/TX，因此该板保持流控为 
 @h
 ```
 
-当 BLE 中心能发送更长报文时，长形式也可用：`@linkr uart?`、`@linkr uart=115200,8,n,1,none`、`@linkr help`。
+长形式也可用：`@linkr uart?`、`@linkr uart=115200,8,n,1,none`、`@linkr help`。
 
-响应通过 NUS TX 通知特征回传，例如：
+响应通过独立的 Management Response indication 回传，并携带相同 request ID：
 
 ```text
 OK uart=115200,8,N,1,none
@@ -152,7 +153,7 @@ Web 终端(`web/`)的「连接」卡片里有 BLE/局域网切换;局域网模�
 
 ### 开放 BLE 访问、持久化与恢复出厂
 
-为保证当前开发流程稳定，固件暂时关闭 BLE 配对、bond 与 owner 门禁。附近任何能够连接 NUS 服务的中心设备，都可以使用 UART 数据流以及 WiFi、WebDAV、WebSocket 等全部管理命令。不要把含敏感信息的 console 接到此开发固件，也不要在不可信的无线环境中部署。
+为保证当前开发流程稳定，固件暂时关闭 BLE 配对、bond 与 owner 门禁。附近任何能够连接 Management 或 UART 服务的中心设备，都可以使用 UART 数据流以及 WiFi、WebDAV、WebSocket 等全部管理命令。不要把含敏感信息的 console 接到此开发固件，也不要在不可信的无线环境中部署。
 
 | 项目 | 默认值 / 持久化规则 | 清除或移交方式 |
 | --- | --- | --- |
@@ -183,8 +184,8 @@ UART RX 字节（SBC console 输出）会被缓存，并定期 HTTP PUT 到 `<we
 ```
 
 长形式 `@linkr info?`、`@linkr wifi scan`、`@linkr wifi?`、
-`@linkr wifi=...` 和 `@linkr webdav=...` 也被接受。响应通过 NUS TX
-通知特征回传：
+`@linkr wifi=...` 和 `@linkr webdav=...` 也被接受。响应通过 Management
+Response indication 回传：
 
 ```text
 OK wifi=connected,ssid=MySSID
@@ -215,16 +216,15 @@ python3 tools/linkr_ble_terminal.py --wifi MySSID,secret --query-wifi
 python3 tools/linkr_ble_terminal.py --webdav http://host/dav/
 ```
 
-随附的 Python、C 和网页客户端会使用带长度前缀的 `@!<字节数>:` 帧发送配置命令，
-因此即使 BLE 将 SSID、PSK 或长 URL 拆成多个 ATT write，固件仍会把它们作为一条
-原子命令处理。旧的短命令仍可直接发送。
+配置命令使用 Management Service v1 二进制帧，包含 API 版本、request ID、
+逻辑长度、response ID 和 confirmed indication 分片。NUS 现在只转发原始 UART。
+完整格式、WiFi 异步完成事件、Device ID 与 Reliable UART 序号见
+[Linkr BLE 配件 API v1](docs/LINKR_BLE_API.zh-CN.md)。
 
 当前上传器只接受匿名 HTTP 端点。固件会拒绝 Basic Auth 凭据，避免密码通过明文 HTTP 暴露在网络上。该模式仅适用于可信局域网；需要认证或公网部署时，应使用后续支持 HTTPS 且预置 CA 信任锚的构建。
 
 Web Bluetooth 终端提供独立的 SSID/密码输入框、WiFi 扫描列表、设备诊断和
-WebDAV 控制。C 参考终端接受 `--query-info`、`--wifi-scan`、`--wifi`、
-`--wifi-off`、`--query-wifi`、`--webdav`、`--webdav-off` 和
-`--query-webdav`。
+WebDAV 控制。Python 客户端提供相同的 Management v1 自动化操作。
 
 ## 测试选项
 
@@ -270,20 +270,24 @@ coredump 扇区。
 
 ## BLE 协议
 
-使用 Zephyr 内置 Nordic UART Service：
+主接口拆分为 Management Service v1 与 Reliable UART Service v1：前者提供 API
+版本、稳定的只读 Device ID、请求/响应 ID 和异步事件；后者提供序号、写确认、
+confirmed indication 与重连去重。Zephyr NUS 仅保留为尽力发送的原始串口兼容通道：
 
 - 服务：`6e400001-b5a3-f393-e0a9-e50e24dcca9e`
 - RX 写特征：`6e400002-b5a3-f393-e0a9-e50e24dcca9e`
 - TX 通知特征：`6e400003-b5a3-f393-e0a9-e50e24dcca9e`
 
-当前正式配置的 ATT/L2CAP MTU 为 23，因此客户端必须支持**每次写 20 字节**
-的安全基线。若中心平台明确报告更大的 write-without-response 能力，客户端
-可以使用 `min(平台上限, 62)`；固件会按实际 ATT/ACL 能力对 UART 通知继续
-分段。主机终端连接时会打印检测到的写入块大小。
+当前正式配置提供 ATT/L2CAP MTU 247 与 LE Data Length 251。协商到 ATT MTU
+247 时，一个 Reliable UART 帧（12 字节帧头加最多 232 字节 UART 数据）可在
+一次确认事务中完成。对于只协商到较小 MTU 的中心设备，固件与客户端仍保留
+分片和 20 字节回退。主机终端连接时会打印检测到的写入块大小。
 
 ## BLE 终端
 
-`tools/linkr_ble_terminal.py` 是桥的主机侧终端。它扫描匹配 `Linkr BLE UART*` 名称前缀的设备，订阅 NUS TX 通知，并将本地键盘输入转发到 NUS RX 写特征。
+`tools/linkr_ble_terminal.py` 是当前主机侧参考客户端。它连接
+`Linkr BLE UART*` 设备，核对 Management API v1 和 Device ID，使用 Reliable
+UART 传输终端字节，并将管理响应与串口输出分开。
 
 按需安装主机依赖：
 
@@ -293,7 +297,7 @@ python3 -m pip install bleak
 
 ### Linux 或 Linkr Buildroot 的 C 终端
 
-`tools/linkr_ble_terminal.c` 提供仅 Linux 的 C 参考实现。它通过系统 D-Bus 直接用 `libdbus-1` 与 BlueZ 通信，不依赖 GLib。这使用户态依赖很小，但仍需要底层可用的 Linux BLE 中心栈。
+`tools/linkr_ble_terminal.c` 提供仅 Linux 的 C 参考实现。它通过系统 D-Bus 直接用 `libdbus-1` 与 BlueZ 通信，不依赖 GLib。这使用户态依赖很小，但仍需要底层可用的 Linux BLE 中心栈。该程序目前是 legacy NUS 终端；Management v1 与 Reliable UART 对接请使用 Python 或 Web 参考客户端。
 
 运行时路径：
 
@@ -311,7 +315,7 @@ linkr_ble_terminal_c
 ```sh
 cd tools && make
 ./linkr_ble_terminal_c --help
-./linkr_ble_terminal_c --uart 115200,8,n,1,n
+./linkr_ble_terminal_c
 ```
 
 对 Linkr Buildroot，不要指望在目标 rootfs 上编译此二进制。当前 Linkr 镜像基于 uClibc，不含 `gcc`、`make`、`pkg-config` 或 `dbus/dbus.h`。用生成 Linkr rootfs 的同一 Buildroot SDK/工具链构建，并链接该 sysroot 的 `libdbus-1`。
@@ -359,15 +363,13 @@ hciconfig -a
 ls -l /sys/class/bluetooth
 ```
 
-C 终端接受与 Python 终端相同的 Linkr BLE 默认值：
+legacy C 终端支持原始 NUS 终端、扫描和回环流程。它的旧管理参数不兼容 API
+v1；配置和诊断请使用 Python 客户端：
 
 ```sh
-./linkr_ble_terminal_c --query-info --no-terminal
-./linkr_ble_terminal_c --wifi-scan --no-terminal
-./linkr_ble_terminal_c --query-uart --no-terminal
-./linkr_ble_terminal_c --uart 115200,8,n,1,n
 ./linkr_ble_terminal_c --loopback-test A --no-terminal
 ./linkr_ble_terminal_c --scan
+python3 tools/linkr_ble_terminal.py --query-info --no-terminal
 ```
 
 查询桥 UART 设置后退出：
@@ -436,7 +438,8 @@ GPIO21 短接到 GPIO20 时，运行 BLE→UART→BLE 回环检查：
 
 ## Web Bluetooth 终端
 
-浏览器终端是额外选项，不替代 Python 终端。它使用相同的 BLE GATT/NUS 服务、RX 写特征、TX 通知特征和 UART 控制命令。
+浏览器终端是额外选项，不替代 Python 终端。控制走 Management Service v1，
+终端数据走 Reliable UART Service v1；NUS 仅保留给独立的 legacy 客户端。
 
 从 localhost 提供服务：
 
@@ -458,16 +461,16 @@ http://127.0.0.1:8765/
 如果保存的设备已不可用，页面会清除记录，并在下一次连接时回退到系统选择器；
 不支持 `getDevices()` 的浏览器始终使用系统选择器。
 
-固件将 NUS 服务 UUID 放在主广播包中，将 `Linkr BLE UART-3` 名称放在扫描
-响应中。页面按 NUS 服务 UUID 过滤浏览器设备选择器，这在 macOS Chromium
+固件将 Management Service UUID 放在主广播包中，将 `Linkr BLE UART-3` 名称放在扫描
+响应中。页面按 Management Service UUID 过滤浏览器设备选择器，这在 macOS Chromium
 浏览器上比只按名称过滤更可靠。
 
 页面可以：
 
-- 连接广播 Linkr NUS 服务 UUID 的设备
+- 连接广播 Linkr Management Service UUID 的设备
 - 浏览器支持 `navigator.bluetooth.getDevices()` 时，在刷新后恢复上次已授权
   的 Linkr 设备并快速重连
-- 订阅 TX 通知
+- 读取 API 版本与稳定 Device ID，分别订阅管理 indication 和 Reliable UART indication
 - 默认折叠固件/运行时诊断；展开时才查询设备，也可按需手动刷新
 - 扫描附近 2.4 GHz WiFi，将结果填入独立的 SSID/密码输入框；密码不会写入
   应用的 `localStorage`

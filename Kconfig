@@ -9,12 +9,13 @@ config LINKR_BLE_BRIDGE_FIRMWARE_VERSION
 
 config LINKR_BLE_BRIDGE_UART_RX_CHUNK
 	int "Maximum UART bytes gathered before BLE transmission"
-	default 128
+	default 232
 	range 20 244
 	help
 	  UART data is accumulated up to this many bytes before it is handed to
-	  the Nordic UART Service TX characteristic. It is then segmented to the
-	  negotiated ATT payload size (20 bytes in the default build).
+	  Reliable UART. The default plus its 12-byte frame header fits in one
+	  ATT value when the central negotiates the production MTU of 247. It is
+	  segmented automatically when the negotiated MTU is smaller.
 
 config LINKR_BLE_BRIDGE_UART_IDLE_MS
 	int "UART idle flush timeout in milliseconds"

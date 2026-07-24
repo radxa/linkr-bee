@@ -11,7 +11,7 @@
   --line: #242d3d;
   --line-soft: #1c2431;
   --line-strong: #33405a;
-  --placeholder: #5b6b81;
+  --placeholder: #7b8ba1;
   --accent: #3fc88a;
   --accent-strong: #6fe0ab;
   --accent-ink: #052517;
@@ -300,12 +300,19 @@ h1 {
   height: 9px;
   border-radius: 999px;
   background: var(--danger);
-  box-shadow: 0 0 0 0 rgba(239, 118, 122, 0.55);
 }
 
 .status-dot.connected {
   background: var(--accent-strong);
-  animation: pulse 1.8s ease-out infinite;
+}
+
+.status-dot.connected::after {
+  position: absolute;
+  inset: 0;
+  border: 2px solid rgba(111, 224, 171, 0.65);
+  border-radius: 999px;
+  content: "";
+  animation: pulse-ring 1.8s ease-out infinite;
 }
 
 .status-pill:has(.status-dot.connected) {
@@ -313,15 +320,15 @@ h1 {
   color: var(--text);
 }
 
-@keyframes pulse {
+@keyframes pulse-ring {
   0% {
-    box-shadow: 0 0 0 0 rgba(111, 224, 171, 0.55);
+    opacity: 1;
+    transform: scale(1);
   }
-  70% {
-    box-shadow: 0 0 0 8px rgba(111, 224, 171, 0);
-  }
+  75%,
   100% {
-    box-shadow: 0 0 0 0 rgba(111, 224, 171, 0);
+    opacity: 0;
+    transform: scale(2.6);
   }
 }
 
@@ -1061,8 +1068,23 @@ body.terminal-fullscreen-fallback {
   grid-template-columns: 0 1fr;
 }
 
-.app-shell.controls-hidden .controls {
-  display: none;
+@media (min-width: 901px) {
+  .app-shell {
+    transition: grid-template-columns 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .app-shell.controls-hidden .controls {
+    visibility: hidden;
+    overflow: hidden;
+    padding-right: 0;
+    transition: visibility 0s 0.28s;
+  }
+}
+
+@media (max-width: 900px) {
+  .app-shell.controls-hidden .controls {
+    display: none;
+  }
 }
 
 /* ---------- Cheat sheet / reference ---------- */
@@ -1133,6 +1155,18 @@ details.ref[open] summary::before {
   align-items: baseline;
   padding: 5px 0;
   border-bottom: 1px dashed var(--line-soft);
+}
+
+.ref-item[data-cmd] {
+  margin-inline: -6px;
+  padding-inline: 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.ref-item[data-cmd]:hover {
+  background: var(--panel-3);
 }
 
 .ref-item:last-child {
@@ -1338,7 +1372,8 @@ body,
   background: var(--panel-2);
   color: var(--muted);
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: border-color 0.15s ease, color 0.15s ease,
+    background 0.15s ease, transform 0.15s ease;
 }
 
 .preset-chip:hover:not(:disabled) {
@@ -1472,6 +1507,23 @@ body,
 .toast.show {
   opacity: 1;
   transform: translateY(0);
+}
+
+.toast-error {
+  border-color: var(--danger);
+}
+
+/* ---------- Password visibility toggle ---------- */
+.password-toggle .icon-eye-off {
+  display: none;
+}
+
+.password-toggle[aria-pressed="true"] .icon-eye {
+  display: none;
+}
+
+.password-toggle[aria-pressed="true"] .icon-eye-off {
+  display: block;
 }
 
 /* ---------- Reduced motion ---------- */

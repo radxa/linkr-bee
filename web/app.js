@@ -3,6 +3,19 @@
 const NUS_SERVICE = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
 const NUS_RX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
 const NUS_TX = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
+const MGMT_SERVICE = "4c4b0001-9a7e-4f4e-8b8a-3d6f12a0c001";
+const MGMT_PROTOCOL = "4c4b0002-9a7e-4f4e-8b8a-3d6f12a0c001";
+const MGMT_DEVICE_ID = "4c4b0003-9a7e-4f4e-8b8a-3d6f12a0c001";
+const MGMT_COMMAND = "4c4b0004-9a7e-4f4e-8b8a-3d6f12a0c001";
+const MGMT_RESPONSE = "4c4b0005-9a7e-4f4e-8b8a-3d6f12a0c001";
+const RELIABLE_UART_SERVICE = "4c4b0010-9a7e-4f4e-8b8a-3d6f12a0c001";
+const RELIABLE_UART_RX = "4c4b0011-9a7e-4f4e-8b8a-3d6f12a0c001";
+const RELIABLE_UART_TX = "4c4b0012-9a7e-4f4e-8b8a-3d6f12a0c001";
+const RELIABLE_UART_STATE = "4c4b0013-9a7e-4f4e-8b8a-3d6f12a0c001";
+const MGMT_HEADER_SIZE = 12;
+const MGMT_API_MAJOR = 1;
+const RELIABLE_UART_HEADER_SIZE = 12;
+const BLE_MAX_ATT_VALUE = 244;
 const BLE_DEVICE_NAME_PREFIX = "Linkr BLE UART";
 const WIFI_SCAN_CMD = "@w scan";
 const WIFI_SCAN_PREFIX = "@scan ";
@@ -17,6 +30,19 @@ const state = {
   server: null,
   rxChar: null,
   txChar: null,
+  mgmtCommandChar: null,
+  mgmtResponseChar: null,
+  reliableRxChar: null,
+  reliableTxChar: null,
+  reliableTxSequence: 1,
+  reliableRxSequence: 1,
+  reliableMaxPayload: 20,
+  reliableWriteSize: BLE_MAX_ATT_VALUE,
+  reliableRx: null,
+  deviceId: "",
+  nextRequestId: 1,
+  mgmtRx: null,
+  controlWriteQueue: Promise.resolve(),
   mode: "ble",
   ws: null,
   wsHost: "",
@@ -794,6 +820,35 @@ function initTerminal() {
   return true;
 }
 
+let writeRaf = 0;
+let pendingWrites = [];
+
+function flushTerminalWrites() {
+  writeRaf = 0;
+  const chunks = pendingWrites;
+  pendingWrites = [];
+  if (!state.term || !chunks.length) {
+    return;
+  }
+  if (chunks.length === 1) {
+    state.term.write(chunks[0]);
+    return;
+  }
+  let total = 0;
+  const encoded = chunks.map((chunk) => {
+    const bytes = typeof chunk === "string" ? encoder.encode(chunk) : chunk;
+    total += bytes.length;
+    return bytes;
+  });
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const bytes of encoded) {
+    merged.set(bytes, offset);
+    offset += bytes.length;
+  }
+  state.term.write(merged);
+}
+
 function appendOutput(data) {
   if (!state.term) {
     const text =
@@ -804,7 +859,10 @@ function appendOutput(data) {
     elements.terminalOutput.scrollTop = elements.terminalOutput.scrollHeight;
     return;
   }
-  state.term.write(data);
+  pendingWrites.push(data);
+  if (!writeRaf) {
+    writeRaf = requestAnimationFrame(flushTerminalWrites);
+  }
 }
 
 function appendLine(text) {
@@ -825,13 +883,18 @@ function debugLine(text) {
   }
 }
 
-function toast(message) {
+const TOAST_LIMIT = 3;
+
+function toast(message, kind = "info") {
   const host = document.getElementById("toastHost");
   if (!host) {
     return;
   }
+  while (host.children.length >= TOAST_LIMIT) {
+    host.firstElementChild.remove();
+  }
   const el = document.createElement("div");
-  el.className = "toast";
+  el.className = kind === "error" ? "toast toast-error" : "toast";
   el.textContent = message;
   host.appendChild(el);
   requestAnimationFrame(() => el.classList.add("show"));
@@ -1178,7 +1241,7 @@ function finishScan(failed = false) {
   elements.wifiScanButton.disabled = !state.connected;
   if (failed) {
     elements.wifiFeedback.textContent = t("scanFailed");
-    toast(t("scanFailed"));
+    toast(t("scanFailed"), "error");
     return;
   }
   if (state.scanResults.length) {
@@ -1191,10 +1254,12 @@ function finishScan(failed = false) {
 }
 
 function setAutoScroll(value, scroll) {
-  state.autoScroll = value;
-  if (elements.autoscrollBtn) {
-    elements.autoscrollBtn.setAttribute("aria-pressed", String(value));
-    elements.autoscrollBtn.classList.toggle("active", value);
+  if (state.autoScroll !== value) {
+    state.autoScroll = value;
+    if (elements.autoscrollBtn) {
+      elements.autoscrollBtn.setAttribute("aria-pressed", String(value));
+      elements.autoscrollBtn.classList.toggle("active", value);
+    }
   }
   if (value && scroll && state.term) {
     state.term.scrollToBottom();
@@ -1353,7 +1418,7 @@ function chunkSize() {
   if (!Number.isFinite(value)) {
     return 20;
   }
-  return Math.max(1, Math.min(62, Math.floor(value)));
+  return Math.max(1, Math.min(BLE_MAX_ATT_VALUE, Math.floor(value)));
 }
 
 async function writeBytes(bytes, sensitive = false) {
@@ -1374,11 +1439,13 @@ async function writeBytes(bytes, sensitive = false) {
     return;
   }
 
-  if (!state.rxChar) {
-    throw new Error("RX characteristic is not ready");
+  if (!state.reliableRxChar && !state.rxChar) {
+    throw new Error("UART RX characteristic is not ready");
   }
 
-  const size = chunkSize();
+  const size = state.reliableRxChar
+    ? state.reliableMaxPayload
+    : chunkSize();
   for (let offset = 0; offset < bytes.length; offset += size) {
     const chunk = bytes.slice(offset, offset + size);
     if (elements.debugInput.checked) {
@@ -1389,6 +1456,11 @@ async function writeBytes(bytes, sensitive = false) {
       );
     }
     try {
+      if (state.reliableRxChar) {
+        await writeReliableUartChunk(chunk);
+        state.txBytes += chunk.length;
+        continue;
+      }
       if (
         state.rxChar.properties.writeWithoutResponse &&
         state.rxChar.writeValueWithoutResponse
@@ -1401,6 +1473,9 @@ async function writeBytes(bytes, sensitive = false) {
       }
       state.txBytes += chunk.length;
     } catch (error) {
+      if (state.reliableRxChar) {
+        throw error;
+      }
       if (size <= 20) {
         throw error;
       }
@@ -1411,6 +1486,56 @@ async function writeBytes(bytes, sensitive = false) {
     }
   }
   updateCounters();
+}
+
+function nextSequence(sequence) {
+  return sequence === 0xffffffff ? 1 : sequence + 1;
+}
+
+async function writeReliableUartChunk(payload) {
+  const sequence = state.reliableTxSequence;
+  const frame = new Uint8Array(RELIABLE_UART_HEADER_SIZE + payload.length);
+  const view = new DataView(frame.buffer);
+  frame[0] = 0x4c;
+  frame[1] = 0x52;
+  frame[2] = 1;
+  frame[3] = 0;
+  view.setUint32(4, sequence, true);
+  view.setUint16(8, payload.length, true);
+  view.setUint16(10, 0, true);
+  frame.set(payload, RELIABLE_UART_HEADER_SIZE);
+
+  const candidates = [
+    Math.min(state.reliableWriteSize, frame.length),
+    Math.min(182, frame.length),
+    Math.min(128, frame.length),
+    Math.min(62, frame.length),
+    Math.min(20, frame.length),
+  ].filter((size, index, values) => size > 0 && values.indexOf(size) === index);
+  let lastError;
+
+  for (const attSize of candidates) {
+    let writesCompleted = 0;
+    try {
+      for (let offset = 0; offset < frame.length; offset += attSize) {
+        await state.reliableRxChar.writeValueWithResponse(
+          frame.slice(offset, offset + attSize),
+        );
+        writesCompleted += 1;
+      }
+      state.reliableWriteSize = attSize;
+      state.reliableTxSequence = nextSequence(sequence);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (writesCompleted > 0) {
+        throw error;
+      }
+      /* A rejected atomic write has not started a Reliable frame. Retry with
+       * the next common ATT payload size and cache the accepted size. */
+    }
+  }
+  throw lastError || new Error("Reliable UART write failed");
 }
 
 function enqueueBytes(bytes, sensitive = false) {
@@ -1456,12 +1581,181 @@ async function sendControl(command) {
   appendLine(
     `[control] ${sensitive ? `${command.slice(0, 2)}=<redacted>` : command}`,
   );
+  if (state.mode !== "ble" || !state.mgmtCommandChar) {
+    throw new Error("Management characteristic is not ready");
+  }
+
+  const requestId = state.nextRequestId || 1;
+  state.nextRequestId = requestId === 0xffffffff ? 1 : requestId + 1;
   const payload = encoder.encode(command);
-  const header = encoder.encode(`@!${payload.length}:`);
-  const frame = new Uint8Array(header.length + payload.length);
-  frame.set(header);
-  frame.set(payload, header.length);
-  await enqueueBytes(frame, sensitive);
+  const frame = new Uint8Array(MGMT_HEADER_SIZE + payload.length);
+  const view = new DataView(frame.buffer);
+  frame[0] = 0x4c;
+  frame[1] = 0x4b;
+  frame[2] = MGMT_API_MAJOR;
+  frame[3] = 1;
+  view.setUint32(4, requestId, true);
+  view.setUint16(8, payload.length, true);
+  view.setUint16(10, 0, true);
+  frame.set(payload, MGMT_HEADER_SIZE);
+
+  const operation = state.controlWriteQueue.then(async () => {
+    /* The first GATT write must contain the complete 12-byte management
+     * header. Keep 20 bytes as the minimum even if the terminal's raw UART
+     * chunk-size control is configured lower. */
+    const size = Math.max(20, chunkSize());
+    for (let offset = 0; offset < frame.length; offset += size) {
+      const chunk = frame.slice(offset, offset + size);
+      if (elements.debugInput.checked) {
+        appendLine(
+          sensitive
+            ? `MGMT TX #${requestId} <redacted ${chunk.length} bytes>`
+            : `MGMT TX #${requestId} ${chunk.length} bytes`,
+        );
+      }
+      await state.mgmtCommandChar.writeValueWithResponse(chunk);
+    }
+  });
+  state.controlWriteQueue = operation.catch(() => {});
+  await operation;
+  return requestId;
+}
+
+function dispatchManagementMessage(message) {
+  const text = decoder.decode(message.payload);
+  const kind = message.type === 3 ? "event" : "response";
+  if (elements.debugInput.checked) {
+    appendLine(
+      `[mgmt ${kind} #${message.requestId} flags=0x${message.flags.toString(16)}]`,
+    );
+  }
+  feedRx(text);
+  for (const line of text.split(/\r?\n/)) {
+    if (line) {
+      appendLine(`[${kind} #${message.requestId}] ${line}`);
+    }
+  }
+}
+
+function onManagementIndication(event) {
+  const value = event.target.value;
+  const bytes = new Uint8Array(
+    value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength),
+  );
+  let fragment = bytes;
+
+  if (!state.mgmtRx) {
+    if (
+      bytes.length < MGMT_HEADER_SIZE ||
+      bytes[0] !== 0x4c ||
+      bytes[1] !== 0x4b
+    ) {
+      appendLine("[error] orphaned management fragment");
+      return;
+    }
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    if (bytes[2] !== MGMT_API_MAJOR || (bytes[3] !== 2 && bytes[3] !== 3)) {
+      appendLine("[error] unsupported management response");
+      state.mgmtRx = null;
+      return;
+    }
+    state.mgmtRx = {
+      type: bytes[3],
+      requestId: view.getUint32(4, true),
+      expected: view.getUint16(8, true),
+      flags: view.getUint16(10, true),
+      payload: [],
+      received: 0,
+    };
+    fragment = bytes.slice(MGMT_HEADER_SIZE);
+  }
+
+  const message = state.mgmtRx;
+  if (message.received + fragment.length > message.expected) {
+    appendLine("[error] oversized management response");
+    state.mgmtRx = null;
+    return;
+  }
+  message.payload.push(fragment);
+  message.received += fragment.length;
+  if (message.received !== message.expected) {
+    return;
+  }
+
+  const payload = new Uint8Array(message.expected);
+  let offset = 0;
+  for (const chunk of message.payload) {
+    payload.set(chunk, offset);
+    offset += chunk.length;
+  }
+  state.mgmtRx = null;
+  dispatchManagementMessage({ ...message, payload });
+}
+
+function onReliableUartIndication(event) {
+  const value = event.target.value;
+  const bytes = new Uint8Array(
+    value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength),
+  );
+  let fragment = bytes;
+
+  if (!state.reliableRx) {
+    if (
+      bytes.length < RELIABLE_UART_HEADER_SIZE ||
+      bytes[0] !== 0x4c ||
+      bytes[1] !== 0x52
+    ) {
+      appendLine("[error] orphaned Reliable UART fragment");
+      return;
+    }
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    if (bytes[2] !== 1) {
+      appendLine("[error] unsupported Reliable UART version");
+      state.reliableRx = null;
+      return;
+    }
+    state.reliableRx = {
+      sequence: view.getUint32(4, true),
+      expected: view.getUint16(8, true),
+      chunks: [],
+      received: 0,
+    };
+    fragment = bytes.slice(RELIABLE_UART_HEADER_SIZE);
+  }
+
+  const message = state.reliableRx;
+  if (message.received + fragment.length > message.expected) {
+    appendLine("[error] oversized Reliable UART frame");
+    state.reliableRx = null;
+    return;
+  }
+  message.chunks.push(fragment);
+  message.received += fragment.length;
+  if (message.received !== message.expected) {
+    return;
+  }
+
+  state.reliableRx = null;
+  const previous = state.reliableRxSequence === 1
+    ? 0xffffffff
+    : state.reliableRxSequence - 1;
+  if (message.sequence === previous) {
+    return;
+  }
+  if (message.sequence !== state.reliableRxSequence) {
+    appendLine(
+      `[error] Reliable UART sequence gap: expected ${state.reliableRxSequence}, got ${message.sequence}`,
+    );
+    return;
+  }
+  state.reliableRxSequence = nextSequence(state.reliableRxSequence);
+  const payload = new Uint8Array(message.expected);
+  let offset = 0;
+  for (const chunk of message.chunks) {
+    payload.set(chunk, offset);
+    offset += chunk.length;
+  }
+  handleIncomingBytes(payload);
 }
 
 function handleIncomingBytes(bytes) {
@@ -1488,6 +1782,15 @@ function onNotification(event) {
 function onDisconnected() {
   state.rxChar = null;
   state.txChar = null;
+  state.mgmtCommandChar = null;
+  state.mgmtResponseChar = null;
+  state.reliableRxChar = null;
+  state.reliableTxChar = null;
+  state.reliableMaxPayload = 20;
+  state.reliableWriteSize = BLE_MAX_ATT_VALUE;
+  state.reliableRx = null;
+  state.mgmtRx = null;
+  state.deviceId = "";
   state.server = null;
   state.ws = null;
   state.scanning = false;
@@ -1596,10 +1899,10 @@ async function connect() {
   try {
     let device = state.device;
     if (!device) {
-      appendLine(`[scan] requesting NUS device (${BLE_DEVICE_NAME_PREFIX}*)`);
+      appendLine(`[scan] requesting Linkr Management v1 device`);
       device = await navigator.bluetooth.requestDevice({
-        filters: [{ services: [NUS_SERVICE] }],
-        optionalServices: [NUS_SERVICE],
+        filters: [{ services: [MGMT_SERVICE] }],
+        optionalServices: [MGMT_SERVICE, NUS_SERVICE, RELIABLE_UART_SERVICE],
       });
       rememberDevice(device);
     }
@@ -1609,11 +1912,64 @@ async function connect() {
     const service = await state.server.getPrimaryService(NUS_SERVICE);
     state.rxChar = await service.getCharacteristic(NUS_RX);
     state.txChar = await service.getCharacteristic(NUS_TX);
-    await state.txChar.startNotifications();
-    state.txChar.addEventListener("characteristicvaluechanged", onNotification);
+    const mgmtService = await state.server.getPrimaryService(MGMT_SERVICE);
+    const protocolChar = await mgmtService.getCharacteristic(MGMT_PROTOCOL);
+    const deviceIdChar = await mgmtService.getCharacteristic(MGMT_DEVICE_ID);
+    state.mgmtCommandChar = await mgmtService.getCharacteristic(MGMT_COMMAND);
+    state.mgmtResponseChar = await mgmtService.getCharacteristic(MGMT_RESPONSE);
+    const protocolValue = await protocolChar.readValue();
+    if (protocolValue.byteLength < 10 || protocolValue.getUint8(0) !== MGMT_API_MAJOR) {
+      throw new Error("Unsupported Linkr Management API version");
+    }
+    const deviceIdValue = await deviceIdChar.readValue();
+    state.deviceId = Array.from(
+      new Uint8Array(
+        deviceIdValue.buffer.slice(
+          deviceIdValue.byteOffset,
+          deviceIdValue.byteOffset + deviceIdValue.byteLength,
+        ),
+      ),
+      (byte) => byte.toString(16).padStart(2, "0"),
+    ).join("");
+    await state.mgmtResponseChar.startNotifications();
+    state.mgmtResponseChar.addEventListener(
+      "characteristicvaluechanged",
+      onManagementIndication,
+    );
+    const reliableService = await state.server.getPrimaryService(
+      RELIABLE_UART_SERVICE,
+    );
+    state.reliableRxChar = await reliableService.getCharacteristic(
+      RELIABLE_UART_RX,
+    );
+    state.reliableTxChar = await reliableService.getCharacteristic(
+      RELIABLE_UART_TX,
+    );
+    const reliableStateChar = await reliableService.getCharacteristic(
+      RELIABLE_UART_STATE,
+    );
+    const reliableState = await reliableStateChar.readValue();
+    if (reliableState.byteLength < 16 || reliableState.getUint8(0) !== 1) {
+      throw new Error("Unsupported Reliable UART version");
+    }
+    state.reliableMaxPayload = Math.max(
+      1,
+      Math.min(
+        reliableState.getUint16(2, true),
+        BLE_MAX_ATT_VALUE - RELIABLE_UART_HEADER_SIZE,
+      ),
+    );
+    state.reliableWriteSize = BLE_MAX_ATT_VALUE;
+    state.reliableTxSequence = reliableState.getUint32(4, true);
+    state.reliableRxSequence = reliableState.getUint32(8, true);
+    await state.reliableTxChar.startNotifications();
+    state.reliableTxChar.addEventListener(
+      "characteristicvaluechanged",
+      onReliableUartIndication,
+    );
     state.deviceRestored = false;
     setConnected(true);
-    appendLine("[ready]");
+    appendLine(`[ready] API v${protocolValue.getUint8(0)}.${protocolValue.getUint8(1)} device=${state.deviceId}`);
     requestWifiState().catch((error) =>
       appendLine(`[error] ${error.message}`),
     );
@@ -1630,7 +1986,7 @@ async function connect() {
       state.device = null;
       state.deviceRestored = false;
       appendLine(`[restore] ${t("authorizedDeviceFailed")}`);
-      toast(t("authorizedDeviceFailed"));
+      toast(t("authorizedDeviceFailed"), "error");
     }
     setConnected(false);
   } finally {
@@ -1648,9 +2004,16 @@ async function disconnect() {
     return;
   }
 
-  if (state.txChar) {
+  if (state.mgmtResponseChar) {
     try {
-      await state.txChar.stopNotifications();
+      await state.mgmtResponseChar.stopNotifications();
+    } catch (_error) {
+      // Ignore disconnect races.
+    }
+  }
+  if (state.reliableTxChar) {
+    try {
+      await state.reliableTxChar.stopNotifications();
     } catch (_error) {
       // Ignore disconnect races.
     }
@@ -1738,8 +2101,10 @@ function saveSetting(key, value) {
   }
 }
 
+const mobileMedia = window.matchMedia("(max-width: 900px)");
+
 function isMobile() {
-  return window.matchMedia("(max-width: 900px)").matches;
+  return mobileMedia.matches;
 }
 
 function applySidebar() {
@@ -2021,7 +2386,11 @@ function init() {
   setConnected(false);
   bind();
   syncSidebarForViewport();
-  window.addEventListener("resize", syncSidebarForViewport);
+  if (mobileMedia.addEventListener) {
+    mobileMedia.addEventListener("change", syncSidebarForViewport);
+  } else if (mobileMedia.addListener) {
+    mobileMedia.addListener(syncSidebarForViewport);
+  }
   if (state.term) {
     const vp = elements.terminalOutput.querySelector(".xterm-viewport");
     if (vp) {

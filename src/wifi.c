@@ -75,6 +75,9 @@ static atomic_t wifi_connected;
 static atomic_t wifi_ip_ready;
 static atomic_t wifi_last_error;
 static atomic_t wifi_reconnect_enabled;
+static atomic_t wifi_state;
+static atomic_t wifi_operation_id;
+static linkr_wifi_event_fn wifi_event_sink;
 static atomic_t webdav_configured;
 static atomic_t webdav_generation;
 static atomic_t log_dropped_bytes;
@@ -442,11 +445,59 @@ static int advance_log_boot_id(void)
 struct wifi_connect_msg {
 	char ssid[SSID_MAX + 1];
 	char psk[PSK_MAX + 1];
+	uint32_t operation_id;
+	bool wait_for_release;
 };
 
 K_MSGQ_DEFINE(wifi_connect_msgq, sizeof(struct wifi_connect_msg), 2, 4);
+K_MSGQ_DEFINE(wifi_operation_release_queue, sizeof(uint32_t), 2, 4);
 static struct k_thread wifi_connect_thread;
 static K_THREAD_STACK_DEFINE(wifi_connect_stack, WIFI_CONNECT_STACK);
+
+const char *linkr_wifi_state_name(enum linkr_wifi_state state)
+{
+	switch (state) {
+	case LINKR_WIFI_STATE_OFF:
+		return "off";
+	case LINKR_WIFI_STATE_QUEUED:
+		return "queued";
+	case LINKR_WIFI_STATE_CONNECTING:
+		return "connecting";
+	case LINKR_WIFI_STATE_DHCP:
+		return "dhcp";
+	case LINKR_WIFI_STATE_READY:
+		return "ready";
+	case LINKR_WIFI_STATE_FAILED:
+		return "failed";
+	default:
+		return "unknown";
+	}
+}
+
+enum linkr_wifi_state linkr_wifi_get_state(void)
+{
+	return (enum linkr_wifi_state)atomic_get(&wifi_state);
+}
+
+void linkr_wifi_set_event_fn(linkr_wifi_event_fn fn)
+{
+	wifi_event_sink = fn;
+}
+
+static void wifi_publish_state(enum linkr_wifi_state state, int error)
+{
+	uint32_t operation_id = (uint32_t)atomic_get(&wifi_operation_id);
+
+	atomic_set(&wifi_state, state);
+	if (error) {
+		atomic_set(&wifi_last_error, error);
+	} else if (state != LINKR_WIFI_STATE_FAILED) {
+		atomic_clear(&wifi_last_error);
+	}
+	if (wifi_event_sink) {
+		wifi_event_sink(operation_id, state, error);
+	}
+}
 
 /* ------------------------------------------------------------------------ */
 /* WiFi management                                                          */
@@ -491,6 +542,7 @@ static void wifi_retry_work_handler(struct k_work *work)
 	msg.ssid[sizeof(msg.ssid) - 1] = '\0';
 	strncpy(msg.psk, psk, sizeof(msg.psk) - 1);
 	msg.psk[sizeof(msg.psk) - 1] = '\0';
+	msg.operation_id = 0;
 	if (k_msgq_put(&wifi_connect_msgq, &msg, K_NO_WAIT) != 0) {
 		schedule_wifi_retry();
 	}
@@ -520,15 +572,20 @@ static void wifi_event_handler(struct net_mgmt_event_callback *cb,
             if (iface) {
                 net_dhcpv4_start(iface);
             }
+			wifi_publish_state(LINKR_WIFI_STATE_DHCP, 0);
         } else {
             atomic_set(&wifi_connected, 0);
             atomic_set(&wifi_ip_ready, 0);
             atomic_set(&wifi_last_error, status ? status->status : -1);
             LOG_WRN("WiFi connect failed: %d",
                     status ? status->status : -1);
-            schedule_wifi_retry();
+			wifi_publish_state(LINKR_WIFI_STATE_FAILED,
+					   status ? status->status : -1);
+			atomic_clear(&wifi_operation_id);
+			schedule_wifi_retry();
         }
     } else if (mgmt_event == NET_EVENT_WIFI_DISCONNECT_RESULT) {
+		enum linkr_wifi_state next_state;
         /* The application owns DHCP when ESP32 auto-DHCP is disabled. Stop
          * it here so a later reconnect starts a fresh lease transaction and
          * produces a new IPv4 address event. */
@@ -538,13 +595,30 @@ static void wifi_event_handler(struct net_mgmt_event_callback *cb,
         atomic_set(&wifi_connected, 0);
         atomic_set(&wifi_ip_ready, 0);
         LOG_INF("WiFi disconnected");
-        schedule_wifi_retry();
+		next_state = atomic_get(&wifi_reconnect_enabled) ?
+			     LINKR_WIFI_STATE_FAILED : LINKR_WIFI_STATE_OFF;
+		if (linkr_wifi_get_state() != next_state) {
+			wifi_publish_state(next_state,
+				atomic_get(&wifi_reconnect_enabled) ?
+				(int)atomic_get(&wifi_last_error) : 0);
+		}
+		if (atomic_get(&wifi_reconnect_enabled)) {
+			atomic_clear(&wifi_operation_id);
+		}
+		schedule_wifi_retry();
     } else if (mgmt_event == NET_EVENT_IPV4_ADDR_ADD) {
         atomic_set(&wifi_ip_ready, 1);
         LOG_INF("WiFi IPv4 address ready");
+		wifi_publish_state(LINKR_WIFI_STATE_READY, 0);
+		/* READY is the final event for the accepted management operation.
+		 * Later lease or link changes are background events (operation 0). */
+		atomic_clear(&wifi_operation_id);
     } else if (mgmt_event == NET_EVENT_IPV4_ADDR_DEL) {
         atomic_set(&wifi_ip_ready, 0);
         LOG_INF("WiFi IPv4 address removed");
+		if (atomic_get(&wifi_connected)) {
+			wifi_publish_state(LINKR_WIFI_STATE_DHCP, 0);
+		}
     }
 }
 
@@ -695,8 +769,6 @@ static void wifi_scan_work_handler(struct k_work *work)
 
 int linkr_wifi_scan(struct bt_conn *conn)
 {
-    int err;
-
     if (!wifi_iface) {
         return -ENODEV;
     }
@@ -712,13 +784,20 @@ int linkr_wifi_scan(struct bt_conn *conn)
     scan_conn = conn ? bt_conn_ref(conn) : NULL;
     wifi_scan_cache_clear();
 
-    err = k_work_submit(&wifi_scan_work);
-    if (err < 0) {
-        LOG_WRN("WiFi scan work submit failed: %d", err);
-        wifi_scan_release();
-        return err;
-    }
-    return 0;
+	return 0;
+}
+
+void linkr_wifi_release_scan(void)
+{
+	int err = k_work_submit(&wifi_scan_work);
+
+	if (err < 0) {
+		LOG_WRN("WiFi scan work submit failed: %d", err);
+		if (scan_respond) {
+			scan_respond(scan_conn, "@scan error");
+		}
+		wifi_scan_release();
+	}
 }
 
 bool linkr_wifi_is_connected(void)
@@ -743,23 +822,48 @@ static void wifi_connect_thread_fn(void *p1, void *p2, void *p3)
 		if (k_msgq_get(&wifi_connect_msgq, &msg, K_FOREVER) != 0) {
 			continue;
 		}
+		if (msg.wait_for_release) {
+			uint32_t released_operation_id;
+
+			k_msgq_get(&wifi_operation_release_queue,
+				   &released_operation_id, K_FOREVER);
+			if (released_operation_id != msg.operation_id) {
+				LOG_ERR("WiFi operation order mismatch: %u != %u",
+					released_operation_id, msg.operation_id);
+				continue;
+			}
+		}
+		atomic_set(&wifi_operation_id, msg.operation_id);
+		wifi_publish_state(LINKR_WIFI_STATE_QUEUED, 0);
 
 		if (msg.ssid[0]) {
 			int err;
 
+			wifi_publish_state(LINKR_WIFI_STATE_CONNECTING, 0);
 			LOG_INF("WiFi connect thread: %s", msg.ssid);
 			err = linkr_wifi_connect(msg.ssid, msg.psk);
 			LOG_INF("WiFi connect thread result: %d", err);
+			if (err) {
+				wifi_publish_state(LINKR_WIFI_STATE_FAILED, err);
+				atomic_clear(&wifi_operation_id);
+			}
 		} else {
 			LOG_INF("WiFi disconnect thread");
 			atomic_set(&wifi_reconnect_enabled, 0);
 			(void)k_work_cancel_delayable(&wifi_retry_work);
 			(void)linkr_wifi_disconnect();
+			if (linkr_wifi_get_state() != LINKR_WIFI_STATE_OFF) {
+				wifi_publish_state(LINKR_WIFI_STATE_OFF, 0);
+			}
+			/* OFF is final; do not reuse its request ID for a later
+			 * unsolicited WiFi state change. */
+			atomic_clear(&wifi_operation_id);
 		}
 	}
 }
 
-int linkr_wifi_set_config(const char *ssid, const char *psk)
+int linkr_wifi_set_config_op(const char *ssid, const char *psk,
+			     uint32_t operation_id)
 {
 	struct wifi_connect_msg msg;
 	int err;
@@ -791,6 +895,8 @@ int linkr_wifi_set_config(const char *ssid, const char *psk)
 	msg.ssid[sizeof(msg.ssid) - 1] = '\0';
 	strncpy(msg.psk, psk ? psk : "", sizeof(msg.psk) - 1);
 	msg.psk[sizeof(msg.psk) - 1] = '\0';
+	msg.operation_id = operation_id;
+	msg.wait_for_release = operation_id != 0;
 
 	atomic_set(&wifi_reconnect_enabled, 1);
 	err = k_msgq_put(&wifi_connect_msgq, &msg, K_NO_WAIT);
@@ -801,9 +907,17 @@ int linkr_wifi_set_config(const char *ssid, const char *psk)
 	return 0;
 }
 
-int linkr_wifi_clear_config(void)
+int linkr_wifi_set_config(const char *ssid, const char *psk)
 {
-	struct wifi_connect_msg msg = { 0 };
+	return linkr_wifi_set_config_op(ssid, psk, 0);
+}
+
+int linkr_wifi_clear_config_op(uint32_t operation_id)
+{
+	struct wifi_connect_msg msg = {
+		.operation_id = operation_id,
+		.wait_for_release = operation_id != 0,
+	};
 	int err = 0;
 
 	if (IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_PERSIST_CREDENTIALS)) {
@@ -824,12 +938,26 @@ int linkr_wifi_clear_config(void)
 	 * this command has reported success. */
 	atomic_set(&wifi_reconnect_enabled, 0);
 	(void)k_work_cancel_delayable(&wifi_retry_work);
-	k_msgq_purge(&wifi_connect_msgq);
 	err = k_msgq_put(&wifi_connect_msgq, &msg, K_NO_WAIT);
 	if (err) {
 		LOG_WRN("WiFi disconnect msgq put failed: %d", err);
 	}
 	return err;
+}
+
+int linkr_wifi_clear_config(void)
+{
+	return linkr_wifi_clear_config_op(0);
+}
+
+void linkr_wifi_release_operation(uint32_t operation_id)
+{
+	int err = k_msgq_put(&wifi_operation_release_queue, &operation_id,
+			     K_FOREVER);
+
+	if (err) {
+		LOG_ERR("WiFi operation release failed: %d", err);
+	}
 }
 
 /* ------------------------------------------------------------------------ */
@@ -1333,6 +1461,7 @@ int linkr_wifi_init(void)
     k_mutex_init(&scan_cache_lock);
     k_work_init_delayable(&wifi_retry_work, wifi_retry_work_handler);
     k_work_init(&wifi_scan_work, wifi_scan_work_handler);
+	atomic_set(&wifi_state, LINKR_WIFI_STATE_OFF);
 
     k_thread_create(&wifi_connect_thread, wifi_connect_stack,
                     K_THREAD_STACK_SIZEOF(wifi_connect_stack),
@@ -1434,6 +1563,7 @@ int linkr_wifi_init(void)
         strncpy(ssid, wifi_ssid, sizeof(ssid));
         strncpy(psk, wifi_psk, sizeof(psk));
         atomic_set(&wifi_reconnect_enabled, 1);
+		wifi_publish_state(LINKR_WIFI_STATE_QUEUED, 0);
         LOG_INF("Auto-connecting to \"%s\"", wifi_ssid);
         (void)linkr_wifi_connect(ssid, psk);
     } else {

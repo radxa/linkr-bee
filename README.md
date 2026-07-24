@@ -112,10 +112,8 @@ default is:
 The ESP32-C3 Super Mini overlay currently wires only RX/TX, so keep flow control
 at `none` for that board.  RTS/CTS needs extra pins and board pinctrl support.
 
-When `CONFIG_LINKR_BLE_BRIDGE_CONTROL_COMMANDS=y`, BLE writes beginning with
-`@u`, `@h`, or `@linkr ` are handled locally and are not forwarded to the SBC
-UART.  Prefer the short forms because they fit in the default 20-byte BLE write
-payload before MTU exchange:
+When `CONFIG_LINKR_BLE_BRIDGE_CONTROL_COMMANDS=y`, the Management Service v1
+accepts these UART configuration payloads:
 
 ```text
 @u?
@@ -125,11 +123,11 @@ payload before MTU exchange:
 @h
 ```
 
-The longer forms are also accepted when the BLE central can send them:
+The longer forms are also accepted:
 `@linkr uart?`, `@linkr uart=115200,8,n,1,none`, and `@linkr help`.
 
-Responses are sent back over the NUS TX notification characteristic, for
-example:
+Responses are returned on the separate Management Response indication with the
+same request ID, for example:
 
 ```text
 OK uart=115200,8,N,1,none
@@ -203,8 +201,8 @@ field is prefilled with it. The WebDAV log upload keeps running in parallel.
 ### Open BLE access, persistence, and factory reset
 
 BLE pairing, bonding, and owner enforcement are currently disabled to keep the
-development workflow reliable. Any nearby central that connects to the NUS
-service can use the UART stream and all management commands, including WiFi,
+development workflow reliable. Any nearby central that connects to the
+Management or UART services can use the UART stream and all management commands, including WiFi,
 WebDAV, and WebSocket settings. Do not attach a sensitive console or deploy
 this development build in an untrusted radio environment.
 
@@ -259,7 +257,7 @@ exchange):
 
 Long forms `@linkr info?`, `@linkr wifi scan`, `@linkr wifi?`,
 `@linkr wifi=...`, and `@linkr webdav=...` are also accepted. Responses come
-back over the NUS TX notification characteristic:
+back over the Management Response indication:
 
 ```text
 OK wifi=connected,ssid=MySSID
@@ -292,10 +290,11 @@ python3 tools/linkr_ble_terminal.py --wifi MySSID,secret --query-wifi
 python3 tools/linkr_ble_terminal.py --webdav http://host/dav/
 ```
 
-Configuration commands are carried in a length-prefixed `@!<bytes>:` frame by
-the supplied Python, C, and web clients, so SSIDs, PSKs, and long URLs remain
-one atomic command even when BLE splits them across ATT writes. Legacy short
-commands are still accepted directly.
+Configuration commands use Management Service v1 binary frames with an API
+version, request ID, logical payload length, response ID, and confirmed
+indication fragmentation. NUS is now raw UART only. See the
+[Linkr integration API](docs/LINKR_BLE_API.zh-CN.md) for the wire format,
+asynchronous WiFi completion events, Device ID, and Reliable UART sequencing.
 
 The uploader accepts anonymous HTTP endpoints only. It rejects Basic Auth
 credentials because sending them over plain HTTP would expose them on the
@@ -304,9 +303,8 @@ internet-facing deployments require a future HTTPS build with a provisioned CA
 trust anchor.
 
 The Web Bluetooth terminal exposes structured SSID/password fields, a WiFi
-scan list, device diagnostics, and the same WebDAV controls. The C reference
-terminal accepts `--query-info`, `--wifi-scan`, `--wifi`, `--wifi-off`,
-`--query-wifi`, `--webdav`, `--webdav-off`, and `--query-webdav`.
+scan list, device diagnostics, and the same WebDAV controls. The Python client
+exposes the same Management v1 operations for automation.
 
 ## Test options
 
@@ -356,25 +354,29 @@ they do not write the ESP32-C3 coredump sector.
 
 ## BLE protocol
 
-This uses Zephyr's built-in Nordic UART Service:
+The primary API is split into Management Service v1 and Reliable UART Service
+v1. Management supplies API versioning, a stable read-only Device ID,
+request/response IDs and asynchronous events. Reliable UART adds sequence
+numbers, write acknowledgements, confirmed indications and reconnect
+deduplication. Zephyr's built-in Nordic UART Service remains as a best-effort
+raw-UART compatibility path:
 
 - Service: `6e400001-b5a3-f393-e0a9-e50e24dcca9e`
 - RX write characteristic: `6e400002-b5a3-f393-e0a9-e50e24dcca9e`
 - TX notify characteristic: `6e400003-b5a3-f393-e0a9-e50e24dcca9e`
 
-The checked-in production configuration uses the baseline ATT/L2CAP MTU of 23,
-so every client must support **20-byte writes**. If the central explicitly
-reports a larger write-without-response limit, a client may use
-`min(platform_limit, 62)`. The firmware continues to segment UART notifications
-to the actual ATT/ACL capacity, and the host terminal prints the detected write
+The checked-in production configuration offers ATT/L2CAP MTU 247 and LE Data
+Length 251. A negotiated ATT MTU of 247 carries a complete Reliable UART frame
+(12-byte header plus up to 232 UART bytes) in one confirmed transaction. The
+firmware and clients retain fragmentation and a 20-byte fallback for centrals
+that negotiate a smaller MTU. The host terminal prints the detected write
 chunk size when it connects.
 
 ## BLE terminal
 
-`tools/linkr_ble_terminal.py` is a host-side terminal for the bridge.  It scans
-for devices matching the `Linkr BLE UART*` name prefix, subscribes to NUS TX
-notifications, and forwards local keyboard input to the NUS RX write
-characteristic.
+`tools/linkr_ble_terminal.py` is the current host reference client. It connects
+to a `Linkr BLE UART*` device, verifies Management API v1 and Device ID, uses
+Reliable UART for terminal bytes, and keeps management responses separate.
 
 Install the host dependency if needed:
 
@@ -388,6 +390,8 @@ A Linux-only reference implementation written in C is provided in
 `tools/linkr_ble_terminal.c`. It talks to BlueZ over the system D-Bus using
 `libdbus-1` directly, without GLib. This keeps the userspace dependency small,
 but it still requires a working Linux BLE central stack underneath it.
+The C program is currently a legacy NUS terminal; use the Python or Web client
+for Management v1 and Reliable UART integration.
 
 Runtime path:
 
@@ -405,7 +409,7 @@ On a desktop Linux system with BlueZ development files installed:
 ```sh
 cd tools && make
 ./linkr_ble_terminal_c --help
-./linkr_ble_terminal_c --uart 115200,8,n,1,n
+./linkr_ble_terminal_c
 ```
 
 For Linkr Buildroot, do not expect to compile this binary on the target rootfs.
@@ -459,15 +463,14 @@ hciconfig -a
 ls -l /sys/class/bluetooth
 ```
 
-The C terminal accepts the same Linkr BLE defaults as the Python terminal:
+The legacy C terminal supports raw NUS terminal and scan/loopback workflows.
+Its old management flags are not compatible with API v1; use the Python client
+for configuration and diagnostics:
 
 ```sh
-./linkr_ble_terminal_c --query-info --no-terminal
-./linkr_ble_terminal_c --wifi-scan --no-terminal
-./linkr_ble_terminal_c --query-uart --no-terminal
-./linkr_ble_terminal_c --uart 115200,8,n,1,n
 ./linkr_ble_terminal_c --loopback-test A --no-terminal
 ./linkr_ble_terminal_c --scan
+python3 tools/linkr_ble_terminal.py --query-info --no-terminal
 ```
 
 Query the bridge UART settings and exit:
@@ -538,8 +541,8 @@ Useful options:
 ## Web Bluetooth terminal
 
 The browser terminal is an additional option, not a replacement for the Python
-terminal.  It uses the same BLE GATT/NUS service, RX write characteristic, TX
-notify characteristic, and UART control commands.
+terminal. It uses Management Service v1 for controls and Reliable UART Service
+v1 for terminal data; NUS remains available to separate legacy clients.
 
 Serve it from localhost:
 
@@ -563,17 +566,18 @@ reuse the authorization without reopening the chooser.  If the saved device is
 no longer available, the page clears it and falls back to the normal chooser on
 the next attempt.  Browsers without `getDevices()` always use the chooser.
 
-The firmware places the NUS service UUID in the primary advertising packet and
+The firmware places the Management Service UUID in the primary advertising packet and
 the `Linkr BLE UART-3` name in the scan response.  The page filters the browser
-device chooser by the NUS service UUID, which is more reliable than name-only
+device chooser by the Management service UUID, which is more reliable than name-only
 filtering on macOS Chromium browsers.
 
 The page can:
 
-- connect to devices advertising the Linkr NUS service UUID
+- connect to devices advertising the Linkr Management Service UUID
 - restore the last authorized Linkr device after a page refresh for quick
   reconnect, when the browser supports `navigator.bluetooth.getDevices()`
-- subscribe to TX notifications
+- read API version and stable Device ID, and subscribe to separate management
+  indications and Reliable UART indications
 - keep firmware/runtime diagnostics collapsed by default; expanding the panel
   queries the device, and the data can also be refreshed on demand
 - scan nearby 2.4 GHz WiFi networks and fill separate SSID/password fields

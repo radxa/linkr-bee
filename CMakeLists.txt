@@ -4,6 +4,8 @@ find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(linkr_ble_bridge)
 
 target_sources(app PRIVATE
+  src/ble_mgmt.c
+  src/ble_uart_reliable.c
   src/main.c
   src/wifi.c
   src/ws_bridge.c

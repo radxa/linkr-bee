@@ -9,6 +9,7 @@
       rel="icon"
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%233fc88a'/%3E%3Cpath d='M7 7l10 10-4 4V3l4 4L7 17' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"
     />
+    <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
     <link
       rel="stylesheet"
       href="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/css/xterm.css"
@@ -176,7 +177,7 @@
 
           <label class="field">
             <span class="field-label" data-i18n="chunkSize">Chunk size</span>
-            <input id="chunkInput" type="number" min="1" max="62" value="20">
+            <input id="chunkInput" type="number" min="1" max="244" value="20">
           </label>
 
           <div class="field">
@@ -230,9 +231,13 @@
               <span class="password-row">
                 <input id="wifiPasswordInput" type="password" data-i18n-ph="placeholderWifiPassword" placeholder="Leave blank for an open network" autocomplete="off">
                 <button id="wifiPasswordToggle" class="btn btn-soft password-toggle" type="button" data-i18n-aria="showPassword" aria-label="Show password" aria-pressed="false">
-                  <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <svg class="icon-eye" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                     <path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12z"></path>
                     <circle cx="12" cy="12" r="2.5"></circle>
+                  </svg>
+                  <svg class="icon-eye-off" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M17.94 17.94A10.6 10.6 0 0 1 12 19c-6.5 0-10-7-10-7a17.6 17.6 0 0 1 4.06-4.94M9.9 4.24A10.4 10.4 0 0 1 12 4c6.5 0 10 7 10 7a17.7 17.7 0 0 1-2.16 3.19M14.12 14.12a3 3 0 1 1-4.24-4.24"></path>
+                    <line x1="2" y1="2" x2="22" y2="22"></line>
                   </svg>
                 </button>
               </span>
@@ -354,6 +359,6 @@
 
     <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/lib/xterm.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.11.0/lib/addon-fit.js"></script>
-    <script src="./app.js?v=20260723-transport-fixes1"></script>
+    <script src="./app.js?v=20260724-mtu247"></script>
   </body>
 </html>
