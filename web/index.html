@@ -330,9 +330,16 @@
             <span id="terminalInputHint" class="terminal-input-hint" data-i18n="terminalInputDisconnected">
               Connect a device to enable terminal input
             </span>
-            <button id="breakButton" class="btn terminal-break" type="button" disabled="">
-              <span class="btn-label" data-i18n="ctrlC">Ctrl-C</span>
-            </button>
+            <div class="terminal-input-actions">
+              <button id="mobileConnectBtn" class="btn btn-primary mobile-connect" type="button">
+                <span class="spinner" aria-hidden="true"></span>
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 7l10 10-4 4V3l4 4L7 17"></path></svg>
+                <span class="btn-label" data-i18n="connect">Connect</span>
+              </button>
+              <button id="breakButton" class="btn terminal-break" type="button" disabled="">
+                <span class="btn-label" data-i18n="ctrlC">Ctrl-C</span>
+              </button>
+            </div>
           </div>
         </section>
 
@@ -359,6 +366,6 @@
 
     <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/lib/xterm.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.11.0/lib/addon-fit.js"></script>
-    <script src="./app.js?v=20260724-mtu247"></script>
+    <script src="./app.js?v=20260724-adapt1"></script>
   </body>
 </html>

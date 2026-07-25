@@ -143,6 +143,7 @@ const elements = {
   lanModeBtn: $("lanModeBtn"),
   wsHostField: $("wsHostField"),
   wsHostInput: $("wsHostInput"),
+  mobileConnectBtn: $("mobileConnectBtn"),
 };
 
 const THEME_KEY = "linkr-theme";
@@ -1289,6 +1290,15 @@ function setConnecting(connecting) {
   } else if (label) {
     label.textContent = t("connect");
   }
+  const mobileBtn = elements.mobileConnectBtn;
+  if (mobileBtn) {
+    mobileBtn.classList.toggle("loading", connecting);
+    mobileBtn.disabled = connecting || state.connected;
+    const mobileLabel = mobileBtn.querySelector(".btn-label");
+    if (mobileLabel) {
+      mobileLabel.textContent = connecting ? t("connecting") : t("connect");
+    }
+  }
 }
 
 function setConnected(connected) {
@@ -1314,6 +1324,9 @@ function setConnected(connected) {
       ? state.device.name || state.device.id
       : "";
   elements.connectButton.disabled = connected || !canConnect;
+  if (elements.mobileConnectBtn) {
+    elements.mobileConnectBtn.disabled = connected || !canConnect;
+  }
   elements.disconnectButton.disabled = !connected;
   elements.reconnectButton.disabled =
     connected || (!isWs && !state.device);
@@ -2151,6 +2164,12 @@ function bind() {
   elements.connectButton.addEventListener("click", () => {
     connect().catch((error) => appendLine(`[error] ${error.message}`));
   });
+
+  if (elements.mobileConnectBtn) {
+    elements.mobileConnectBtn.addEventListener("click", () => {
+      connect().catch((error) => appendLine(`[error] ${error.message}`));
+    });
+  }
 
   elements.disconnectButton.addEventListener("click", () => {
     disconnect().catch((error) => appendLine(`[error] ${error.message}`));

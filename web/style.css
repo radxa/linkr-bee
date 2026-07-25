@@ -990,12 +990,34 @@ body.terminal-fullscreen-fallback {
   color: var(--accent-strong);
 }
 
+.terminal-input-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+
 .terminal-break {
   flex: 0 0 auto;
   min-height: 30px;
   padding: 5px 10px;
   font-family: var(--font-mono);
   font-size: 12px;
+}
+
+/* ---------- Mobile connect entry (P0: primary action always reachable) ---------- */
+.mobile-connect {
+  display: none;
+}
+
+@media (max-width: 900px) {
+  .mobile-connect {
+    display: inline-flex;
+  }
+
+  .terminal-output.connected + .terminal-input-bar .mobile-connect {
+    display: none;
+  }
 }
 
 /* ---------- Responsive ---------- */
@@ -1230,6 +1252,11 @@ details.ref[open] summary::before {
 
   .workpanel {
     min-height: 68vh;
+  }
+
+  .terminal-card {
+    flex: none;
+    height: 68vh;
   }
 }
 
@@ -1524,6 +1551,57 @@ body,
 
 .password-toggle[aria-pressed="true"] .icon-eye-off {
   display: block;
+}
+
+/* ---------- Touch targets (coarse pointers) ---------- */
+@media (pointer: coarse) {
+  .btn {
+    height: auto;
+    min-height: 44px;
+    padding-block: 8px;
+  }
+
+  .icon-btn {
+    height: 44px;
+  }
+
+  .ts-btn {
+    height: 44px;
+  }
+
+  input,
+  select {
+    height: 44px;
+  }
+
+  .check input {
+    width: 20px;
+    height: 20px;
+  }
+
+  .term-tool {
+    min-width: 44px;
+    height: 44px;
+  }
+
+  .preset-chip {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+  }
+
+  .terminal-break {
+    min-height: 44px;
+  }
+
+  .ref-item[data-cmd] {
+    padding-block: 10px;
+  }
+
+  details.ref summary,
+  .diagnostics-summary {
+    min-height: 44px;
+  }
 }
 
 /* ---------- Reduced motion ---------- */
