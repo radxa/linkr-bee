@@ -15,7 +15,7 @@ usage() {
     cat <<EOF
 Usage: $(basename "$0") [--port DEVICE] [--image FILE] [--baud RATE]
 
-Flash the Linkr BLE ESP32-C3 Super Mini image without erasing settings.
+Flash the Linkr BMC Lite ESP32-C3 Super Mini image without erasing settings.
 Environment overrides: LINKR_PORT, LINKR_BAUD.
 EOF
 }

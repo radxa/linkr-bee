@@ -1,4 +1,4 @@
-# ESP32-C3 硬件需求规格（Linkr BLE UART Bridge）
+# ESP32-C3 硬件需求规格（Linkr BMC Lite）
 
 > 基于 `boards/esp32c3_supermini.overlay`、`src/main.c`、`prj.conf`、`Kconfig` 整理。
 > 作为交付硬件团队的基线规格，对应固件已验证烧录运行。

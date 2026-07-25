@@ -605,7 +605,7 @@ async def run(args: argparse.Namespace) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Terminal over BLE Nordic UART Service for Linkr BLE bridge"
+        description="Terminal over BLE Nordic UART Service for Linkr BMC Lite bridge"
     )
     parser.add_argument(
         "--name",

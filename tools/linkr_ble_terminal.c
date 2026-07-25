@@ -1,5 +1,5 @@
 /*
- * Linkr BLE Terminal (C / Linux / BlueZ D-Bus)
+ * Linkr BMC Lite Terminal (C / Linux / BlueZ D-Bus)
  *
  * A Linux-only reference implementation of the host-side BLE Nordic UART
  * Service terminal. It talks to BlueZ over the system D-Bus and is intended

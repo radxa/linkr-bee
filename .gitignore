@@ -18,3 +18,9 @@ sbc-console*.log
 
 # macOS
 .DS_Store
+
+# Python virtualenv
+.venv/
+
+# Local design tooling state
+.impeccable/

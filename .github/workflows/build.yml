@@ -13,7 +13,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: firmware-${{ gitea.ref }}
+  group: firmware-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -86,11 +86,11 @@ jobs:
           mkdir -p "${output}"
 
           cp "${zephyr}/zephyr.bin" \
-            "${output}/linkr-ble-esp32c3-supermini.bin"
+            "${output}/linkr-bmc-lite-esp32c3-supermini.bin"
           cp "${zephyr}/zephyr.elf" \
-            "${output}/linkr-ble-esp32c3-supermini.elf"
+            "${output}/linkr-bmc-lite-esp32c3-supermini.elf"
           cp "${zephyr}/zephyr.map" \
-            "${output}/linkr-ble-esp32c3-supermini.map"
+            "${output}/linkr-bmc-lite-esp32c3-supermini.map"
           cp "${zephyr}/.config" "${output}/firmware.config"
           cp "${zephyr}/runners.yaml" "${output}/runners.yaml"
           cp "${GITHUB_WORKSPACE}/app/tools/flash_firmware.sh" \
@@ -98,16 +98,16 @@ jobs:
           chmod +x "${output}/flash_firmware.sh"
 
           cd "${output}"
-          sha256sum linkr-ble-esp32c3-supermini.bin > SHA256SUMS
+          sha256sum linkr-bmc-lite-esp32c3-supermini.bin > SHA256SUMS
           version="$(sed -n 's/^CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION=\"\\(.*\\)\"/\\1/p' firmware.config)"
           cat > firmware.json <<EOF
           {
-            "project": "linkr-ble",
+            "project": "linkr-bmc-lite",
             "version": "${version}",
             "board": "esp32c3_supermini",
             "chip": "esp32c3",
             "flash_address": "0x0",
-            "image": "linkr-ble-esp32c3-supermini.bin",
+            "image": "linkr-bmc-lite-esp32c3-supermini.bin",
             "git_commit": "${GITHUB_SHA}"
           }
           EOF
@@ -123,9 +123,9 @@ jobs:
           EOF
 
       - name: Upload firmware
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
-          name: linkr-ble-esp32c3-supermini
+          name: linkr-bmc-lite-esp32c3-supermini
           path: app/dist/
           if-no-files-found: error
           retention-days: 30

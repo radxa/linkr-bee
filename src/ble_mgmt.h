@@ -1,5 +1,5 @@
 /*
- * Linkr BLE Management Service v1.
+ * Linkr BMC Lite Management Service v1.
  *
  * SPDX-License-Identifier: Apache-2.0
  */

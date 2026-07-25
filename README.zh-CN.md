@@ -1,4 +1,4 @@
-# Linkr BLE UART 桥
+# Linkr BMC Lite
 
 > English: [README.md](README.md)
 
@@ -29,28 +29,28 @@ Linkr 端通过上方 BLE 配件 API 文档实现发现、串口、配网和局�
 在该 workspace 中：
 
 ```sh
-west build -b esp32c3_devkitm /Users/xiangzelong/Dev/linkr-ble
+west build -b esp32c3_devkitm linkr-bmc-lite
 ```
 
 或 DevKitC：
 
 ```sh
-west build -b esp32c3_devkitc /Users/xiangzelong/Dev/linkr-ble
+west build -b esp32c3_devkitc linkr-bmc-lite
 ```
 
 ESP32-C3 Super Mini：
 
 ```sh
-west build -b esp32c3_supermini /Users/xiangzelong/Dev/linkr-ble
+west build -b esp32c3_supermini linkr-bmc-lite
 ```
 
-### Gitea Actions 构建与刷写
+### GitHub Actions 构建与刷写
 
-`.gitea/workflows/build.yml` 只构建一个量产固件：面向
+`.github/workflows/build.yml` 只构建一个量产固件：面向
 `esp32c3_supermini` 的默认 WiFi + BLE 配置。它会在 `main` push、版本 tag、
 pull request 和手动触发时运行，使用 Zephyr v4.4.1 与 Zephyr SDK 1.0.1。
 
-从完成的 Actions run 下载 `linkr-ble-esp32c3-supermini` artifact，解压后在
+从完成的 Actions run 下载 `linkr-bmc-lite-esp32c3-supermini` artifact，解压后在
 macOS 或 Linux 安装
 [`esptool`](https://docs.espressif.com/projects/esptool/en/latest/esp32c3/)，
 连接设备并执行：
@@ -126,7 +126,7 @@ WiFi 凭据默认只保存在 RAM，重启即丢失。仅在量产设备已经�
 普通构建即包含：
 
 ```sh
-west build -b esp32c3_supermini /Users/xiangzelong/Dev/linkr-ble
+west build -b esp32c3_supermini linkr-bmc-lite
 ```
 
 ESP32-C3 SoC WiFi 驱动是 `CONFIG_WIFI_ESP32`（定义于 `drivers/wifi/esp32/Kconfig.esp32`），它会自动 select L2/ethernet/mgmt 层和 MBEDTLS。STA 模式由 `CONFIG_WIFI_USAGE_MODE_STA` choice 选择。
@@ -219,7 +219,7 @@ python3 tools/linkr_ble_terminal.py --webdav http://host/dav/
 配置命令使用 Management Service v1 二进制帧，包含 API 版本、request ID、
 逻辑长度、response ID 和 confirmed indication 分片。NUS 现在只转发原始 UART。
 完整格式、WiFi 异步完成事件、Device ID 与 Reliable UART 序号见
-[Linkr BLE 配件 API v1](docs/LINKR_BLE_API.zh-CN.md)。
+[Linkr BMC Lite 配件 API v1](docs/LINKR_BLE_API.zh-CN.md)。
 
 当前上传器只接受匿名 HTTP 端点。固件会拒绝 Basic Auth 凭据，避免密码通过明文 HTTP 暴露在网络上。该模式仅适用于可信局域网；需要认证或公网部署时，应使用后续支持 HTTPS 且预置 CA 信任锚的构建。
 
@@ -240,7 +240,7 @@ tools/verify.sh
 启用 UART RX 回环：
 
 ```sh
-west build -b esp32c3_devkitm /Users/xiangzelong/Dev/linkr-ble -- \
+west build -b esp32c3_devkitm linkr-bmc-lite -- \
   -DEXTRA_CONF_FILE=test_uart.conf
 ```
 
@@ -254,14 +254,14 @@ west build -b esp32c3_devkitm /Users/xiangzelong/Dev/linkr-ble -- \
 将 UART0 TX（GPIO21）和 RX（GPIO20）短接后，可构建硬件回环验证镜像：
 
 ```sh
-west build -p always -b esp32c3_devkitm /Users/xiangzelong/Dev/linkr-ble -- \
+west build -p always -b esp32c3_devkitm linkr-bmc-lite -- \
   -DEXTRA_CONF_FILE=test_loopback.conf
 ```
 
 使用同一完整固件功能集的 BLE NUS echo 诊断不需要 UART 接线：
 
 ```sh
-west build -p always -b esp32c3_supermini /Users/xiangzelong/Dev/linkr-ble -- \
+west build -p always -b esp32c3_supermini linkr-bmc-lite -- \
   -DEXTRA_CONF_FILE=test_ble_echo.conf
 ```
 
@@ -399,26 +399,26 @@ tools/build_terminal_binary.sh
 运行打包终端：
 
 ```sh
-./dist/linkr-ble-terminal --uart 115200,8,n,1,n
+./dist/linkr-bmc-lite-terminal --uart 115200,8,n,1,n
 ```
 
 查看原始 SBC console 字节并同时捕获：
 
 ```sh
-./dist/linkr-ble-terminal --uart 115200,8,n,1,n --log-file sbc-console.log
+./dist/linkr-bmc-lite-terminal --uart 115200,8,n,1,n --log-file sbc-console.log
 ```
 
 若目标不回显输入字符，调试输入时用行模式或本地回显：
 
 ```sh
-./dist/linkr-ble-terminal --uart 115200,8,n,1,n --line-mode --enter cr
-./dist/linkr-ble-terminal --uart 115200,8,n,1,n --local-echo --debug-io
+./dist/linkr-bmc-lite-terminal --uart 115200,8,n,1,n --line-mode --enter cr
+./dist/linkr-bmc-lite-terminal --uart 115200,8,n,1,n --local-echo --debug-io
 ```
 
 GPIO21 短接到 GPIO20 时，运行 BLE→UART→BLE 回环检查：
 
 ```sh
-./dist/linkr-ble-terminal --loopback-test A --no-terminal
+./dist/linkr-bmc-lite-terminal --loopback-test A --no-terminal
 ```
 
 常用选项：

@@ -2,15 +2,15 @@
 set -eu
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-VENV_DIR=${LINKR_TERM_BUILD_VENV:-/tmp/linkr-ble-terminal-build}
+VENV_DIR=${LINKR_TERM_BUILD_VENV:-/tmp/linkr-bmc-lite-terminal-build}
 
 cd "$ROOT_DIR"
-rm -rf build/linkr-ble-terminal dist/linkr-ble-terminal linkr-ble-terminal.spec
+rm -rf build/linkr-bmc-lite-terminal dist/linkr-bmc-lite-terminal linkr-bmc-lite-terminal.spec
 
 python3 -m venv "$VENV_DIR"
 "$VENV_DIR/bin/python" -m pip install --upgrade pip setuptools wheel
 "$VENV_DIR/bin/python" -m pip install bleak pyinstaller
-"$VENV_DIR/bin/pyinstaller" --onefile --clean --name linkr-ble-terminal \
+"$VENV_DIR/bin/pyinstaller" --onefile --clean --name linkr-bmc-lite-terminal \
 	tools/linkr_ble_terminal.py
 
-echo "Built: $ROOT_DIR/dist/linkr-ble-terminal"
+echo "Built: $ROOT_DIR/dist/linkr-bmc-lite-terminal"

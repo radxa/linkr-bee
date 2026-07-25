@@ -1,5 +1,5 @@
 /*
- * Linkr BLE UART bridge.
+ * Linkr BMC Lite UART bridge.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -1719,7 +1719,7 @@ int main(void)
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY)
 	k_sem_give(&bridge_start_sem);
 #endif
-	LOG_INF("Linkr BLE UART bridge ready on %s", bridge_uart->name);
+	LOG_INF("Linkr BMC Lite UART bridge ready on %s", bridge_uart->name);
 
 	return 0;
 }

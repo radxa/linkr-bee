@@ -1,5 +1,5 @@
 /*
- * WiFi station + WebDAV serial log upload for the Linkr BLE bridge.
+ * WiFi station + WebDAV serial log upload for the Linkr BMC Lite bridge.
  *
  * SPDX-License-Identifier: Apache-2.0
  */

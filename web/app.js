@@ -190,7 +190,7 @@ const XTERM_LIGHT = {
 
 const I18N = {
   en: {
-    title: "Linkr BLE Terminal",
+    title: "Linkr BMC Lite Terminal",
     checking: "Checking Web Bluetooth…",
     supported: "Chrome/Chromium Web Bluetooth over HTTPS or localhost",
     unsupported: "Web Bluetooth unavailable in this browser",
@@ -289,7 +289,7 @@ const I18N = {
     rx: "RX",
     tx: "TX",
     baud: "Baud",
-    welcome: "Linkr BLE Terminal ready. Press Connect to open a device.",
+    welcome: "Linkr BMC Lite Terminal ready. Press Connect to open a device.",
     connecting: "Connecting…",
     saved: "Log saved",
     uartSet: "UART configured",
@@ -307,7 +307,7 @@ const I18N = {
     dark: "Dark",
   },
   zh: {
-    title: "Linkr BLE 终端",
+    title: "Linkr BMC Lite 终端",
     checking: "正在检测 Web Bluetooth…",
     supported: "Chrome/Chromium 需通过 HTTPS 或 localhost 使用 Web Bluetooth",
     unsupported: "当前浏览器不支持 Web Bluetooth",
@@ -406,7 +406,7 @@ const I18N = {
     rx: "收",
     tx: "发",
     baud: "波特率",
-    welcome: "Linkr BLE 终端已就绪，点击「连接」打开设备。",
+    welcome: "Linkr BMC Lite 终端已就绪，点击「连接」打开设备。",
     connecting: "连接中…",
     saved: "日志已保存",
     uartSet: "UART 已配置",
