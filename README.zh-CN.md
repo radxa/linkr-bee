@@ -1,8 +1,6 @@
 # Linkr BMC Lite
 
-> English: [README.md](README.md)
-
-> Linkr 端接入：[BLE 配件 API 对接文档](docs/LINKR_BLE_API.zh-CN.md)
+> English: [README.md](README.md) | Linkr 端接入：[BLE 配件 API 对接文档](docs/LINKR_BLE_API.zh-CN.md)
 
 基于 Zephyr 的 ESP32-C3 BLE 串口桥应用。第一个里程碑是一个纯粹的蓝牙 LE UART 窗口：
 
@@ -13,6 +11,53 @@
 
 Linkr 端通过上方 BLE 配件 API 文档实现发现、串口、配网和局域网桥接功能；
 本仓库负责配件固件及参考客户端。
+
+---
+
+## 目录
+
+- [快速开始](#快速开始)
+- [支持环境](#支持环境)
+- [构建](#构建)
+  - [GitHub Actions 构建与刷写](#github-actions-构建与刷写)
+- [UART 选择](#uart-选择)
+- [SBC UART 设置](#sbc-uart-设置)
+- [WiFi 与 WebDAV 日志上传](#wifi-与-webdav-日志上传)
+  - [UART over WebSocket（局域网桥）](#uart-over-websocket局域网桥)
+  - [开放 BLE 访问、持久化与恢复出厂](#开放-ble-访问持久化与恢复出厂)
+- [控制命令参考](#控制命令参考)
+- [测试选项](#测试选项)
+- [BLE 协议](#ble-协议)
+- [BLE 终端](#ble-终端)
+  - [Linux 或 Linkr Buildroot 的 C 终端](#linux-或-linkr-buildroot-的-c-终端)
+- [Web Bluetooth 终端](#web-bluetooth-终端)
+- [配置参考](#配置参考)
+
+---
+
+## 快速开始
+
+5 步完成固件构建和运行：
+
+```sh
+# 1. 克隆并进入工作区
+git clone https://github.com/radxa/linkr-bmc-lite.git
+cd linkr-bmc-lite
+
+# 2. 构建 ESP32-C3 Super Mini 固件（默认 WiFi + BLE）
+west build -b esp32c3_supermini linkr-bmc-lite
+
+# 3. 刷写到设备
+west flash
+
+# 4. 通过 Python 终端连接
+python3 tools/linkr_ble_terminal.py
+
+# 5. 或启动 Web 终端
+tools/serve_web.sh  # 打开 http://127.0.0.1:8765/
+```
+
+> **注意**：需要 Zephyr v4.4.1 west workspace，且 manifest 中包含 Espressif HAL blobs。详见[构建](#构建)章节。
 
 ## 支持环境
 
@@ -170,26 +215,58 @@ Python、C 与 Web Bluetooth 客户端都会直接发送管理命令；`--pair` 
 
 UART RX 字节（SBC console 输出）会被缓存，并定期 HTTP PUT 到 `<webdav_url>log-<boot-id>-<sequence>-<uptime>.txt`。上传会等待 IPv4 地址、重试连接失败、为失败批次保留稳定文件名；更改目标或停用时会丢弃已排队旧数据。
 
-控制命令（短形式可放进 MTU 交换前默认 20 字节 BLE 写入）：
+## 控制命令参考
 
-```text
-@i?                          读取设备诊断信息
-@w scan                      扫描附近 2.4 GHz WiFi（无需配对）
-@w?                          查询 WiFi 状态
-@w=MySSID,secret             连接 WiFi（默认仅保存到 RAM）
-@w off                       清除 WiFi 配置并断开
-@d?                          查询 WebDAV 状态
-@d=http://host/dav/          设置匿名 WebDAV 目标并启用上传
-@d off                       停用 WebDAV 上传
-```
+所有命令支持短形式（可放进 MTU 交换前默认 20 字节 BLE 写入）和长形式（`@linkr ...`）。
 
-长形式 `@linkr info?`、`@linkr wifi scan`、`@linkr wifi?`、
-`@linkr wifi=...` 和 `@linkr webdav=...` 也被接受。响应通过 Management
-Response indication 回传：
+### 诊断命令
+
+| 短形式 | 长形式 | 说明 |
+|--------|--------|------|
+| `@i?` | `@linkr info?` | 读取设备诊断信息（固件版本、运行时间、UART 统计、WiFi 状态、WebDAV 计数器） |
+| `@h` | `@linkr help` | 列出可用命令 |
+
+### WiFi 命令
+
+| 短形式 | 长形式 | 说明 |
+|--------|--------|------|
+| `@w scan` | `@linkr wifi scan` | 扫描附近 2.4 GHz WiFi（无需配对） |
+| `@w?` | `@linkr wifi?` | 查询 WiFi 状态 |
+| `@w=SSID,pass` | `@linkr wifi=SSID,pass` | 连接 WiFi（默认仅保存到 RAM） |
+| `@w off` | `@linkr wifi off` | 清除 WiFi 配置并断开 |
+
+### WebDAV 命令
+
+| 短形式 | 长形式 | 说明 |
+|--------|--------|------|
+| `@d?` | `@linkr webdav?` | 查询 WebDAV 状态 |
+| `@d=URL` | `@linkr webdav=URL` | 设置匿名 WebDAV 目标并启用上传 |
+| `@d off` | `@linkr webdav off` | 停用 WebDAV 上传 |
+
+### WebSocket 命令
+
+| 短形式 | 长形式 | 说明 |
+|--------|--------|------|
+| `@s?` | `@linkr ws?` | 查询 WebSocket 桥状态 |
+| `@s on` | `@linkr ws on` | 启用 WebSocket 桥 |
+| `@s off` | `@linkr ws off` | 停用 WebSocket 桥 |
+
+### UART 命令
+
+| 短形式 | 长形式 | 说明 |
+|--------|--------|------|
+| `@u?` | `@linkr uart?` | 查询 UART 设置 |
+| `@u=baud,data,parity,stop,flow` | `@linkr uart=...` | 设置 UART 模式 |
+
+### 响应格式
+
+响应通过 Management Response indication 回传：
 
 ```text
 OK wifi=connected,ssid=MySSID
 OK webdav=on,url=http://host/dav/
+OK uart=115200,8,N,1,none
+ERR format: @u=115200,8,n,1,n
 ```
 
 诊断命令是只读操作。它会返回应用与 Zephyr 版本、运行时间、开放的 BLE
@@ -270,18 +347,52 @@ coredump 扇区。
 
 ## BLE 协议
 
-主接口拆分为 Management Service v1 与 Reliable UART Service v1：前者提供 API
-版本、稳定的只读 Device ID、请求/响应 ID 和异步事件；后者提供序号、写确认、
-confirmed indication 与重连去重。Zephyr NUS 仅保留为尽力发送的原始串口兼容通道：
+### 架构
 
-- 服务：`6e400001-b5a3-f393-e0a9-e50e24dcca9e`
-- RX 写特征：`6e400002-b5a3-f393-e0a9-e50e24dcca9e`
-- TX 通知特征：`6e400003-b5a3-f393-e0a9-e50e24dcca9e`
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    主机端 (Python/Web/C)                      │
+├─────────────────────────────────────────────────────────────┤
+│  Management Service v1    │    Reliable UART Service v1     │
+│  - API 版本管理           │    - 序号                        │
+│  - Device ID (只读)       │    - 写确认                      │
+│  - 请求/响应 ID           │    - 确认 indication             │
+│  - 异步事件               │    - 重连去重                    │
+├─────────────────────────────────────────────────────────────┤
+│                    BLE GATT (ATT MTU 247)                    │
+├─────────────────────────────────────────────────────────────┤
+│              ESP32-C3 固件 (Zephyr v4.4.1)                   │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐ │
+│  │  BLE 协议栈  │  │  UART 桥接  │  │  WiFi/WebSocket     │ │
+│  └─────────────┘  └─────────────┘  └─────────────────────┘ │
+└─────────────────────────────────────────────────────────────┘
+```
 
-当前正式配置提供 ATT/L2CAP MTU 247 与 LE Data Length 251。协商到 ATT MTU
-247 时，一个 Reliable UART 帧（12 字节帧头加最多 232 字节 UART 数据）可在
-一次确认事务中完成。对于只协商到较小 MTU 的中心设备，固件与客户端仍保留
-分片和 20 字节回退。主机终端连接时会打印检测到的写入块大小。
+### 服务 UUID
+
+| 服务 | UUID | 说明 |
+|------|------|------|
+| Management Service v1 | `6e400001-b5a3-f393-e0a9-e50e24dcca9e` | API 版本、Device ID、配置命令 |
+| RX 写特征 | `6e400002-b5a3-f393-e0a9-e50e24dcca9e` | 主机 → 设备写入 |
+| TX 通知特征 | `6e400003-b5a3-f393-e0a9-e50e24dcca9e` | 设备 → 主机通知 |
+
+### 数据流
+
+```
+┌──────────────┐     BLE 写入      ┌──────────────┐     UART TX     ┌──────────────┐
+│  BLE 中心    │ ─────────────────> │  ESP32-C3    │ ──────────────> │  SBC/设备    │
+│  (手机/PC)   │ <───────────────── │  桥接器      │ <────────────── │  (控制台)    │
+└──────────────┘   BLE 通知        └──────────────┘    UART RX      └──────────────┘
+```
+
+### MTU 与帧格式
+
+- **ATT MTU**: 247 字节（协商值）
+- **LE Data Length**: 251 字节
+- **Reliable UART 帧**: 12 字节帧头 + 最多 232 字节 UART 数据
+- **回退**: 20 字节分片（用于较小 MTU 协商）
+
+主机终端连接时会打印检测到的写入块大小。
 
 ## BLE 终端
 
@@ -486,3 +597,59 @@ http://127.0.0.1:8765/
 - 将接收字节保存为日志文件
 
 这在已有 Chrome 的机器上便于快速访问。页面从 jsDelivr 加载 xterm.js，因此 Python 终端仍是打包离线使用、自动化和回环测试的更好选择。
+
+---
+
+## 配置参考
+
+### UART 配置
+
+| 配置选项 | 默认值 | 说明 |
+|----------|--------|------|
+| `CONFIG_LINKR_BLE_BRIDGE_UART_BAUD_RATE` | `115200` | 波特率 |
+| `CONFIG_LINKR_BLE_BRIDGE_UART_DATA_BITS_*` | `8` | 数据位 (5/6/7/8) |
+| `CONFIG_LINKR_BLE_BRIDGE_UART_PARITY_*` | `none` | 校验 (none/odd/even) |
+| `CONFIG_LINKR_BLE_BRIDGE_UART_STOP_BITS_*` | `1` | 停止位 (1/2) |
+| `CONFIG_LINKR_BLE_BRIDGE_UART_FLOW_CONTROL_*` | `none` | 流控 (none/rtscts) |
+
+### WiFi 配置
+
+| 配置选项 | 默认值 | 说明 |
+|----------|--------|------|
+| `CONFIG_WIFI_ESP32` | `y` | 启用 ESP32 WiFi 驱动 |
+| `CONFIG_WIFI_USAGE_MODE_STA` | `y` | Station 模式 |
+| `CONFIG_LINKR_BLE_BRIDGE_PERSIST_CREDENTIALS` | `n` | 保存 WiFi PSK 到 flash（需 secure boot + flash encryption） |
+
+### WebSocket 桥配置
+
+| 配置选项 | 默认值 | 说明 |
+|----------|--------|------|
+| `CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE` | `y` | 启用 WebSocket 桥 |
+| `CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_PORT` | `80` | WebSocket 服务端口 |
+| `CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_MAX_CLIENTS` | `2` | 最大并发客户端数 |
+| `CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_AUTH_TOKEN` | *(空)* | 可选认证 token（首条文本帧） |
+
+### BLE 配置
+
+| 配置选项 | 默认值 | 说明 |
+|----------|--------|------|
+| `CONFIG_LINKR_BLE_BRIDGE_CONTROL_COMMANDS` | `y` | 启用管理命令（`@u`、`@w`、`@d` 等） |
+| `CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION` | `0.2.0` | 上报的固件版本 |
+
+### 测试配置
+
+| 配置选项 | 默认值 | 说明 |
+|----------|--------|------|
+| `CONFIG_LINKR_BLE_BRIDGE_TEST_UART_ECHO` | `n` | 启用 UART RX 回环 |
+| `CONFIG_LINKR_BLE_BRIDGE_TEST_UART_TX` | `n` | 启用周期性 UART TX 帧 |
+| `CONFIG_LINKR_BLE_BRIDGE_TEST_UART_TX_INTERVAL_MS` | `1000` | TX 帧间隔 (ms) |
+| `CONFIG_LINKR_BLE_BRIDGE_TEST_UART_TX_PAYLOAD` | `linkr-ble-uart-test\r\n` | TX 帧载荷 |
+
+### 板级引脚 (ESP32-C3 Super Mini)
+
+| 功能 | GPIO | 说明 |
+|------|------|------|
+| UART RX | GPIO20 | 接收数据 |
+| UART TX | GPIO21 | 发送数据 |
+| 活动 LED | GPIO8 | 蓝色 LED，UART 收发时闪烁 |
+| 恢复出厂 | GPIO0 | 启动时与 GND 短接 |

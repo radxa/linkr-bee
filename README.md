@@ -1,10 +1,8 @@
 # Linkr BMC Lite
 
-> 中文文档：[README.zh-CN.md](README.zh-CN.md)
+> 中文文档：[README.zh-CN.md](README.zh-CN.md) | Linkr integration: [BLE accessory API guide (Chinese)](docs/LINKR_BLE_API.zh-CN.md)
 
-> Linkr integration: [BLE accessory API guide (Chinese)](docs/LINKR_BLE_API.zh-CN.md)
-
-Zephyr application for an ESP32-C3 BLE serial bridge.  The first milestone is a
+Zephyr application for an ESP32-C3 BLE serial bridge. The first milestone is a
 plain Bluetooth LE UART window:
 
 - BLE peripheral advertising as `Linkr BLE UART-3`
@@ -14,6 +12,53 @@ plain Bluetooth LE UART window:
 
 The Linkr product integrates this accessory through the API guide above; this
 repository owns the accessory firmware and reference clients.
+
+---
+
+## Table of Contents
+
+- [Quick Start](#quick-start)
+- [Supported Environment](#supported-environment)
+- [Build](#build)
+  - [GitHub Actions Build](#github-actions-build)
+- [UART Selection](#uart-selection)
+- [SBC UART Settings](#sbc-uart-settings)
+- [WiFi and WebDAV Log Upload](#wifi-and-webdav-log-upload)
+  - [UART over WebSocket (LAN Bridge)](#uart-over-websocket-lan-bridge)
+  - [Open BLE Access, Persistence, and Factory Reset](#open-ble-access-persistence-and-factory-reset)
+- [Control Commands Reference](#control-commands-reference)
+- [Test Options](#test-options)
+- [BLE Protocol](#ble-protocol)
+- [BLE Terminal](#ble-terminal)
+  - [C Terminal for Linux or Linkr Buildroot](#c-terminal-for-linux-or-linkr-buildroot)
+- [Web Bluetooth Terminal](#web-bluetooth-terminal)
+- [Configuration Reference](#configuration-reference)
+
+---
+
+## Quick Start
+
+Get the firmware running in 5 steps:
+
+```sh
+# 1. Clone and enter the workspace
+git clone https://github.com/radxa/linkr-bmc-lite.git
+cd linkr-bmc-lite
+
+# 2. Build for ESP32-C3 Super Mini (default WiFi + BLE)
+west build -b esp32c3_supermini linkr-bmc-lite
+
+# 3. Flash to device
+west flash
+
+# 4. Connect via Python terminal
+python3 tools/linkr_ble_terminal.py
+
+# 5. Or serve Web terminal locally
+tools/serve_web.sh  # Open http://127.0.0.1:8765/
+```
+
+> **Note**: Requires Zephyr v4.4.1 west workspace with Espressif HAL blobs. See [Build](#build) for details.
 
 ## Supported environment
 
@@ -241,27 +286,58 @@ UART RX bytes are buffered and periodically HTTP-PUT to
 address, retries connection failures, keeps a failed batch name stable, and
 discards queued bytes if its target is changed or disabled.
 
-Control commands (short form fits the default 20-byte BLE write before MTU
-exchange):
+## Control Commands Reference
 
-```text
-@i?                          read device diagnostics
-@w scan                      scan nearby 2.4 GHz WiFi networks (pairing-free)
-@w?                          query WiFi status
-@w=MySSID,secret             join WiFi (RAM-only unless persistence is enabled)
-@w off                       clear WiFi configuration and disconnect
-@d?                          query WebDAV status
-@d=http://host/dav/          set anonymous WebDAV target and enable upload
-@d off                       disable WebDAV upload
-```
+All commands support short form (fits 20-byte BLE write before MTU exchange) and long form (`@linkr ...`).
 
-Long forms `@linkr info?`, `@linkr wifi scan`, `@linkr wifi?`,
-`@linkr wifi=...`, and `@linkr webdav=...` are also accepted. Responses come
-back over the Management Response indication:
+### Diagnostic Commands
+
+| Short Form | Long Form | Description |
+|------------|-----------|-------------|
+| `@i?` | `@linkr info?` | Read device diagnostics (firmware version, uptime, UART stats, WiFi state, WebDAV counters) |
+| `@h` | `@linkr help` | List available commands |
+
+### WiFi Commands
+
+| Short Form | Long Form | Description |
+|------------|-----------|-------------|
+| `@w scan` | `@linkr wifi scan` | Scan nearby 2.4 GHz WiFi networks (pairing-free) |
+| `@w?` | `@linkr wifi?` | Query WiFi status |
+| `@w=SSID,pass` | `@linkr wifi=SSID,pass` | Join WiFi (RAM-only unless persistence enabled) |
+| `@w off` | `@linkr wifi off` | Clear WiFi config and disconnect |
+
+### WebDAV Commands
+
+| Short Form | Long Form | Description |
+|------------|-----------|-------------|
+| `@d?` | `@linkr webdav?` | Query WebDAV status |
+| `@d=URL` | `@linkr webdav=URL` | Set anonymous WebDAV target and enable upload |
+| `@d off` | `@linkr webdav off` | Disable WebDAV upload |
+
+### WebSocket Commands
+
+| Short Form | Long Form | Description |
+|------------|-----------|-------------|
+| `@s?` | `@linkr ws?` | Query WebSocket bridge status |
+| `@s on` | `@linkr ws on` | Enable WebSocket bridge |
+| `@s off` | `@linkr ws off` | Disable WebSocket bridge |
+
+### UART Commands
+
+| Short Form | Long Form | Description |
+|------------|-----------|-------------|
+| `@u?` | `@linkr uart?` | Query UART settings |
+| `@u=baud,data,parity,stop,flow` | `@linkr uart=...` | Set UART mode |
+
+### Response Format
+
+Responses come back over the Management Response indication:
 
 ```text
 OK wifi=connected,ssid=MySSID
 OK webdav=on,url=http://host/dav/
+OK uart=115200,8,N,1,none
+ERR format: @u=115200,8,n,1,n
 ```
 
 The diagnostic command is read-only. It reports the application and Zephyr
@@ -352,25 +428,54 @@ west build -p always -b esp32c3_supermini linkr-bmc-lite -- \
 Both diagnostic modes use the dedicated `linkr-test-marker` flash partition;
 they do not write the ESP32-C3 coredump sector.
 
-## BLE protocol
+## BLE Protocol
 
-The primary API is split into Management Service v1 and Reliable UART Service
-v1. Management supplies API versioning, a stable read-only Device ID,
-request/response IDs and asynchronous events. Reliable UART adds sequence
-numbers, write acknowledgements, confirmed indications and reconnect
-deduplication. Zephyr's built-in Nordic UART Service remains as a best-effort
-raw-UART compatibility path:
+### Architecture
 
-- Service: `6e400001-b5a3-f393-e0a9-e50e24dcca9e`
-- RX write characteristic: `6e400002-b5a3-f393-e0a9-e50e24dcca9e`
-- TX notify characteristic: `6e400003-b5a3-f393-e0a9-e50e24dcca9e`
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Host (Python/Web/C)                       │
+├─────────────────────────────────────────────────────────────┤
+│  Management Service v1    │    Reliable UART Service v1     │
+│  - API versioning         │    - Sequence numbers           │
+│  - Device ID (read-only)  │    - Write acknowledgements     │
+│  - Request/Response IDs   │    - Confirmed indications      │
+│  - Async events           │    - Reconnect deduplication    │
+├─────────────────────────────────────────────────────────────┤
+│                    BLE GATT (ATT MTU 247)                    │
+├─────────────────────────────────────────────────────────────┤
+│              ESP32-C3 Firmware (Zephyr v4.4.1)               │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐ │
+│  │  BLE Stack  │  │  UART Bridge│  │  WiFi/WebSocket     │ │
+│  └─────────────┘  └─────────────┘  └─────────────────────┘ │
+└─────────────────────────────────────────────────────────────┘
+```
 
-The checked-in production configuration offers ATT/L2CAP MTU 247 and LE Data
-Length 251. A negotiated ATT MTU of 247 carries a complete Reliable UART frame
-(12-byte header plus up to 232 UART bytes) in one confirmed transaction. The
-firmware and clients retain fragmentation and a 20-byte fallback for centrals
-that negotiate a smaller MTU. The host terminal prints the detected write
-chunk size when it connects.
+### Service UUIDs
+
+| Service | UUID | Description |
+|---------|------|-------------|
+| Management Service v1 | `6e400001-b5a3-f393-e0a9-e50e24dcca9e` | API versioning, Device ID, config commands |
+| RX Write Characteristic | `6e400002-b5a3-f393-e0a9-e50e24dcca9e` | Host → Device write |
+| TX Notify Characteristic | `6e400003-b5a3-f393-e0a9-e50e24dcca9e` | Device → Host notifications |
+
+### Data Flow
+
+```
+┌──────────────┐     BLE Write      ┌──────────────┐     UART TX     ┌──────────────┐
+│  BLE Central │ ──────────────────> │  ESP32-C3    │ ──────────────> │  SBC/Device  │
+│  (Phone/PC)  │ <────────────────── │  Bridge      │ <────────────── │  (Console)   │
+└──────────────┘   BLE Notify       └──────────────┘    UART RX      └──────────────┘
+```
+
+### MTU and Frame Format
+
+- **ATT MTU**: 247 bytes (negotiated)
+- **LE Data Length**: 251 bytes
+- **Reliable UART Frame**: 12-byte header + up to 232 UART bytes
+- **Fallback**: 20-byte chunks for smaller MTU negotiations
+
+The host terminal prints the detected write chunk size when it connects.
 
 ## BLE terminal
 
@@ -606,3 +711,59 @@ available for touch devices.
 This is useful for quick access on a machine that already has Chrome. The page
 loads xterm.js from jsDelivr, so the Python terminal remains the better choice
 for packaged offline use, automation, and loopback tests.
+
+---
+
+## Configuration Reference
+
+### UART Configuration
+
+| Config Option | Default | Description |
+|---------------|---------|-------------|
+| `CONFIG_LINKR_BLE_BRIDGE_UART_BAUD_RATE` | `115200` | UART baud rate |
+| `CONFIG_LINKR_BLE_BRIDGE_UART_DATA_BITS_*` | `8` | Data bits (5/6/7/8) |
+| `CONFIG_LINKR_BLE_BRIDGE_UART_PARITY_*` | `none` | Parity (none/odd/even) |
+| `CONFIG_LINKR_BLE_BRIDGE_UART_STOP_BITS_*` | `1` | Stop bits (1/2) |
+| `CONFIG_LINKR_BLE_BRIDGE_UART_FLOW_CONTROL_*` | `none` | Flow control (none/rtscts) |
+
+### WiFi Configuration
+
+| Config Option | Default | Description |
+|---------------|---------|-------------|
+| `CONFIG_WIFI_ESP32` | `y` | Enable ESP32 WiFi driver |
+| `CONFIG_WIFI_USAGE_MODE_STA` | `y` | Station mode |
+| `CONFIG_LINKR_BLE_BRIDGE_PERSIST_CREDENTIALS` | `n` | Save WiFi PSK to flash (requires secure boot + flash encryption) |
+
+### WebSocket Bridge Configuration
+
+| Config Option | Default | Description |
+|---------------|---------|-------------|
+| `CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE` | `y` | Enable WebSocket bridge |
+| `CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_PORT` | `80` | WebSocket server port |
+| `CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_MAX_CLIENTS` | `2` | Max concurrent clients |
+| `CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_AUTH_TOKEN` | *(empty)* | Optional auth token (first text frame) |
+
+### BLE Configuration
+
+| Config Option | Default | Description |
+|---------------|---------|-------------|
+| `CONFIG_LINKR_BLE_BRIDGE_CONTROL_COMMANDS` | `y` | Enable management commands (`@u`, `@w`, `@d`, etc.) |
+| `CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION` | `0.2.0` | Reported firmware version |
+
+### Test Configuration
+
+| Config Option | Default | Description |
+|---------------|---------|-------------|
+| `CONFIG_LINKR_BLE_BRIDGE_TEST_UART_ECHO` | `n` | Enable UART RX echo loopback |
+| `CONFIG_LINKR_BLE_BRIDGE_TEST_UART_TX` | `n` | Enable periodic UART TX frames |
+| `CONFIG_LINKR_BLE_BRIDGE_TEST_UART_TX_INTERVAL_MS` | `1000` | TX frame interval (ms) |
+| `CONFIG_LINKR_BLE_BRIDGE_TEST_UART_TX_PAYLOAD` | `linkr-ble-uart-test\r\n` | TX frame payload |
+
+### Board Pinout (ESP32-C3 Super Mini)
+
+| Function | GPIO | Description |
+|----------|------|-------------|
+| UART RX | GPIO20 | Receive data |
+| UART TX | GPIO21 | Transmit data |
+| Activity LED | GPIO8 | Blue LED, flashes on UART activity |
+| Factory Reset | GPIO0 | Short to GND during boot to reset |
