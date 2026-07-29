@@ -1,4 +1,4 @@
-# Linkr BMC Lite
+# Linkr Bee
 
 > 中文文档：[README.zh-CN.md](README.zh-CN.md) | Linkr integration: [BLE accessory API guide (Chinese)](docs/LINKR_BLE_API.zh-CN.md)
 
@@ -75,19 +75,19 @@ the Espressif HAL blobs (`modules/hal_espressif`) present in the manifest.
 From that workspace:
 
 ```sh
-west build -b esp32c3_devkitm linkr-bmc-lite
+west build -b esp32c3_devkitm linkr-bee
 ```
 
 or for DevKitC:
 
 ```sh
-west build -b esp32c3_devkitc linkr-bmc-lite
+west build -b esp32c3_devkitc linkr-bee
 ```
 
 For ESP32-C3 Super Mini:
 
 ```sh
-west build -b esp32c3_supermini linkr-bmc-lite
+west build -b esp32c3_supermini linkr-bee
 ```
 
 ### GitHub Actions build
@@ -98,11 +98,11 @@ to `main`, version tags, pull requests, and manual dispatches using Zephyr
 v4.4.1 with Zephyr SDK 1.0.1. To keep runner disk usage bounded, it installs
 only the `riscv64-zephyr-elf` toolchain instead of the full Zephyr CI image.
 
-Download the `linkr-bmc-lite-esp32c3-supermini` artifact from the completed
+Download the `linkr-bee-esp32c3-supermini` artifact from the completed
 GitHub Actions run. Its flashable image is:
 
 ```text
-linkr-bmc-lite-esp32c3-supermini.bin
+linkr-bee-esp32c3-supermini.bin
 ```
 
 On macOS or Linux, extract the artifact, install
@@ -197,7 +197,7 @@ not collide after reboot.
 A normal build already includes it:
 
 ```sh
-west build -b esp32c3_supermini linkr-bmc-lite
+west build -b esp32c3_supermini linkr-bee
 ```
 
 The ESP32-C3 SoC WiFi driver is `CONFIG_WIFI_ESP32` (defined in
@@ -396,7 +396,7 @@ tools/verify.sh
 Enable UART RX echo loopback:
 
 ```sh
-west build -b esp32c3_devkitm linkr-bmc-lite -- \
+west build -b esp32c3_devkitm linkr-bee -- \
   -DEXTRA_CONF_FILE=test_uart.conf
 ```
 
@@ -413,7 +413,7 @@ Build the hardware loopback verifier after shorting UART0 TX (GPIO21) to RX
 (GPIO20):
 
 ```sh
-west build -p always -b esp32c3_devkitm linkr-bmc-lite -- \
+west build -p always -b esp32c3_devkitm linkr-bee -- \
   -DEXTRA_CONF_FILE=test_loopback.conf
 ```
 
@@ -421,7 +421,7 @@ For a BLE NUS echo diagnostic using the same full firmware feature set (no
 UART wiring required):
 
 ```sh
-west build -p always -b esp32c3_supermini linkr-bmc-lite -- \
+west build -p always -b esp32c3_supermini linkr-bee -- \
   -DEXTRA_CONF_FILE=test_ble_echo.conf
 ```
 
@@ -605,27 +605,27 @@ tools/build_terminal_binary.sh
 Run the packaged terminal:
 
 ```sh
-./dist/linkr-bmc-lite-terminal --uart 115200,8,n,1,n
+./dist/linkr-bee-terminal --uart 115200,8,n,1,n
 ```
 
 Capture raw SBC console bytes while viewing them:
 
 ```sh
-./dist/linkr-bmc-lite-terminal --uart 115200,8,n,1,n --log-file sbc-console.log
+./dist/linkr-bee-terminal --uart 115200,8,n,1,n --log-file sbc-console.log
 ```
 
 If the target does not echo typed characters, use line mode or local echo while
 debugging input:
 
 ```sh
-./dist/linkr-bmc-lite-terminal --uart 115200,8,n,1,n --line-mode --enter cr
-./dist/linkr-bmc-lite-terminal --uart 115200,8,n,1,n --local-echo --debug-io
+./dist/linkr-bee-terminal --uart 115200,8,n,1,n --line-mode --enter cr
+./dist/linkr-bee-terminal --uart 115200,8,n,1,n --local-echo --debug-io
 ```
 
 With GPIO21 shorted to GPIO20, run a BLE-to-UART-to-BLE loopback check:
 
 ```sh
-./dist/linkr-bmc-lite-terminal --loopback-test A --no-terminal
+./dist/linkr-bee-terminal --loopback-test A --no-terminal
 ```
 
 Useful options:

@@ -1,5 +1,5 @@
 /*
- * UART-over-WebSocket LAN bridge for the Linkr BMC Lite bridge.
+ * UART-over-WebSocket LAN bridge for the Linkr Bee bridge.
  *
  * SPDX-License-Identifier: Apache-2.0
  */

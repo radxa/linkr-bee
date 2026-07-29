@@ -14,4 +14,4 @@ manifest:
           - tf-psa-crypto
 
   self:
-    path: linkr-ble
+    path: linkr-bee

@@ -1,4 +1,4 @@
-# Makefile for the C version of the Linkr BMC Lite terminal.
+# Makefile for the C version of the Linkr Bee terminal.
 # This builds a Linux-only binary using BlueZ D-Bus (libdbus).
 # The Python terminal (linkr_ble_terminal.py) remains the preferred
 # cross-platform tool; this C implementation is provided as a reference.

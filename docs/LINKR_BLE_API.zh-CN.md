@@ -1,6 +1,6 @@
-# Linkr BMC Lite 配件 API v1 对接文档
+# Linkr Bee 配件 API v1 对接文档
 
-本文档描述 Linkr 主机与 Linkr BMC Lite 配件之间的当前固件接口。项目尚未发布，
+本文档描述 Linkr 主机与 Linkr Bee 配件之间的当前固件接口。项目尚未发布，
 本次不保留旧版“在 NUS 中识别控制字符串”的兼容行为；文中的接口即 API v1。
 
 ## 1. 设计边界

@@ -1,5 +1,5 @@
 ---
-name: Linkr BMC Lite Terminal
+name: Linkr Bee Terminal
 description: 浏览器里零安装的串口终端——BLE / 局域网直连 ESP32-C3 桥接器
 colors:
   signal-green: "#3fc88a"
@@ -97,7 +97,7 @@ components:
     padding: "7px 14px"
 ---
 
-# Design System: Linkr BMC Lite Terminal
+# Design System: Linkr Bee Terminal
 
 ## 1. Overview
 

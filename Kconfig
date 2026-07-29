@@ -1,4 +1,4 @@
-menu "Linkr BMC Lite bridge"
+menu "Linkr Bee bridge"
 
 config LINKR_BLE_BRIDGE_FIRMWARE_VERSION
 	string "Firmware version"

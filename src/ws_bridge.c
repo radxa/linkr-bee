@@ -1,5 +1,5 @@
 /*
- * UART-over-WebSocket LAN bridge for the Linkr BMC Lite bridge.
+ * UART-over-WebSocket LAN bridge for the Linkr Bee bridge.
  *
  * Exposes the bridge UART as a binary WebSocket endpoint (ws://<ip>/ws)
  * while WiFi has an IP address. UART RX bytes are fanned out to every

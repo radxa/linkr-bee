@@ -1,5 +1,5 @@
 /*
- * WiFi station + WebDAV serial log upload for the Linkr BMC Lite bridge.
+ * WiFi station + WebDAV serial log upload for the Linkr Bee bridge.
  *
  * Enabled by default through CONFIG_LINKR_BLE_BRIDGE_WIFI. When enabled, it:
  *   - loads persisted WebDAV config and, when explicitly enabled, WiFi
