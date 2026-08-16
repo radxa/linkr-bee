@@ -179,6 +179,19 @@ config LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_PAYLOAD
 	default "linkr-loopback-test"
 	depends on LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY
 
+config LINKR_BLE_BRIDGE_UART_RX_DROP_NO_CONN
+	bool "Drop UART capture from the BLE path when no central is connected"
+	default n
+	help
+	  When no BLE central is connected, the Reliable UART path cannot
+	  deliver. With this option the UART-to-BLE thread discards the BLE
+	  delivery of each captured chunk instead of retrying it forever;
+	  the chunk is still staged for the WebSocket bridge and log ring.
+	  Without it, a chunk captured while disconnected is retried until a
+	  central reconnects, stalling the WebSocket bridge feed. Enable on
+	  targets that must support LAN-only (WebSocket) operation without an
+	  active BLE connection.
+
 config LINKR_BLE_BRIDGE_WIFI
 	bool
 	default y
@@ -215,6 +228,12 @@ config LINKR_BLE_BRIDGE_WIFI_RETRY_MS
 	  Delay before retrying a configured WiFi connection after a connection
 	  failure or disconnect.
 
+config LINKR_BLE_BRIDGE_WIFI_CONNECT_STACK
+	int "WiFi connect thread stack size"
+	default 8192
+	range 1024 16384
+	depends on LINKR_BLE_BRIDGE_WIFI
+
 config LINKR_BLE_BRIDGE_WEBDAV
 	bool "Enable WebDAV serial log upload"
 	default y
@@ -234,6 +253,15 @@ config LINKR_BLE_BRIDGE_WEBDAV_UPLOAD_CHUNK
 	default 4096
 	range 256 32768
 	depends on LINKR_BLE_BRIDGE_WEBDAV
+
+config LINKR_BLE_BRIDGE_LOG_RING_SIZE
+	int "WebDAV log staging ring buffer size in bytes"
+	default 8192
+	range 512 32768
+	depends on LINKR_BLE_BRIDGE_WEBDAV
+	help
+	  Bytes of UART RX data staged for periodic WebDAV upload. When the
+	  ring overflows, the oldest bytes are dropped and counted.
 
 config LINKR_BLE_BRIDGE_WIFI_SSID_MAX
 	int "Maximum WiFi SSID length"
@@ -309,6 +337,20 @@ config LINKR_BLE_BRIDGE_WS_BRIDGE_STACK
 	default 4096
 	range 1024 8192
 	depends on LINKR_BLE_BRIDGE_WS_BRIDGE
+
+config LINKR_BLE_BRIDGE_MGMT_TX_QUEUE_DEPTH
+	int "BLE management TX queue depth"
+	default 16
+	range 4 64
+	help
+	  Number of management TX messages that can wait for BLE transmission.
+	  Must hold a full WiFi scan burst (scan results plus the "done"
+	  line enqueued back to back).
+
+config LINKR_BLE_BRIDGE_MGMT_REQUEST_STACK
+	int "BLE management request thread stack size"
+	default 4096
+	range 1024 8192
 
 endmenu
 

@@ -44,7 +44,11 @@ LOG_MODULE_REGISTER(linkr_wifi, CONFIG_LOG_DEFAULT_LEVEL);
 #define PSK_MAX    CONFIG_LINKR_BLE_BRIDGE_WIFI_PSK_MAX
 #define URL_MAX    CONFIG_LINKR_BLE_BRIDGE_WEBDAV_URL_MAX
 #define CRED_MAX   CONFIG_LINKR_BLE_BRIDGE_WEBDAV_CRED_MAX
-#define LOG_RING_SIZE 8192
+/* Staging for periodic WebDAV upload, drained every
+ * CONFIG_LINKR_BLE_BRIDGE_WEBDAV_UPLOAD_INTERVAL_MS; older bytes are
+ * dropped and counted (see log_dropped_bytes). The ESP32-C5 board
+ * overlay trims the default to two upload chunks. */
+#define LOG_RING_SIZE CONFIG_LINKR_BLE_BRIDGE_LOG_RING_SIZE
 #define SETTINGS_MAGIC 0x4c4e4b52u /* "LNKR" */
 #define SETTINGS_VERSION 1u
 /* Leaves room for the completion marker in the control-response queue. */
@@ -439,7 +443,10 @@ static int advance_log_boot_id(void)
     return 0;
 }
 
-#define WIFI_CONNECT_STACK  8192
+/* On the C5 target the measured high-water mark is 1320 B (connect +
+ * DHCP startup path), so the board overlay trims the default;
+ * STACK_SENTINEL guards the margin. */
+#define WIFI_CONNECT_STACK  CONFIG_LINKR_BLE_BRIDGE_WIFI_CONNECT_STACK
 #define WIFI_CONNECT_PRIO   10
 
 struct wifi_connect_msg {

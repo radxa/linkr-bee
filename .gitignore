@@ -15,6 +15,13 @@ tools/linkr_ble_terminal_c
 *.log
 sbc-console*.txt
 sbc-console*.log
+log_*.txt
+
+# Debug/automation scratch files (serial monitor helpers, patches, etc.)
+.tmp_*
+
+# Local tooling state
+.reasonix/
 
 # macOS
 .DS_Store

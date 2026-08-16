@@ -23,7 +23,11 @@ LOG_MODULE_REGISTER(linkr_ble_mgmt, LOG_LEVEL_INF);
 
 #define LINKR_MGMT_RX_TIMEOUT_MS 2000
 #define LINKR_MGMT_REQUEST_QUEUE_DEPTH 2
-#define LINKR_MGMT_TX_QUEUE_DEPTH 16
+/* A WiFi scan burst enqueues at most WIFI_SCAN_MAX_RESULTS results plus
+ * the "done" line back to back (13 messages); the measured high-water mark
+ * on the C5 target was 12, so the board overlay trims the default to just
+ * enough for the full burst. */
+#define LINKR_MGMT_TX_QUEUE_DEPTH CONFIG_LINKR_BLE_BRIDGE_MGMT_TX_QUEUE_DEPTH
 #define LINKR_MGMT_INDICATE_TIMEOUT_MS 5000
 #define LINKR_MGMT_FRAGMENT_MAX 244
 
@@ -375,7 +379,10 @@ static void tx_thread(void)
 	}
 }
 
-K_THREAD_DEFINE(linkr_mgmt_request_tid, 4096, request_thread,
+/* On the C5 target the measured high-water mark is 2140 B, so the
+ * board overlay trims the default; STACK_SENTINEL guards the margin. */
+K_THREAD_DEFINE(linkr_mgmt_request_tid,
+		CONFIG_LINKR_BLE_BRIDGE_MGMT_REQUEST_STACK, request_thread,
 		NULL, NULL, NULL, 7, 0, 0);
 K_THREAD_DEFINE(linkr_mgmt_tx_tid, 2048, tx_thread,
 		NULL, NULL, NULL, 7, 0, 0);

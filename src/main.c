@@ -1388,7 +1388,17 @@ static int uart_forward_chunk(const uint8_t *data, uint16_t len,
 	}
 
 	err = reliable_send_chunk(data, len);
-	if (err && err != -ENOTCONN) {
+	if (err == -ENOTCONN) {
+		if (IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_UART_RX_DROP_NO_CONN)) {
+			/* LAN-only operation: with no BLE central the reliable
+			 * path can never deliver, and retrying forever stalls
+			 * this thread, which then stops feeding the WebSocket
+			 * bridge and the log ring. The chunk was already staged
+			 * above; drop it from the BLE path and keep draining.
+			 */
+			return 0;
+		}
+	} else if (err) {
 		LOG_WRN("Reliable UART delivery retry: %d", err);
 	}
 	return err;
