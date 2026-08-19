@@ -1222,7 +1222,7 @@ async function scanWifi() {
   elements.wifiFeedback.textContent = t("scanning");
   elements.wifiScanButton.disabled = true;
   clearTimeout(state.scanTimer);
-  state.scanTimer = setTimeout(finishScan, 10000);
+  state.scanTimer = setTimeout(finishScan, 50000);
   try {
     await sendControl(WIFI_SCAN_CMD);
     toast(t("scanning"));

@@ -1,0 +1,75 @@
+/ {
+	chosen {
+		zephyr,linkr-ble-uart = &uart1;
+		zephyr,console = &usb_serial;
+		zephyr,shell-uart = &usb_serial;
+	};
+
+	aliases {
+		linkr-factory-reset = &linkr_factory_reset;
+	};
+
+	linkr_factory_reset_keys {
+		compatible = "gpio-keys";
+
+		/* Hold GPIO28 low (short to GND) during boot to reset ownership.
+		 * GPIO28 is the BOOT button on ESP32-C5 DevKitC. */
+		linkr_factory_reset: factory-reset {
+			label = "Linkr factory reset";
+			gpios = <&gpio0 28 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+		};
+	};
+};
+
+/* UART0 on GPIO11/12 (board default) is disabled; UART1 takes those pins. */
+&uart0 {
+	status = "disabled";
+};
+
+/* UART1 on GPIO11(TX)/GPIO12(RX) — bridge serial, matching the
+ * 14_wireless_serial_webserver example's convention. */
+&uart1 {
+	status = "okay";
+	current-speed = <115200>;
+	pinctrl-0 = <&uart1_default>;
+	pinctrl-names = "default";
+};
+
+&pinctrl {
+	uart1_default: uart1_default {
+		group1 {
+			pinmux = <UART1_TX_GPIO11>;
+			output-high;
+		};
+		group2 {
+			pinmux = <UART1_RX_GPIO12>;
+			bias-pull-up;
+		};
+	};
+};
+
+/* Shrink storage partition by 4K to make room for the firmware-test marker,
+ * keeping it out of the default coredump sector. */
+&storage_partition {
+	reg = <0x7b0000 0x2f000>;
+};
+
+&flash0 {
+	partitions {
+		linkr_test_marker_partition: partition@7df000 {
+			label = "linkr-test-marker";
+			reg = <0x7df000 0x1000>;
+		};
+	};
+};
+
+/* Enable the onboard WiFi node used by the single Linkr firmware. */
+&wifi {
+	status = "okay";
+};
+
+/* Use USB Serial/JTAG (built-in USB-C port) for console output.
+ * UART0 (GPIO11/12) is reserved for the bridge UART1. */
+&usb_serial {
+	status = "okay";
+};
