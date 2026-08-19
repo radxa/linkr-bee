@@ -140,6 +140,7 @@ static struct {
 } mgmt_capture;
 #if !IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY)
 static atomic_t uart_rx_dropped;
+static atomic_t uart_reliable_drop_no_conn;
 #endif
 static struct uart_config active_uart_config = {
 	.baudrate = CONFIG_LINKR_BLE_BRIDGE_UART_BAUD_RATE,
@@ -862,11 +863,13 @@ static void diagnostics_response(struct bt_conn *conn)
 {
 	char status[192];
 	uint32_t dropped = 0;
+	uint32_t dropped_no_conn = 0;
 	uint32_t buffered = ring_buf_size_get(&uart_rx_ring);
 	bt_security_t security = bt_conn_get_security(conn);
 
 #if !IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY)
 	dropped = (uint32_t)atomic_get(&uart_rx_dropped);
+	dropped_no_conn = (uint32_t)atomic_get(&uart_reliable_drop_no_conn);
 #endif
 	(void)send_control_response(conn, "@info fw version=%s zephyr=%s\r\n",
 				    CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION,
@@ -876,8 +879,8 @@ static void diagnostics_response(struct bt_conn *conn)
 				    (long long)k_uptime_get(), 0U,
 				    (unsigned int)security);
 	(void)send_control_response(conn,
-				    "@info uart dropped=%u buffer=%u/%u\r\n",
-				    dropped, buffered, UART_RX_BUFFER_SIZE);
+				    "@info uart dropped=%u dropped_no_conn=%u buffer=%u/%u\r\n",
+				    dropped, dropped_no_conn, buffered, UART_RX_BUFFER_SIZE);
 
 	(void)linkr_wifi_diagnostics(status, sizeof(status));
 	(void)send_control_response(conn, "@info wifi %s\r\n", status);
@@ -1390,6 +1393,7 @@ static int uart_forward_chunk(const uint8_t *data, uint16_t len,
 	err = reliable_send_chunk(data, len);
 	if (err == -ENOTCONN) {
 		if (IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_UART_RX_DROP_NO_CONN)) {
+			atomic_inc(&uart_reliable_drop_no_conn);
 			/* LAN-only operation: with no BLE central the reliable
 			 * path can never deliver, and retrying forever stalls
 			 * this thread, which then stops feeding the WebSocket

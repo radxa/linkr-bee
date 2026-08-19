@@ -48,7 +48,17 @@ LOG_MODULE_REGISTER(linkr_wifi, CONFIG_LOG_DEFAULT_LEVEL);
  * CONFIG_LINKR_BLE_BRIDGE_WEBDAV_UPLOAD_INTERVAL_MS; older bytes are
  * dropped and counted (see log_dropped_bytes). The ESP32-C5 board
  * overlay trims the default to two upload chunks. */
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_WEBDAV)
 #define LOG_RING_SIZE CONFIG_LINKR_BLE_BRIDGE_LOG_RING_SIZE
+#define WEBDAV_UPLOAD_CHUNK CONFIG_LINKR_BLE_BRIDGE_WEBDAV_UPLOAD_CHUNK
+#define WEBDAV_UPLOAD_INTERVAL_MS CONFIG_LINKR_BLE_BRIDGE_WEBDAV_UPLOAD_INTERVAL_MS
+#else
+/* Keep the module buildable when WEBDAV is disabled, even if upload
+ * settings are not generated. */
+#define LOG_RING_SIZE CONFIG_LINKR_BLE_BRIDGE_UART_RX_BUFFER_SIZE
+#define WEBDAV_UPLOAD_CHUNK 512
+#define WEBDAV_UPLOAD_INTERVAL_MS 1000
+#endif
 #define SETTINGS_MAGIC 0x4c4e4b52u /* "LNKR" */
 #define SETTINGS_VERSION 1u
 /* Leaves room for the completion marker in the control-response queue. */
@@ -1265,13 +1275,13 @@ static void upload_thread(void *a, void *b, void *c)
     ARG_UNUSED(b);
     ARG_UNUSED(c);
 
-    static uint8_t chunk[CONFIG_LINKR_BLE_BRIDGE_WEBDAV_UPLOAD_CHUNK];
+    static uint8_t chunk[WEBDAV_UPLOAD_CHUNK];
     size_t pending_total = 0;
     uint32_t pending_sequence = 0;
     uint32_t pending_uptime = 0;
 
     for (;;) {
-        k_sleep(K_MSEC(CONFIG_LINKR_BLE_BRIDGE_WEBDAV_UPLOAD_INTERVAL_MS));
+        k_sleep(K_MSEC(WEBDAV_UPLOAD_INTERVAL_MS));
 
         if (!atomic_get(&wifi_connected) || !atomic_get(&wifi_ip_ready) ||
             !atomic_get(&webdav_configured)) {
