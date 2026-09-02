@@ -234,8 +234,8 @@ static bool factory_reset_requested(void)
 		return false;
 	}
 
-	printk("GPIO0 is low; hold GND short for %u ms to factory reset\n",
-	       FACTORY_RESET_CONFIRM_MS);
+	printk("Factory-reset GPIO%u is low; hold GND short for %u ms\n",
+	       factory_reset_gpio.pin, FACTORY_RESET_CONFIRM_MS);
 	for (elapsed_ms = 0; elapsed_ms < FACTORY_RESET_CONFIRM_MS;
 	     elapsed_ms += FACTORY_RESET_SAMPLE_MS) {
 		k_sleep(K_MSEC(FACTORY_RESET_SAMPLE_MS));
@@ -246,7 +246,8 @@ static bool factory_reset_requested(void)
 			return false;
 		}
 		if (value != 0) {
-			printk("Factory reset cancelled: GPIO0 released\n");
+			printk("Factory reset cancelled: GPIO%u released\n",
+			       factory_reset_gpio.pin);
 			return false;
 		}
 	}
@@ -699,21 +700,28 @@ static int uart_status_response(struct bt_conn *conn, const char *prefix)
 }
 
 /* WiFi scan results are asynchronous Management Service events. */
-static void wifi_scan_respond(struct bt_conn *conn, const char *line)
+static int wifi_scan_respond(struct bt_conn *conn, const char *line)
 {
 	char payload[96];
 	uint32_t request_id = (uint32_t)atomic_get(&wifi_scan_request_id);
 	int len = snprintk(payload, sizeof(payload), "%s\r\n", line);
 	uint16_t flags = strstr(line, "done") || strstr(line, "error") ?
 			 LINKR_MGMT_FLAG_FINAL : 0;
+	int err;
 
-	if (len > 0) {
-		(void)linkr_mgmt_event(conn, request_id, flags, payload,
-				       MIN(len, (int)sizeof(payload) - 1));
+	if (len <= 0) {
+		return -EINVAL;
+	}
+	err = linkr_mgmt_event(conn, request_id, flags, payload,
+			       MIN(len, (int)sizeof(payload) - 1));
+	if (err) {
+		LOG_WRN("WiFi scan event queue failed: %d", err);
+		return err;
 	}
 	if (flags & LINKR_MGMT_FLAG_FINAL) {
 		atomic_clear(&wifi_scan_request_id);
 	}
+	return 0;
 }
 
 static void wifi_state_event(uint32_t operation_id,
@@ -722,6 +730,7 @@ static void wifi_state_event(uint32_t operation_id,
 	struct bt_conn *conn;
 	char status[96];
 	char payload[144];
+	int err;
 	int len;
 
 	k_mutex_lock(&conn_lock, K_FOREVER);
@@ -736,13 +745,16 @@ static void wifi_state_event(uint32_t operation_id,
 			"@event wifi operation=%u phase=%s result=%d %s\r\n",
 			operation_id, linkr_wifi_state_name(state), error, status);
 	if (len > 0) {
-		(void)linkr_mgmt_event(conn, operation_id,
+		err = linkr_mgmt_event(conn, operation_id,
 				       state == LINKR_WIFI_STATE_READY ||
 				       state == LINKR_WIFI_STATE_FAILED ||
 				       state == LINKR_WIFI_STATE_OFF ?
 				       LINKR_MGMT_FLAG_FINAL : 0,
 				       payload,
 				       MIN(len, (int)sizeof(payload) - 1));
+		if (err) {
+			LOG_WRN("WiFi state event queue failed: %d", err);
+		}
 	}
 	bt_conn_unref(conn);
 }
@@ -1133,6 +1145,7 @@ static void mgmt_request_received(struct bt_conn *conn, uint32_t request_id,
 				  uint16_t payload_len)
 {
 	bool handled;
+	int err;
 	uint16_t flags = LINKR_MGMT_FLAG_FINAL;
 
 	memset(&mgmt_capture, 0, sizeof(mgmt_capture));
@@ -1159,8 +1172,11 @@ static void mgmt_request_received(struct bt_conn *conn, uint32_t request_id,
 	if (!strncmp(mgmt_capture.data, "ERR ", 4)) {
 		flags |= LINKR_MGMT_FLAG_ERROR;
 	}
-	(void)linkr_mgmt_respond(conn, request_id, flags, mgmt_capture.data,
-				 mgmt_capture.len);
+	err = linkr_mgmt_respond(conn, request_id, flags, mgmt_capture.data,
+				mgmt_capture.len);
+	if (err) {
+		LOG_WRN("Management response queue failed: %d", err);
+	}
 	if (mgmt_capture.release_wifi_operation) {
 		linkr_wifi_release_operation(request_id);
 	}

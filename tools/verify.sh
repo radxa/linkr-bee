@@ -1,22 +1,23 @@
 #!/usr/bin/env sh
-# Build the single supported firmware and check its public host client.
+# Build every supported firmware and check the public host client.
 set -eu
 
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-board=${BOARD:-esp32c3_supermini}
+boards=${BOARD:-"esp32c3_supermini esp32c5_devkitc/esp32c5/hpcore"}
 
-west build -p always -d "$repo_dir/build-verify-wifi" -b "$board" "$repo_dir"
-grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WIFI=y' \
-  "$repo_dir/build-verify-wifi/zephyr/.config"
-grep -qx 'CONFIG_NETWORKING=y' "$repo_dir/build-verify-wifi/zephyr/.config"
-grep -qx 'CONFIG_NET_TCP=y' "$repo_dir/build-verify-wifi/zephyr/.config"
-grep -qx 'CONFIG_HTTP_SERVER=y' "$repo_dir/build-verify-wifi/zephyr/.config"
-grep -qx 'CONFIG_HTTP_SERVER_WEBSOCKET=y' \
-  "$repo_dir/build-verify-wifi/zephyr/.config"
-grep -qx 'CONFIG_ZVFS_EVENTFD_MAX=2' \
-  "$repo_dir/build-verify-wifi/zephyr/.config"
-grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE=y' \
-  "$repo_dir/build-verify-wifi/zephyr/.config"
+for board in $boards; do
+  build_name=$(printf '%s' "$board" | tr '/_' '--')
+  build_dir="$repo_dir/build-verify-$build_name"
+  west build -p always -d "$build_dir" -b "$board" "$repo_dir"
+  config="$build_dir/zephyr/.config"
+  grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WIFI=y' "$config"
+  grep -qx 'CONFIG_NETWORKING=y' "$config"
+  grep -qx 'CONFIG_NET_TCP=y' "$config"
+  grep -qx 'CONFIG_HTTP_SERVER=y' "$config"
+  grep -qx 'CONFIG_HTTP_SERVER_WEBSOCKET=y' "$config"
+  grep -qx 'CONFIG_ZVFS_EVENTFD_MAX=2' "$config"
+  grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE=y' "$config"
+done
 
 python3 -m compileall -q "$repo_dir/tools/linkr_ble_terminal.py"
 sh -n "$repo_dir/tools/serve_web.sh"

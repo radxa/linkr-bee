@@ -32,7 +32,7 @@ typedef void (*linkr_wifi_event_fn)(uint32_t operation_id,
  * final "scan done" marker) back to the BLE client. main.c installs one that
  * emits Management Service events. Defined here so it is available
  * in both the enabled and the no-op stub branches below. */
-typedef void (*linkr_wifi_respond_fn)(struct bt_conn *conn, const char *line);
+typedef int (*linkr_wifi_respond_fn)(struct bt_conn *conn, const char *line);
 
 #ifdef __cplusplus
 extern "C" {

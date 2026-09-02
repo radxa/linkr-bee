@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Linkr Bee mark</title>
+  <desc id="desc">A lowercase b monogram containing a linked honeycomb node.</desc>
+
+  <!-- One continuous b-shaped body. -->
+  <path d="M102 48Q102 20 130 20H190V139L256 101L410 190V368L256 457L102 368Z" fill="#101722"/>
+
+  <!-- Honeycomb and circuit nodes share one continuous line. -->
+  <path d="M256 157L333 202V291L256 336L179 291V202ZM256 130V157M256 336V363" fill="none" stroke="#FFFFFF" stroke-width="26" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="256" cy="126" r="18" fill="#FFFFFF"/>
+  <circle cx="256" cy="367" r="18" fill="#FFFFFF"/>
+  <path d="M256 190L304 218V274L256 302L208 274V218Z" fill="#F6B73C"/>
+</svg>

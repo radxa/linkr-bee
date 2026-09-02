@@ -341,11 +341,11 @@ config LINKR_BLE_BRIDGE_WS_BRIDGE_STACK
 config LINKR_BLE_BRIDGE_MGMT_TX_QUEUE_DEPTH
 	int "BLE management TX queue depth"
 	default 16
-	range 4 64
+	range 16 64
 	help
 	  Number of management TX messages that can wait for BLE transmission.
-	  Must hold a full WiFi scan burst (scan results plus the "done"
-	  line enqueued back to back).
+	  Messages allocate only their actual payload size. The minimum leaves
+	  headroom beyond a full WiFi scan burst (12 results plus completion).
 
 config LINKR_BLE_BRIDGE_MGMT_REQUEST_STACK
 	int "BLE management request thread stack size"

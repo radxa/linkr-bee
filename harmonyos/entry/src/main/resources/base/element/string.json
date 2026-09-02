@@ -1,0 +1,20 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "Linkr Bee Bluetooth serial terminal"
+    },
+    {
+      "name": "entry_ability_desc",
+      "value": "Linkr Bee Bluetooth serial terminal"
+    },
+    {
+      "name": "entry_ability_label",
+      "value": "Linkr Bee"
+    },
+    {
+      "name": "bluetooth_permission_reason",
+      "value": "Find and connect to Linkr Bee Bluetooth serial accessories."
+    }
+  ]
+}

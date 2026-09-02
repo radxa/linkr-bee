@@ -1,0 +1,2 @@
+# Keep the ArkWeb JavaScript proxy method name stable.
+-keep-property-name postMessage

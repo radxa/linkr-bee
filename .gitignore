@@ -23,6 +23,20 @@ log_*.txt
 # Local tooling state
 .reasonix/
 
+# Mobile app dependencies and generated output
+mobile/node_modules/
+mobile/dist/
+harmonyos/dist/
+harmonyos/.idea/
+harmonyos/.hvigor/
+harmonyos/oh_modules/
+harmonyos/local.properties
+harmonyos/entry/oh_modules/
+harmonyos/signing/
+harmonyos/**/*.cer
+harmonyos/**/*.p12
+harmonyos/**/*.p7b
+
 # macOS
 .DS_Store
 

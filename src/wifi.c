@@ -250,9 +250,10 @@ static const char *wifi_security_name(enum wifi_security_type security)
     }
 }
 
-static void wifi_scan_cache_emit(void)
+static int wifi_scan_cache_emit(void)
 {
     char line[WIFI_SSID_MAX_LEN + 48];
+    int err = 0;
 
     k_mutex_lock(&scan_cache_lock, K_FOREVER);
     for (size_t i = 1; i < scan_cache_count; i++) {
@@ -272,9 +273,13 @@ static void wifi_scan_cache_emit(void)
                  WIFI_SSID_MAX_LEN, scan_cache[i].ssid,
                  wifi_security_name(scan_cache[i].security),
                  scan_cache[i].channel, scan_cache[i].rssi);
-        scan_respond(scan_conn, line);
+        err = scan_respond(scan_conn, line);
+        if (err) {
+            break;
+        }
     }
     k_mutex_unlock(&scan_cache_lock);
+    return err;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -464,6 +469,8 @@ struct wifi_connect_msg {
 	char psk[PSK_MAX + 1];
 	uint32_t operation_id;
 	bool wait_for_release;
+	bool commit_config;
+	bool retry;
 };
 
 K_MSGQ_DEFINE(wifi_connect_msgq, sizeof(struct wifi_connect_msg), 2, 4);
@@ -560,6 +567,7 @@ static void wifi_retry_work_handler(struct k_work *work)
 	strncpy(msg.psk, psk, sizeof(msg.psk) - 1);
 	msg.psk[sizeof(msg.psk) - 1] = '\0';
 	msg.operation_id = 0;
+	msg.retry = true;
 	if (k_msgq_put(&wifi_connect_msgq, &msg, K_NO_WAIT) != 0) {
 		schedule_wifi_retry();
 	}
@@ -736,10 +744,12 @@ static void wifi_scan_event_handler(struct net_mgmt_event_callback *cb,
             (const struct wifi_status *)cb->info;
         bool ok = status ? (status->status == 0) : true;
 
-        if (ok) {
-            wifi_scan_cache_emit();
-        }
-        scan_respond(scan_conn, ok ? "@scan done" : "@scan error");
+		if (ok && wifi_scan_cache_emit() != 0) {
+			ok = false;
+		}
+		if (scan_respond(scan_conn, ok ? "@scan done" : "@scan error") != 0) {
+			LOG_WRN("WiFi scan completion event could not be queued");
+		}
         if (scan_conn) {
             bt_conn_unref(scan_conn);
             scan_conn = NULL;
@@ -775,7 +785,7 @@ static void wifi_scan_work_handler(struct k_work *work)
     if (err) {
         LOG_WRN("WiFi scan request failed: %d", err);
         if (scan_respond) {
-            scan_respond(scan_conn, "@scan error");
+            (void)scan_respond(scan_conn, "@scan error");
         }
         wifi_scan_release();
         return;
@@ -811,7 +821,7 @@ void linkr_wifi_release_scan(void)
 	if (err < 0) {
 		LOG_WRN("WiFi scan work submit failed: %d", err);
 		if (scan_respond) {
-			scan_respond(scan_conn, "@scan error");
+			(void)scan_respond(scan_conn, "@scan error");
 		}
 		wifi_scan_release();
 	}
@@ -839,6 +849,9 @@ static void wifi_connect_thread_fn(void *p1, void *p2, void *p3)
 		if (k_msgq_get(&wifi_connect_msgq, &msg, K_FOREVER) != 0) {
 			continue;
 		}
+		if (msg.retry && !atomic_get(&wifi_reconnect_enabled)) {
+			continue;
+		}
 		if (msg.wait_for_release) {
 			uint32_t released_operation_id;
 
@@ -852,6 +865,28 @@ static void wifi_connect_thread_fn(void *p1, void *p2, void *p3)
 		}
 		atomic_set(&wifi_operation_id, msg.operation_id);
 		wifi_publish_state(LINKR_WIFI_STATE_QUEUED, 0);
+		if (msg.commit_config) {
+			int err = 0;
+
+			if (IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_PERSIST_CREDENTIALS)) {
+				err = save_wifi_settings(msg.ssid[0] ? msg.ssid : NULL,
+							 msg.ssid[0] ? msg.psk : NULL);
+			}
+			if (err) {
+				LOG_WRN("commit WiFi settings failed: %d", err);
+				wifi_publish_state(LINKR_WIFI_STATE_FAILED, err);
+				atomic_clear(&wifi_operation_id);
+				continue;
+			}
+
+			k_mutex_lock(&cfg_lock, K_FOREVER);
+			strncpy(wifi_ssid, msg.ssid, sizeof(wifi_ssid) - 1);
+			wifi_ssid[sizeof(wifi_ssid) - 1] = '\0';
+			strncpy(wifi_psk, msg.psk, sizeof(wifi_psk) - 1);
+			wifi_psk[sizeof(wifi_psk) - 1] = '\0';
+			k_mutex_unlock(&cfg_lock);
+			atomic_set(&wifi_reconnect_enabled, msg.ssid[0] ? 1 : 0);
+		}
 
 		if (msg.ssid[0]) {
 			int err;
@@ -892,21 +927,6 @@ int linkr_wifi_set_config_op(const char *ssid, const char *psk,
 		return -EINVAL;
 	}
 
-	if (IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_PERSIST_CREDENTIALS)) {
-		err = save_wifi_settings(ssid, psk ? psk : "");
-		if (err) {
-			LOG_WRN("save WiFi settings failed: %d", err);
-			return err;
-		}
-	}
-
-	k_mutex_lock(&cfg_lock, K_FOREVER);
-	strncpy(wifi_ssid, ssid, sizeof(wifi_ssid) - 1);
-	wifi_ssid[sizeof(wifi_ssid) - 1] = '\0';
-	strncpy(wifi_psk, psk ? psk : "", sizeof(wifi_psk) - 1);
-	wifi_psk[sizeof(wifi_psk) - 1] = '\0';
-	k_mutex_unlock(&cfg_lock);
-
 	memset(&msg, 0, sizeof(msg));
 	strncpy(msg.ssid, ssid, sizeof(msg.ssid) - 1);
 	msg.ssid[sizeof(msg.ssid) - 1] = '\0';
@@ -914,8 +934,8 @@ int linkr_wifi_set_config_op(const char *ssid, const char *psk,
 	msg.psk[sizeof(msg.psk) - 1] = '\0';
 	msg.operation_id = operation_id;
 	msg.wait_for_release = operation_id != 0;
+	msg.commit_config = true;
 
-	atomic_set(&wifi_reconnect_enabled, 1);
 	err = k_msgq_put(&wifi_connect_msgq, &msg, K_NO_WAIT);
 	if (err) {
 		LOG_WRN("WiFi connect msgq put failed: %d", err);
@@ -934,32 +954,16 @@ int linkr_wifi_clear_config_op(uint32_t operation_id)
 	struct wifi_connect_msg msg = {
 		.operation_id = operation_id,
 		.wait_for_release = operation_id != 0,
+		.commit_config = true,
 	};
-	int err = 0;
+	int err = k_msgq_put(&wifi_connect_msgq, &msg, K_NO_WAIT);
 
-	if (IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_PERSIST_CREDENTIALS)) {
-		err = save_wifi_settings(NULL, NULL);
-		if (err) {
-			LOG_WRN("clear WiFi settings failed: %d", err);
-			return err;
-		}
-	}
-
-	k_mutex_lock(&cfg_lock, K_FOREVER);
-	wifi_ssid[0] = '\0';
-	wifi_psk[0] = '\0';
-	k_mutex_unlock(&cfg_lock);
-
-	/* Make "off" authoritative immediately. Remove pending connect/retry work
-	 * before queuing the disconnect so an older request cannot reconnect after
-	 * this command has reported success. */
-	atomic_set(&wifi_reconnect_enabled, 0);
-	(void)k_work_cancel_delayable(&wifi_retry_work);
-	err = k_msgq_put(&wifi_connect_msgq, &msg, K_NO_WAIT);
 	if (err) {
 		LOG_WRN("WiFi disconnect msgq put failed: %d", err);
+		return err;
 	}
-	return err;
+
+	return 0;
 }
 
 int linkr_wifi_clear_config(void)

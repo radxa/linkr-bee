@@ -1,0 +1,22 @@
+{
+  "appId": "guru.linkr.ble",
+  "appName": "Linkr Bee",
+  "webDir": "dist",
+  "android": {
+    "allowMixedContent": true
+  },
+  "server": {
+    "androidScheme": "https",
+    "cleartext": true
+  },
+  "plugins": {
+    "BluetoothLe": {
+      "displayStrings": {
+        "scanning": "正在扫描 Linkr Bee",
+        "cancel": "取消",
+        "availableDevices": "附近的 Linkr Bee",
+        "noDeviceFound": "未发现设备"
+      }
+    }
+  }
+}

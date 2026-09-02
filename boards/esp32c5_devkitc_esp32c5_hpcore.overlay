@@ -12,7 +12,7 @@
 	linkr_factory_reset_keys {
 		compatible = "gpio-keys";
 
-		/* Hold GPIO28 low (short to GND) during boot to reset ownership.
+		/* Hold GPIO28 low during boot to clear settings and configuration.
 		 * GPIO28 is the BOOT button on ESP32-C5 DevKitC. */
 		linkr_factory_reset: factory-reset {
 			label = "Linkr factory reset";

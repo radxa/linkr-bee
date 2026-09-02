@@ -20,6 +20,17 @@ const BLE_DEVICE_NAME_PREFIX = "Linkr BLE UART";
 const WIFI_SCAN_CMD = "@w scan";
 const WIFI_SCAN_PREFIX = "@scan ";
 const WS_CONNECT_TIMEOUT_MS = 15000;
+const bleTransport = window.LinkrBleTransport;
+const coarsePointerMedia = window.matchMedia("(pointer: coarse)");
+const isHarmonyHost =
+  window.LinkrNativeBle?.platform === "harmonyos" ||
+  document.documentElement.dataset.platform === "harmonyos";
+const prefersSettingsDrawer = isHarmonyHost || coarsePointerMedia.matches;
+
+document.documentElement.classList.toggle(
+  "settings-drawer-layout",
+  prefersSettingsDrawer,
+);
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -27,13 +38,9 @@ let rxDecoder = new TextDecoder();
 
 const state = {
   device: null,
-  server: null,
-  rxChar: null,
-  txChar: null,
-  mgmtCommandChar: null,
-  mgmtResponseChar: null,
-  reliableRxChar: null,
-  reliableTxChar: null,
+  nusReady: false,
+  mgmtReady: false,
+  reliableReady: false,
   reliableTxSequence: 1,
   reliableRxSequence: 1,
   reliableMaxPayload: 20,
@@ -53,14 +60,14 @@ const state = {
   termReady: false,
   logBytes: [],
   autoScroll: true,
-  fontSize: 13,
+  fontSize: isHarmonyHost ? 11 : 13,
   fontFamily: "system",
   rxBytes: 0,
   txBytes: 0,
   writeQueue: Promise.resolve(),
   writeGeneration: 0,
   deviceRestored: false,
-  sidebarCollapsed: false,
+  sidebarCollapsed: true,
   scanning: false,
   scanResults: [],
   scanTimer: null,
@@ -97,6 +104,7 @@ const elements = {
   saveButton: $("saveButton"),
   terminalOutput: $("terminalOutput"),
   terminalInputHint: $("terminalInputHint"),
+  focusTerminalButton: $("focusTerminalButton"),
   breakButton: $("breakButton"),
   uartInput: $("uartInput"),
   enterSelect: $("enterSelect"),
@@ -137,7 +145,11 @@ const elements = {
   langButton: $("langButton"),
   panelToggle: $("panelToggle"),
   drawerClose: $("drawerClose"),
+  drawerThemeButton: $("drawerThemeButton"),
+  drawerLangButton: $("drawerLangButton"),
   drawerBackdrop: $("drawerBackdrop"),
+  controls: document.querySelector(".controls"),
+  settingsTabs: document.querySelectorAll("[data-settings-target]"),
   themeColorMeta: $("themeColorMeta"),
   bleModeBtn: $("bleModeBtn"),
   lanModeBtn: $("lanModeBtn"),
@@ -193,6 +205,7 @@ const I18N = {
     title: "Linkr Bee Terminal",
     checking: "Checking Web Bluetooth…",
     supported: "Chrome/Chromium Web Bluetooth over HTTPS or localhost",
+    nativeSupported: "Native Bluetooth LE transport",
     unsupported: "Web Bluetooth unavailable in this browser",
     bleMode: "BLE",
     lanMode: "LAN",
@@ -202,12 +215,15 @@ const I18N = {
     wsMissingHost: "Enter the device address first.",
     wsUnreachable: "WebSocket {url} is unreachable.",
     wsTimeout: "WebSocket connection timed out after 15 seconds.",
-    xtermFail: "xterm.js failed to load; check network access to jsDelivr",
+    xtermFail: "Bundled xterm.js failed to load; check the web assets",
     connected: "Connected",
     disconnected: "Disconnected",
     authorizedDeviceReady: "Authorized device restored; click Connect to reconnect",
     authorizedDeviceFailed: "Saved device unavailable; choose it again",
     connection: "Connection",
+    settingsConnection: "Connect",
+    settingsTerminal: "Serial",
+    settingsNetwork: "Network",
     terminalSettings: "Terminal Settings",
     diagnostics: "Device Diagnostics",
     diagFirmware: "Firmware",
@@ -228,6 +244,7 @@ const I18N = {
     set: "Set",
     off: "Off",
     ctrlC: "Ctrl-C",
+    keyboard: "Keyboard",
     uart: "UART",
     enterKey: "Enter key",
     chunkSize: "Chunk size",
@@ -276,7 +293,7 @@ const I18N = {
     grpSys: "System",
     grpNet: "Network",
     grpPerm: "Permissions & Processes",
-    panel: "Panel",
+    panel: "Settings",
     close: "Close",
     theme: "Theme",
     language: "Language",
@@ -310,6 +327,7 @@ const I18N = {
     title: "Linkr Bee 终端",
     checking: "正在检测 Web Bluetooth…",
     supported: "Chrome/Chromium 需通过 HTTPS 或 localhost 使用 Web Bluetooth",
+    nativeSupported: "手机原生 Bluetooth LE 通道",
     unsupported: "当前浏览器不支持 Web Bluetooth",
     bleMode: "BLE",
     lanMode: "局域网",
@@ -319,12 +337,15 @@ const I18N = {
     wsMissingHost: "请先输入设备地址。",
     wsUnreachable: "无法连接 WebSocket {url}。",
     wsTimeout: "WebSocket 连接超过 15 秒未响应。",
-    xtermFail: "xterm.js 加载失败，请检查对 jsDelivr 的网络访问",
+    xtermFail: "内置 xterm.js 加载失败，请检查网页静态资源",
     connected: "已连接",
     disconnected: "未连接",
     authorizedDeviceReady: "已恢复授权设备，点击「连接」即可快速重连",
     authorizedDeviceFailed: "已授权设备不可用，请重新选择设备",
     connection: "连接",
+    settingsConnection: "连接",
+    settingsTerminal: "串口",
+    settingsNetwork: "网络",
     terminalSettings: "终端设置",
     diagnostics: "设备诊断",
     diagFirmware: "固件",
@@ -345,6 +366,7 @@ const I18N = {
     set: "设置",
     off: "关闭",
     ctrlC: "Ctrl-C",
+    keyboard: "键盘",
     uart: "UART",
     enterKey: "回车键",
     chunkSize: "分片大小",
@@ -393,7 +415,7 @@ const I18N = {
     grpSys: "系统信息",
     grpNet: "网络",
     grpPerm: "权限与进程",
-    panel: "面板",
+    panel: "设置",
     close: "关闭",
     theme: "主题",
     language: "语言",
@@ -518,18 +540,30 @@ function applyTerminalFont(fontId, persist = false) {
 }
 
 function updateToggleLabels() {
-  if (elements.langButton) {
-    const label = elements.langButton.querySelector(".btn-label");
+  [elements.langButton, elements.drawerLangButton].forEach((button) => {
+    const label = button?.querySelector(".btn-label");
     if (label) {
       label.textContent = lang === "zh" ? "EN" : "中";
     }
-  }
-  if (elements.themeButton) {
-    const label = elements.themeButton.querySelector(".btn-label");
+  });
+  [elements.themeButton, elements.drawerThemeButton].forEach((button) => {
+    const label = button?.querySelector(".btn-label");
     if (label) {
       label.textContent = theme === "dark" ? t("light") : t("dark");
     }
-  }
+  });
+}
+
+function toggleTheme() {
+  theme = theme === "dark" ? "light" : "dark";
+  localStorage.setItem(THEME_KEY, theme);
+  applyTheme();
+}
+
+function toggleLanguage() {
+  lang = lang === "zh" ? "en" : "zh";
+  localStorage.setItem(LANG_KEY, lang);
+  applyLang();
 }
 
 function applyTheme() {
@@ -537,6 +571,9 @@ function applyTheme() {
   if (elements.themeColorMeta) {
     elements.themeColorMeta.content = theme === "dark" ? "#090d14" : "#eef2f7";
   }
+  Promise.resolve(window.LinkrNativeUi?.setTheme?.(theme)).catch(() => {
+    // Web and Capacitor hosts do not expose native system-bar controls.
+  });
   document.title = t("title");
   updateXtermTheme();
   updateToggleLabels();
@@ -551,8 +588,10 @@ function setSupportText() {
     elements.supportText.textContent = t("lanHint");
     return;
   }
-  elements.supportText.textContent = navigator.bluetooth
-    ? t("supported")
+  elements.supportText.textContent = bleTransport?.isAvailable()
+    ? bleTransport.platform() === "web"
+      ? t("supported")
+      : t("nativeSupported")
     : t("unsupported");
 }
 
@@ -1293,10 +1332,16 @@ function setConnecting(connecting) {
   const mobileBtn = elements.mobileConnectBtn;
   if (mobileBtn) {
     mobileBtn.classList.toggle("loading", connecting);
-    mobileBtn.disabled = connecting || state.connected;
+    const canConnect =
+      Boolean(state.term) &&
+      (state.mode === "ws" || Boolean(bleTransport?.isAvailable()));
+    mobileBtn.disabled = connecting || (!state.connected && !canConnect);
+    mobileBtn.classList.toggle("btn-primary", !state.connected);
     const mobileLabel = mobileBtn.querySelector(".btn-label");
     if (mobileLabel) {
-      mobileLabel.textContent = connecting ? t("connecting") : t("connect");
+      mobileLabel.textContent = connecting
+        ? t("connecting")
+        : t(state.connected ? "disconnect" : "connect");
     }
   }
 }
@@ -1304,7 +1349,7 @@ function setConnecting(connecting) {
 function setConnected(connected) {
   const isWs = state.mode === "ws";
   const canConnect =
-    Boolean(state.term) && (isWs || Boolean(navigator.bluetooth));
+    Boolean(state.term) && (isWs || Boolean(bleTransport?.isAvailable()));
   const canControl = connected && !isWs;
 
   state.writeGeneration += 1;
@@ -1325,7 +1370,13 @@ function setConnected(connected) {
       : "";
   elements.connectButton.disabled = connected || !canConnect;
   if (elements.mobileConnectBtn) {
-    elements.mobileConnectBtn.disabled = connected || !canConnect;
+    elements.mobileConnectBtn.disabled = !connected && !canConnect;
+    elements.mobileConnectBtn.classList.toggle("btn-primary", !connected);
+    const mobileLabel =
+      elements.mobileConnectBtn.querySelector(".btn-label");
+    if (mobileLabel) {
+      mobileLabel.textContent = t(connected ? "disconnect" : "connect");
+    }
   }
   elements.disconnectButton.disabled = !connected;
   elements.reconnectButton.disabled =
@@ -1335,6 +1386,7 @@ function setConnected(connected) {
   elements.queryButton.disabled = !canControl;
   elements.diagnosticsButton.disabled = !canControl;
   elements.setUartButton.disabled = !canControl;
+  elements.focusTerminalButton.disabled = !connected;
   elements.breakButton.disabled = !connected;
   elements.terminalOutput.classList.toggle("connected", connected);
   elements.terminalInputHint.textContent = t(
@@ -1362,27 +1414,21 @@ function rememberDevice(device, restored = false) {
   if (!device) {
     return;
   }
-  if (state.device && state.device !== device) {
-    state.device.removeEventListener(
-      "gattserverdisconnected",
-      onDisconnected,
-    );
-  }
   state.device = device;
   state.deviceRestored = restored;
-  device.removeEventListener("gattserverdisconnected", onDisconnected);
-  device.addEventListener("gattserverdisconnected", onDisconnected);
   saveSetting(LAST_DEVICE_ID_KEY, device.id);
   setConnected(false);
 }
 
 async function restoreAuthorizedDevice() {
-  if (!navigator.bluetooth?.getDevices) {
+  if (!bleTransport?.isAvailable()) {
     return;
   }
   try {
-    const devices = await navigator.bluetooth.getDevices();
     const lastDeviceId = localStorage.getItem(LAST_DEVICE_ID_KEY);
+    const devices = await bleTransport.getDevices(
+      lastDeviceId ? [lastDeviceId] : [],
+    );
     const candidates = devices.filter(
       (device) =>
         device.id === lastDeviceId ||
@@ -1452,11 +1498,11 @@ async function writeBytes(bytes, sensitive = false) {
     return;
   }
 
-  if (!state.reliableRxChar && !state.rxChar) {
+  if (!state.reliableReady && !state.nusReady) {
     throw new Error("UART RX characteristic is not ready");
   }
 
-  const size = state.reliableRxChar
+  const size = state.reliableReady
     ? state.reliableMaxPayload
     : chunkSize();
   for (let offset = 0; offset < bytes.length; offset += size) {
@@ -1469,24 +1515,21 @@ async function writeBytes(bytes, sensitive = false) {
       );
     }
     try {
-      if (state.reliableRxChar) {
+      if (state.reliableReady) {
         await writeReliableUartChunk(chunk);
         state.txBytes += chunk.length;
         continue;
       }
-      if (
-        state.rxChar.properties.writeWithoutResponse &&
-        state.rxChar.writeValueWithoutResponse
-      ) {
-        await state.rxChar.writeValueWithoutResponse(chunk);
-      } else if (state.rxChar.writeValueWithResponse) {
-        await state.rxChar.writeValueWithResponse(chunk);
-      } else {
-        await state.rxChar.writeValue(chunk);
-      }
+      await bleTransport.write(
+        state.device.id,
+        NUS_SERVICE,
+        NUS_RX,
+        chunk,
+        false,
+      );
       state.txBytes += chunk.length;
     } catch (error) {
-      if (state.reliableRxChar) {
+      if (state.reliableReady) {
         throw error;
       }
       if (size <= 20) {
@@ -1531,8 +1574,12 @@ async function writeReliableUartChunk(payload) {
     let writesCompleted = 0;
     try {
       for (let offset = 0; offset < frame.length; offset += attSize) {
-        await state.reliableRxChar.writeValueWithResponse(
+        await bleTransport.write(
+          state.device.id,
+          RELIABLE_UART_SERVICE,
+          RELIABLE_UART_RX,
           frame.slice(offset, offset + attSize),
+          true,
         );
         writesCompleted += 1;
       }
@@ -1594,7 +1641,7 @@ async function sendControl(command) {
   appendLine(
     `[control] ${sensitive ? `${command.slice(0, 2)}=<redacted>` : command}`,
   );
-  if (state.mode !== "ble" || !state.mgmtCommandChar) {
+  if (state.mode !== "ble" || !state.mgmtReady) {
     throw new Error("Management characteristic is not ready");
   }
 
@@ -1626,7 +1673,13 @@ async function sendControl(command) {
             : `MGMT TX #${requestId} ${chunk.length} bytes`,
         );
       }
-      await state.mgmtCommandChar.writeValueWithResponse(chunk);
+      await bleTransport.write(
+        state.device.id,
+        MGMT_SERVICE,
+        MGMT_COMMAND,
+        chunk,
+        true,
+      );
     }
   });
   state.controlWriteQueue = operation.catch(() => {});
@@ -1650,11 +1703,8 @@ function dispatchManagementMessage(message) {
   }
 }
 
-function onManagementIndication(event) {
-  const value = event.target.value;
-  const bytes = new Uint8Array(
-    value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength),
-  );
+function onManagementIndication(value) {
+  const bytes = new Uint8Array(value);
   let fragment = bytes;
 
   if (!state.mgmtRx) {
@@ -1705,11 +1755,8 @@ function onManagementIndication(event) {
   dispatchManagementMessage({ ...message, payload });
 }
 
-function onReliableUartIndication(event) {
-  const value = event.target.value;
-  const bytes = new Uint8Array(
-    value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength),
-  );
+function onReliableUartIndication(value) {
+  const bytes = new Uint8Array(value);
   let fragment = bytes;
 
   if (!state.reliableRx) {
@@ -1783,28 +1830,23 @@ function handleIncomingBytes(bytes) {
   appendOutput(bytes);
 }
 
-function onNotification(event) {
-  const view = event.target.value;
-  handleIncomingBytes(
-    new Uint8Array(
-      view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength),
-    ),
-  );
-}
-
 function onDisconnected() {
-  state.rxChar = null;
-  state.txChar = null;
-  state.mgmtCommandChar = null;
-  state.mgmtResponseChar = null;
-  state.reliableRxChar = null;
-  state.reliableTxChar = null;
+  const hadSession = Boolean(
+    state.connected ||
+      state.nusReady ||
+      state.mgmtReady ||
+      state.reliableReady ||
+      state.deviceId ||
+      state.ws,
+  );
+  state.nusReady = false;
+  state.mgmtReady = false;
+  state.reliableReady = false;
   state.reliableMaxPayload = 20;
   state.reliableWriteSize = BLE_MAX_ATT_VALUE;
   state.reliableRx = null;
   state.mgmtRx = null;
   state.deviceId = "";
-  state.server = null;
   state.ws = null;
   state.scanning = false;
   state.rxBuffer = "";
@@ -1816,7 +1858,9 @@ function onDisconnected() {
   updateWifiDatalist();
   renderDiagnostics();
   setConnected(false);
-  appendLine("[disconnected]");
+  if (hadSession) {
+    appendLine("[disconnected]");
+  }
 }
 
 function connectWs() {
@@ -1902,18 +1946,20 @@ async function connect() {
     return;
   }
 
-  if (!navigator.bluetooth) {
-    appendLine("[error] Web Bluetooth is not available in this browser");
+  if (!bleTransport?.isAvailable()) {
+    appendLine("[error] Bluetooth LE transport is not available");
     return;
   }
 
   setConnecting(true);
   const restoredAttempt = Boolean(state.device && state.deviceRestored);
+  let device = state.device;
+  let transportConnected = false;
   try {
-    let device = state.device;
+    await bleTransport.initialize();
     if (!device) {
       appendLine(`[scan] requesting Linkr Management v1 device`);
-      device = await navigator.bluetooth.requestDevice({
+      device = await bleTransport.requestDevice({
         filters: [{ services: [MGMT_SERVICE] }],
         optionalServices: [MGMT_SERVICE, NUS_SERVICE, RELIABLE_UART_SERVICE],
       });
@@ -1921,20 +1967,22 @@ async function connect() {
     }
 
     appendLine(`[connect] ${device.name || device.id}`);
-    state.server = await device.gatt.connect();
-    const service = await state.server.getPrimaryService(NUS_SERVICE);
-    state.rxChar = await service.getCharacteristic(NUS_RX);
-    state.txChar = await service.getCharacteristic(NUS_TX);
-    const mgmtService = await state.server.getPrimaryService(MGMT_SERVICE);
-    const protocolChar = await mgmtService.getCharacteristic(MGMT_PROTOCOL);
-    const deviceIdChar = await mgmtService.getCharacteristic(MGMT_DEVICE_ID);
-    state.mgmtCommandChar = await mgmtService.getCharacteristic(MGMT_COMMAND);
-    state.mgmtResponseChar = await mgmtService.getCharacteristic(MGMT_RESPONSE);
-    const protocolValue = await protocolChar.readValue();
+    await bleTransport.connect(device.id, onDisconnected);
+    transportConnected = true;
+    state.nusReady = true;
+    const protocolValue = await bleTransport.read(
+      device.id,
+      MGMT_SERVICE,
+      MGMT_PROTOCOL,
+    );
     if (protocolValue.byteLength < 10 || protocolValue.getUint8(0) !== MGMT_API_MAJOR) {
       throw new Error("Unsupported Linkr Management API version");
     }
-    const deviceIdValue = await deviceIdChar.readValue();
+    const deviceIdValue = await bleTransport.read(
+      device.id,
+      MGMT_SERVICE,
+      MGMT_DEVICE_ID,
+    );
     state.deviceId = Array.from(
       new Uint8Array(
         deviceIdValue.buffer.slice(
@@ -1944,24 +1992,18 @@ async function connect() {
       ),
       (byte) => byte.toString(16).padStart(2, "0"),
     ).join("");
-    await state.mgmtResponseChar.startNotifications();
-    state.mgmtResponseChar.addEventListener(
-      "characteristicvaluechanged",
+    await bleTransport.startNotifications(
+      device.id,
+      MGMT_SERVICE,
+      MGMT_RESPONSE,
       onManagementIndication,
     );
-    const reliableService = await state.server.getPrimaryService(
+    state.mgmtReady = true;
+    const reliableState = await bleTransport.read(
+      device.id,
       RELIABLE_UART_SERVICE,
-    );
-    state.reliableRxChar = await reliableService.getCharacteristic(
-      RELIABLE_UART_RX,
-    );
-    state.reliableTxChar = await reliableService.getCharacteristic(
-      RELIABLE_UART_TX,
-    );
-    const reliableStateChar = await reliableService.getCharacteristic(
       RELIABLE_UART_STATE,
     );
-    const reliableState = await reliableStateChar.readValue();
     if (reliableState.byteLength < 16 || reliableState.getUint8(0) !== 1) {
       throw new Error("Unsupported Reliable UART version");
     }
@@ -1975,11 +2017,13 @@ async function connect() {
     state.reliableWriteSize = BLE_MAX_ATT_VALUE;
     state.reliableTxSequence = reliableState.getUint32(4, true);
     state.reliableRxSequence = reliableState.getUint32(8, true);
-    await state.reliableTxChar.startNotifications();
-    state.reliableTxChar.addEventListener(
-      "characteristicvaluechanged",
+    await bleTransport.startNotifications(
+      device.id,
+      RELIABLE_UART_SERVICE,
+      RELIABLE_UART_TX,
       onReliableUartIndication,
     );
+    state.reliableReady = true;
     state.deviceRestored = false;
     setConnected(true);
     appendLine(`[ready] API v${protocolValue.getUint8(0)}.${protocolValue.getUint8(1)} device=${state.deviceId}`);
@@ -1988,14 +2032,16 @@ async function connect() {
     );
   } catch (error) {
     appendLine(`[error] ${error.message}`);
+    if (transportConnected && device) {
+      try {
+        await bleTransport.disconnect(device.id);
+      } catch (_disconnectError) {
+        // The transport may already have closed after a failed GATT operation.
+      }
+      onDisconnected();
+    }
     if (restoredAttempt) {
       localStorage.removeItem(LAST_DEVICE_ID_KEY);
-      if (state.device) {
-        state.device.removeEventListener(
-          "gattserverdisconnected",
-          onDisconnected,
-        );
-      }
       state.device = null;
       state.deviceRestored = false;
       appendLine(`[restore] ${t("authorizedDeviceFailed")}`);
@@ -2017,24 +2063,35 @@ async function disconnect() {
     return;
   }
 
-  if (state.mgmtResponseChar) {
+  if (state.mgmtReady && state.device) {
     try {
-      await state.mgmtResponseChar.stopNotifications();
+      await bleTransport.stopNotifications(
+        state.device.id,
+        MGMT_SERVICE,
+        MGMT_RESPONSE,
+      );
     } catch (_error) {
       // Ignore disconnect races.
     }
   }
-  if (state.reliableTxChar) {
+  if (state.reliableReady && state.device) {
     try {
-      await state.reliableTxChar.stopNotifications();
+      await bleTransport.stopNotifications(
+        state.device.id,
+        RELIABLE_UART_SERVICE,
+        RELIABLE_UART_TX,
+      );
     } catch (_error) {
       // Ignore disconnect races.
     }
   }
 
-  if (state.device && state.device.gatt.connected) {
-    state.device.gatt.disconnect();
-  } else {
+  if (state.device && (await bleTransport.isConnected())) {
+    await bleTransport.disconnect(state.device.id);
+    if (state.connected) {
+      onDisconnected();
+    }
+  } else if (state.connected) {
     onDisconnected();
   }
 }
@@ -2091,7 +2148,7 @@ function loadPersisted() {
   const fontFamily = localStorage.getItem(FONT_FAMILY_KEY);
   state.fontFamily = TERMINAL_FONTS[fontFamily] ? fontFamily : "system";
   applyTerminalFont(state.fontFamily);
-  state.sidebarCollapsed = localStorage.getItem("linkr-sidebar") === "collapsed";
+  state.sidebarCollapsed = localStorage.getItem("linkr-sidebar") !== "open";
   const savedHost = localStorage.getItem(WS_HOST_KEY);
   if (savedHost && elements.wsHostInput) {
     elements.wsHostInput.value = savedHost;
@@ -2115,22 +2172,114 @@ function saveSetting(key, value) {
 }
 
 const mobileMedia = window.matchMedia("(max-width: 900px)");
+const softKeyboardLayout = {
+  active: false,
+  fullHeight: 0,
+  viewportWidth: 0,
+  raf: 0,
+};
 
 function isMobile() {
   return mobileMedia.matches;
 }
 
+function usesSettingsDrawer() {
+  return isMobile() || prefersSettingsDrawer;
+}
+
+function viewportSize() {
+  const viewport = window.visualViewport;
+  return {
+    width: Math.round(viewport?.width || window.innerWidth),
+    height: Math.round(viewport?.height || window.innerHeight),
+  };
+}
+
+function terminalHasFocus() {
+  const active = document.activeElement;
+  return Boolean(active && elements.terminalOutput.contains(active));
+}
+
+function syncSoftKeyboardLayout() {
+  const { width, height } = viewportSize();
+  if (
+    !softKeyboardLayout.viewportWidth ||
+    Math.abs(width - softKeyboardLayout.viewportWidth) > 64
+  ) {
+    softKeyboardLayout.viewportWidth = width;
+    softKeyboardLayout.fullHeight = height;
+  } else {
+    softKeyboardLayout.fullHeight = Math.max(
+      softKeyboardLayout.fullHeight,
+      height,
+    );
+  }
+
+  const heightLoss = softKeyboardLayout.fullHeight - height;
+  const keyboardHeight = Math.max(120, softKeyboardLayout.fullHeight * 0.2);
+  const compactInputDevice = isHarmonyHost || coarsePointerMedia.matches;
+  const active =
+    compactInputDevice &&
+    heightLoss > keyboardHeight &&
+    (terminalHasFocus() || softKeyboardLayout.active);
+
+  if (active === softKeyboardLayout.active) {
+    return;
+  }
+
+  softKeyboardLayout.active = active;
+  document.documentElement.classList.toggle("soft-keyboard-open", active);
+  scheduleFit();
+}
+
+function scheduleSoftKeyboardLayout() {
+  if (softKeyboardLayout.raf) {
+    return;
+  }
+  softKeyboardLayout.raf = requestAnimationFrame(() => {
+    softKeyboardLayout.raf = 0;
+    syncSoftKeyboardLayout();
+  });
+}
+
+function initSoftKeyboardLayout() {
+  syncSoftKeyboardLayout();
+  window.addEventListener("resize", scheduleSoftKeyboardLayout, {
+    passive: true,
+  });
+  window.visualViewport?.addEventListener(
+    "resize",
+    scheduleSoftKeyboardLayout,
+    { passive: true },
+  );
+  window.visualViewport?.addEventListener(
+    "scroll",
+    scheduleSoftKeyboardLayout,
+    { passive: true },
+  );
+  document.addEventListener("focusin", scheduleSoftKeyboardLayout);
+  document.addEventListener("focusout", () => {
+    window.setTimeout(scheduleSoftKeyboardLayout, 0);
+  });
+  window.addEventListener("orientationchange", () => {
+    softKeyboardLayout.viewportWidth = 0;
+    softKeyboardLayout.fullHeight = 0;
+    scheduleSoftKeyboardLayout();
+  });
+}
+
 function applySidebar() {
   const shell = document.querySelector(".app-shell");
-  if (state.sidebarCollapsed && !isMobile()) {
+  if (state.sidebarCollapsed && !usesSettingsDrawer()) {
     shell.classList.add("controls-hidden");
   }
 }
 
 function toggleSidebar() {
   const shell = document.querySelector(".app-shell");
-  if (isMobile()) {
-    shell.classList.toggle("sidebar-open");
+  if (usesSettingsDrawer()) {
+    const open = shell.classList.toggle("sidebar-open");
+    elements.panelToggle.setAttribute("aria-expanded", String(open));
   } else {
     const hidden = shell.classList.toggle("controls-hidden");
     state.sidebarCollapsed = hidden;
@@ -2138,13 +2287,34 @@ function toggleSidebar() {
   }
 }
 
+function closeSidebar() {
+  const shell = document.querySelector(".app-shell");
+  shell.classList.remove("sidebar-open");
+  elements.panelToggle.setAttribute("aria-expanded", "false");
+}
+
+function setSettingsPage(page) {
+  const next = ["connection", "terminal", "network"].includes(page)
+    ? page
+    : "connection";
+  elements.controls.dataset.settingsActive = next;
+  elements.settingsTabs.forEach((tab) => {
+    const selected = tab.dataset.settingsTarget === next;
+    tab.classList.toggle("active", selected);
+    tab.setAttribute("aria-selected", String(selected));
+  });
+  saveSetting("linkr-settings-page", next);
+}
+
 function syncSidebarForViewport() {
   const shell = document.querySelector(".app-shell");
-  if (isMobile()) {
+  closeSidebar();
+  if (usesSettingsDrawer()) {
     shell.classList.remove("controls-hidden");
   } else {
-    shell.classList.remove("sidebar-open");
+    shell.classList.toggle("controls-hidden", state.sidebarCollapsed);
   }
+  scheduleFit();
 }
 
 function changeFontSize(delta) {
@@ -2167,7 +2337,8 @@ function bind() {
 
   if (elements.mobileConnectBtn) {
     elements.mobileConnectBtn.addEventListener("click", () => {
-      connect().catch((error) => appendLine(`[error] ${error.message}`));
+      const action = state.connected ? disconnect() : connect();
+      action.catch((error) => appendLine(`[error] ${error.message}`));
     });
   }
 
@@ -2219,6 +2390,16 @@ function bind() {
     enqueueBytes(new Uint8Array([0x03]))
       .then(() => state.term?.focus())
       .catch((error) => appendLine(`[error] ${error.message}`));
+  });
+
+  elements.focusTerminalButton.addEventListener("click", () => {
+    state.term?.focus();
+  });
+
+  elements.terminalOutput.addEventListener("pointerdown", () => {
+    if (state.connected) {
+      window.requestAnimationFrame(() => state.term?.focus());
+    }
   });
 
   elements.wifiSetButton.addEventListener("click", () => {
@@ -2331,34 +2512,47 @@ function bind() {
     }
   });
 
-  elements.themeButton.addEventListener("click", () => {
-    theme = theme === "dark" ? "light" : "dark";
-    localStorage.setItem(THEME_KEY, theme);
-    applyTheme();
-  });
-
-  elements.langButton.addEventListener("click", () => {
-    lang = lang === "zh" ? "en" : "zh";
-    localStorage.setItem(LANG_KEY, lang);
-    applyLang();
-  });
+  elements.themeButton.addEventListener("click", toggleTheme);
+  elements.drawerThemeButton?.addEventListener("click", toggleTheme);
+  elements.langButton.addEventListener("click", toggleLanguage);
+  elements.drawerLangButton?.addEventListener("click", toggleLanguage);
 
   elements.bleModeBtn.addEventListener("click", () => setTransportMode("ble"));
   elements.lanModeBtn.addEventListener("click", () => setTransportMode("ws"));
 
   elements.panelToggle.addEventListener("click", toggleSidebar);
-  elements.drawerClose.addEventListener("click", () => {
-    document.querySelector(".app-shell").classList.remove("sidebar-open");
+  elements.drawerClose.addEventListener("click", closeSidebar);
+  elements.drawerBackdrop.addEventListener("click", closeSidebar);
+  elements.settingsTabs.forEach((tab) => {
+    tab.addEventListener("click", () => setSettingsPage(tab.dataset.settingsTarget));
   });
-  elements.drawerBackdrop.addEventListener("click", () => {
-    document.querySelector(".app-shell").classList.remove("sidebar-open");
-  });
+
+  let drawerTouchStart = null;
+  elements.controls.addEventListener("touchstart", (event) => {
+    const touch = event.touches[0];
+    drawerTouchStart = touch ? { x: touch.clientX, y: touch.clientY } : null;
+  }, { passive: true });
+  elements.controls.addEventListener("touchend", (event) => {
+    if (!drawerTouchStart || !usesSettingsDrawer()) {
+      drawerTouchStart = null;
+      return;
+    }
+    const touch = event.changedTouches[0];
+    if (touch) {
+      const dx = touch.clientX - drawerTouchStart.x;
+      const dy = touch.clientY - drawerTouchStart.y;
+      if (dx > 72 && Math.abs(dx) > Math.abs(dy) * 1.2) {
+        closeSidebar();
+      }
+    }
+    drawerTouchStart = null;
+  }, { passive: true });
 
   document.addEventListener("fullscreenchange", onFullscreenChange);
 
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
-      document.querySelector(".app-shell").classList.remove("sidebar-open");
+      closeSidebar();
       if (
         elements.terminalCard.classList.contains(
           "terminal-fullscreen-fallback",
@@ -2395,6 +2589,7 @@ function bind() {
 
 function init() {
   loadPersisted();
+  setSettingsPage(localStorage.getItem("linkr-settings-page") || "connection");
   initTerminal();
   applyTheme();
   applyLang();
@@ -2404,6 +2599,7 @@ function init() {
   }
   setConnected(false);
   bind();
+  initSoftKeyboardLayout();
   syncSidebarForViewport();
   if (mobileMedia.addEventListener) {
     mobileMedia.addEventListener("change", syncSidebarForViewport);

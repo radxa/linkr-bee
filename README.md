@@ -1,8 +1,10 @@
-# Linkr Bee
+<p align="center">
+  <img src="assets/linkr-bee-logo.svg" alt="Linkr Bee" width="520">
+</p>
 
 > 中文文档：[README.zh-CN.md](README.zh-CN.md) | Linkr integration: [BLE accessory API guide (Chinese)](docs/LINKR_BLE_API.zh-CN.md)
 
-Zephyr application for an ESP32-C3 BLE serial bridge. The first milestone is a
+Zephyr application for an ESP32-C3/C5 BLE serial bridge. The first milestone is a
 plain Bluetooth LE UART window:
 
 - BLE peripheral advertising as `Linkr BLE UART-3`
@@ -32,6 +34,7 @@ repository owns the accessory firmware and reference clients.
 - [BLE Terminal](#ble-terminal)
   - [C Terminal for Linux or Linkr Buildroot](#c-terminal-for-linux-or-linkr-buildroot)
 - [Web Bluetooth Terminal](#web-bluetooth-terminal)
+- [Mobile Apps](#mobile-apps)
 - [Configuration Reference](#configuration-reference)
 
 ---
@@ -62,7 +65,7 @@ tools/serve_web.sh  # Open http://127.0.0.1:8765/
 
 ## Supported environment
 
-- Firmware: ESP32-C3 DevKitM, DevKitC, and Super Mini
+- Firmware: ESP32-C3 DevKitM, DevKitC, Super Mini, and ESP32-C5 DevKitC
 - Zephyr: **v4.4.1**
 - Single firmware feature set: BLE UART bridge, WiFi station control,
   anonymous HTTP WebDAV log upload, and UART-over-WebSocket LAN access
@@ -90,23 +93,31 @@ For ESP32-C3 Super Mini:
 west build -b esp32c3_supermini linkr-bee
 ```
 
+For ESP32-C5 DevKitC:
+
+```sh
+west build -b esp32c5_devkitc/esp32c5/hpcore linkr-bee
+```
+
 ### GitHub Actions build
 
-The workflow in `.github/workflows/build.yml` builds one production firmware:
-the default WiFi + BLE configuration for `esp32c3_supermini`. It runs on pushes
-to `main`, version tags, pull requests, and manual dispatches using Zephyr
+The workflow in `.github/workflows/build.yml` builds the default WiFi + BLE
+configuration for both `esp32c3_supermini` and
+`esp32c5_devkitc/esp32c5/hpcore`. It runs on pushes to `main`, version tags,
+pull requests, and manual dispatches using Zephyr
 v4.4.1 with Zephyr SDK 1.0.1. To keep runner disk usage bounded, it installs
 only the `riscv64-zephyr-elf` toolchain instead of the full Zephyr CI image.
 
-Download the `linkr-bee-esp32c3-supermini` artifact from the completed
-GitHub Actions run. Its flashable image is:
+Download the artifact matching the target from the completed GitHub Actions
+run. The flashable images are:
 
 ```text
 linkr-bee-esp32c3-supermini.bin
+linkr-bee-esp32c5-devkitc.bin
 ```
 
 On macOS or Linux, extract the artifact, install
-[`esptool`](https://docs.espressif.com/projects/esptool/en/latest/esp32c3/),
+[`esptool`](https://docs.espressif.com/projects/esptool/en/latest/),
 connect the ESP32-C3 Super Mini, and run:
 
 ```sh
@@ -119,11 +130,11 @@ If more than one serial device is connected, select it explicitly:
 ./flash_firmware.sh --port /dev/cu.usbmodemXXXX
 ```
 
-The script writes the merged ESP32-C3 image at `0x0` without a full-chip erase.
-Only the image sectors are rewritten; the settings partition at `0x3b0000`
-is left untouched, so normal upgrades preserve the BLE identity and saved
-configuration. Use the GPIO0 + GND factory-reset procedure when those
-settings must be cleared. The artifact also contains `FLASHING.txt`,
+The script infers the target from the standard image name and writes C3 at
+`0x0` or C5 at `0x2000` without a full-chip erase. Only image sectors are
+rewritten, so normal upgrades preserve the BLE identity and saved
+configuration. Use the board-specific factory-reset input when those settings
+must be cleared. The artifact also contains `FLASHING.txt`,
 `firmware.json`, the ELF, linker map, final Kconfig, runner metadata, and
 `SHA256SUMS` for debugging and traceability. The workflow fails if the default
 WiFi, networking, Bluetooth, or binary-output configuration is absent.
@@ -131,7 +142,8 @@ WiFi, networking, Bluetooth, or binary-output configuration is absent.
 ## UART selection
 
 The app reads the UART from the devicetree chosen node
-`zephyr,linkr-ble-uart`.  The provided ESP32-C3 overlays bind it to `uart0`.
+`zephyr,linkr-ble-uart`. The provided ESP32-C3 overlays bind it to `uart0`;
+the ESP32-C5 DevKitC overlay binds it to `uart1` on GPIO11/12.
 If no bridge-specific chosen node is present, the app falls back to
 `zephyr,shell-uart`, then `zephyr,console`.
 
@@ -253,7 +265,7 @@ this development build in an untrusted radio environment.
 
 | Item | Default / persistence rule | Clear or transfer |
 | --- | --- | --- |
-| BLE identity/address | A random-static Linkr identity is persisted in NVS and reused across normal reboots | GPIO0 factory reset generates a new identity/address so hosts do not reuse stale device-name caches |
+| BLE identity/address | A random-static Linkr identity is persisted in NVS and reused across normal reboots | Board-specific factory reset generates a new identity/address so hosts do not reuse stale device-name caches |
 | WiFi SSID/PSK | RAM-only by default; `CONFIG_LINKR_BLE_BRIDGE_PERSIST_CREDENTIALS=y` saves it and reconnects on boot | `@w off` disables it and disconnects; factory reset erases it |
 | WebDAV target | Anonymous URL is persisted independently of WiFi credential persistence | `@d off` disables it; factory reset erases it |
 | Upload boot ID | Persisted when the uploader reserves a new boot ID, preventing filename reuse after reboot | Factory reset erases it |
@@ -266,14 +278,15 @@ unencrypted device, an SSID/PSK written to NVS can be recovered from flash.
 `@w off` is a functional clear, not a validated secure-flash wipe; use factory
 reset before disposal or reprovisioning.
 
-To factory-reset a physical unit, reset or power-cycle it with **GPIO0 shorted
-to GND** and keep the short in place for two seconds. The firmware erases the
+To factory-reset a physical unit, reset or power-cycle it with the reset input
+shorted to GND and keep the short in place for two seconds: GPIO0 on C3 boards,
+or GPIO28/BOOT on the C5 DevKitC. The firmware erases the
 entire `storage_partition` before Bluetooth or settings load, clearing Bluetooth
 identity data, Linkr WiFi/WebDAV configuration, and the upload boot counter.
 The device then advertises with a newly generated random-static BLE
 identity/address. This makes macOS, Chrome, and other centrals create a fresh
-device record instead of retaining stale cached metadata. Do not tie GPIO0 to
-GND permanently, and treat
+device record instead of retaining stale cached metadata. Do not tie the reset
+input to GND permanently, and treat
 access to that pad or switch as access to factory reset. It does not erase
 firmware, the test-marker partition, or coredump storage.
 
@@ -444,7 +457,7 @@ they do not write the ESP32-C3 coredump sector.
 ├─────────────────────────────────────────────────────────────┤
 │                    BLE GATT (ATT MTU 247)                    │
 ├─────────────────────────────────────────────────────────────┤
-│              ESP32-C3 Firmware (Zephyr v4.4.1)               │
+│            ESP32-C3/C5 Firmware (Zephyr v4.4.1)              │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐ │
 │  │  BLE Stack  │  │  UART Bridge│  │  WiFi/WebSocket     │ │
 │  └─────────────┘  └─────────────┘  └─────────────────────┘ │
@@ -708,9 +721,41 @@ line-input box. BLE writes are serialized so fast typing and paste operations do
 not start overlapping GATT writes. The on-screen `Ctrl-C` button remains
 available for touch devices.
 
-This is useful for quick access on a machine that already has Chrome. The page
-loads xterm.js from jsDelivr, so the Python terminal remains the better choice
-for packaged offline use, automation, and loopback tests.
+This is useful for quick access on a machine that already has Chrome. The fixed
+xterm.js and addon-fit versions are bundled under `web/vendor`, so the terminal
+also works on an offline provisioning network.
+
+---
+
+## Mobile apps
+
+The same terminal UI, Management v1 implementation, and Reliable UART v1
+implementation can also be packaged as phone apps. The browser remains an
+independent option.
+
+| Platform | Native integration | Current repository state |
+| --- | --- | --- |
+| Android | Capacitor and native BLE plugin | Project generated; web assets and plugin sync verified |
+| iOS | Capacitor and CoreBluetooth plugin | Project generated; web assets and plugin sync verified |
+| HarmonyOS NEXT | ArkWeb UI and ArkTS BLE host over `JavaScriptProxy` | API 26 Stage project implemented; ArkTS type check and unsigned HAP build verified, device validation pending |
+
+Build the shared assets and synchronize the generated Android/iOS projects:
+
+```sh
+cd mobile
+npm install
+npm run build
+npm run cap:sync
+npm run build:harmony:hap
+```
+
+See [`mobile/README.md`](mobile/README.md) for Android/iOS requirements and
+[`harmonyos/README.md`](harmonyos/README.md) plus
+[`harmonyos/BRIDGE_PROTOCOL.md`](harmonyos/BRIDGE_PROTOCOL.md) for the HarmonyOS
+host contract, debug signing, and host-side tests. The first mobile release is
+foreground-only. The firmware also
+currently permits open BLE access, so public distribution should wait for a
+defined ownership or authorization policy.
 
 ---
 

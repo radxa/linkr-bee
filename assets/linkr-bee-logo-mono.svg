@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 320" role="img" aria-labelledby="title desc">
+  <title id="title">Linkr Bee monochrome logo</title>
+  <desc id="desc">Monochrome Linkr Bee project logo.</desc>
+
+  <g transform="translate(34 17) scale(.56)">
+    <path d="M102 48Q102 20 130 20H190V139L256 101L410 190V368L256 457L102 368Z" fill="#101722"/>
+    <path d="M256 157L333 202V291L256 336L179 291V202ZM256 130V157M256 336V363" fill="none" stroke="#FFFFFF" stroke-width="26" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="256" cy="126" r="18" fill="#FFFFFF"/>
+    <circle cx="256" cy="367" r="18" fill="#FFFFFF"/>
+  </g>
+
+  <text x="350" y="211" fill="#101722" font-family="Inter, 'Avenir Next', ui-sans-serif, system-ui, sans-serif" font-size="146" font-weight="720" letter-spacing="-5">Linkr Bee</text>
+</svg>

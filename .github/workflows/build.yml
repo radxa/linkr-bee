@@ -16,14 +16,27 @@ concurrency:
   group: firmware-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  BOARD: esp32c3_supermini
-
 jobs:
   firmware:
-    name: ESP32-C3 Super Mini
+    name: ${{ matrix.name }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ESP32-C3 Super Mini
+            board: esp32c3_supermini
+            slug: esp32c3-supermini
+            chip: esp32c3
+            flash_address: "0x0"
+            factory_reset: GPIO0 to GND for two seconds during boot
+          - name: ESP32-C5 DevKitC
+            board: esp32c5_devkitc/esp32c5/hpcore
+            slug: esp32c5-devkitc
+            chip: esp32c5
+            flash_address: "0x2000"
+            factory_reset: GPIO28 BOOT to GND for two seconds during boot
 
     steps:
       - name: Check out repository
@@ -58,7 +71,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          west build -p always -b "${BOARD}" \
+          west build -p always -b "${{ matrix.board }}" \
             -d "${GITHUB_WORKSPACE}/app/build" "${GITHUB_WORKSPACE}/app"
 
       - name: Verify default feature set
@@ -86,11 +99,11 @@ jobs:
           mkdir -p "${output}"
 
           cp "${zephyr}/zephyr.bin" \
-            "${output}/linkr-bee-esp32c3-supermini.bin"
+            "${output}/linkr-bee-${{ matrix.slug }}.bin"
           cp "${zephyr}/zephyr.elf" \
-            "${output}/linkr-bee-esp32c3-supermini.elf"
+            "${output}/linkr-bee-${{ matrix.slug }}.elf"
           cp "${zephyr}/zephyr.map" \
-            "${output}/linkr-bee-esp32c3-supermini.map"
+            "${output}/linkr-bee-${{ matrix.slug }}.map"
           cp "${zephyr}/.config" "${output}/firmware.config"
           cp "${zephyr}/runners.yaml" "${output}/runners.yaml"
           cp "${GITHUB_WORKSPACE}/app/tools/flash_firmware.sh" \
@@ -98,16 +111,16 @@ jobs:
           chmod +x "${output}/flash_firmware.sh"
 
           cd "${output}"
-          sha256sum linkr-bee-esp32c3-supermini.bin > SHA256SUMS
-          version="$(sed -n 's/^CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION=\"\\(.*\\)\"/\\1/p' firmware.config)"
+          sha256sum "linkr-bee-${{ matrix.slug }}.bin" > SHA256SUMS
+          version="$(sed -n 's/^CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION=\"\(.*\)\"/\1/p' firmware.config)"
           cat > firmware.json <<EOF
           {
             "project": "linkr-bee",
             "version": "${version}",
-            "board": "esp32c3_supermini",
-            "chip": "esp32c3",
-            "flash_address": "0x0",
-            "image": "linkr-bee-esp32c3-supermini.bin",
+            "board": "${{ matrix.board }}",
+            "chip": "${{ matrix.chip }}",
+            "flash_address": "${{ matrix.flash_address }}",
+            "image": "linkr-bee-${{ matrix.slug }}.bin",
             "git_commit": "${GITHUB_SHA}"
           }
           EOF
@@ -118,14 +131,14 @@ jobs:
           Select a port explicitly when more than one device is connected:
             ./flash_firmware.sh --port /dev/cu.usbmodemXXXX
 
-          The script preserves the settings partition. GPIO0 + GND factory
-          reset remains the supported way to clear owner and configuration.
+          The script preserves the settings partition.
+          Factory reset: ${{ matrix.factory_reset }}.
           EOF
 
       - name: Upload firmware
         uses: actions/upload-artifact@v4
         with:
-          name: linkr-bee-esp32c3-supermini
+          name: linkr-bee-${{ matrix.slug }}
           path: app/dist/
           if-no-files-found: error
           retention-days: 30

@@ -23,10 +23,6 @@ LOG_MODULE_REGISTER(linkr_ble_mgmt, LOG_LEVEL_INF);
 
 #define LINKR_MGMT_RX_TIMEOUT_MS 2000
 #define LINKR_MGMT_REQUEST_QUEUE_DEPTH 2
-/* A WiFi scan burst enqueues at most WIFI_SCAN_MAX_RESULTS results plus
- * the "done" line back to back (13 messages); the measured high-water mark
- * on the C5 target was 12, so the board overlay trims the default to just
- * enough for the full burst. */
 #define LINKR_MGMT_TX_QUEUE_DEPTH CONFIG_LINKR_BLE_BRIDGE_MGMT_TX_QUEUE_DEPTH
 #define LINKR_MGMT_INDICATE_TIMEOUT_MS 5000
 #define LINKR_MGMT_FRAGMENT_MAX 244
@@ -63,7 +59,7 @@ struct linkr_mgmt_tx_message {
 	uint16_t flags;
 	uint16_t payload_len;
 	uint8_t type;
-	uint8_t payload[LINKR_MGMT_MAX_PAYLOAD];
+	uint8_t payload[];
 };
 
 struct linkr_mgmt_rx_state {
@@ -107,8 +103,19 @@ static int indication_result;
 
 K_MSGQ_DEFINE(request_queue, sizeof(struct linkr_mgmt_request),
 	      LINKR_MGMT_REQUEST_QUEUE_DEPTH, 4);
-K_MSGQ_DEFINE(tx_queue, sizeof(struct linkr_mgmt_tx_message),
+K_MSGQ_DEFINE(tx_queue, sizeof(struct linkr_mgmt_tx_message *),
 	      LINKR_MGMT_TX_QUEUE_DEPTH, 4);
+
+static void tx_message_free(struct linkr_mgmt_tx_message *message)
+{
+	if (!message) {
+		return;
+	}
+	if (message->conn) {
+		bt_conn_unref(message->conn);
+	}
+	k_free(message);
+}
 
 static void rx_reset_locked(void)
 {
@@ -368,14 +375,14 @@ static void request_thread(void)
 
 static void tx_thread(void)
 {
-	struct linkr_mgmt_tx_message message;
+	struct linkr_mgmt_tx_message *message;
 
 	for (;;) {
 		k_msgq_get(&tx_queue, &message, K_FOREVER);
-		if (message.conn) {
-			tx_message_send(&message);
-			bt_conn_unref(message.conn);
+		if (message && message->conn) {
+			tx_message_send(message);
 		}
+		tx_message_free(message);
 	}
 }
 
@@ -420,7 +427,7 @@ int linkr_mgmt_init(linkr_mgmt_request_handler_t handler)
 void linkr_mgmt_disconnected(struct bt_conn *conn)
 {
 	struct linkr_mgmt_request request;
-	struct linkr_mgmt_tx_message message;
+	struct linkr_mgmt_tx_message *message;
 
 	k_mutex_lock(&rx_lock, K_FOREVER);
 	if (rx_state.conn == conn) {
@@ -435,9 +442,7 @@ void linkr_mgmt_disconnected(struct bt_conn *conn)
 		}
 	}
 	while (k_msgq_get(&tx_queue, &message, K_NO_WAIT) == 0) {
-		if (message.conn) {
-			bt_conn_unref(message.conn);
-		}
+		tx_message_free(message);
 	}
 	k_sem_give(&indication_done);
 }
@@ -445,29 +450,30 @@ void linkr_mgmt_disconnected(struct bt_conn *conn)
 int linkr_mgmt_send(struct bt_conn *conn, uint8_t type, uint32_t request_id,
 		    uint16_t flags, const void *payload, uint16_t payload_len)
 {
-	struct linkr_mgmt_tx_message message = {
-		.conn = conn ? bt_conn_ref(conn) : NULL,
-		.request_id = request_id,
-		.flags = flags,
-		.payload_len = payload_len,
-		.type = type,
-	};
+	struct linkr_mgmt_tx_message *message;
 	int err;
 
 	if (!conn || !payload || payload_len == 0 ||
 	    payload_len > LINKR_MGMT_MAX_PAYLOAD ||
 	    (type != LINKR_MGMT_MSG_RESPONSE &&
 	     type != LINKR_MGMT_MSG_EVENT)) {
-		if (message.conn) {
-			bt_conn_unref(message.conn);
-		}
 		return -EINVAL;
 	}
 
-	memcpy(message.payload, payload, payload_len);
+	message = k_malloc(sizeof(*message) + payload_len);
+	if (!message) {
+		return -ENOMEM;
+	}
+	message->conn = bt_conn_ref(conn);
+	message->request_id = request_id;
+	message->flags = flags;
+	message->payload_len = payload_len;
+	message->type = type;
+	memcpy(message->payload, payload, payload_len);
+
 	err = k_msgq_put(&tx_queue, &message, K_NO_WAIT);
-	if (err && message.conn) {
-		bt_conn_unref(message.conn);
+	if (err) {
+		tx_message_free(message);
 	}
 	return err;
 }

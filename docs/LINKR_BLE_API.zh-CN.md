@@ -32,8 +32,8 @@ Management 响应不会再出现在串口数据中，串口内容也不会被误
 - 扫描必须按 Management Service UUID 过滤，不能依赖名称。
 
 BLE 地址是 settings 中持久化的 random-static identity。普通升级和重启不改变
-地址；GPIO0 与 GND 短接并保持到上电后两秒会恢复出厂，擦除 settings，并在
-下次启动生成新地址。
+地址；将板级恢复输入与 GND 短接并保持到上电后两秒会恢复出厂（C3 为 GPIO0，
+C5 DevKitC 为 GPIO28/BOOT），擦除 settings，并在下次启动生成新地址。
 
 Device ID 是只读 16 字节值：前 10 字节是 Linkr 命名空间，后 6 字节来自芯片
 硬件 ID。它与设备名和 BLE 地址无关，恢复出厂后仍保持不变。Linkr 应使用
@@ -233,7 +233,7 @@ TX。若应用发现 sequence gap，应停止转发并重连/重读 State，不�
 ## 9. 安全模型
 
 当前开发固件关闭 BLE pairing、bonding 和 owner 限制。任何附近的 BLE central
-都能连接、读 UART、改 WiFi/WebDAV/WebSocket 配置。GPIO0 恢复出厂仍会清除
+都能连接、读 UART、改 WiFi/WebDAV/WebSocket 配置。板级恢复出厂仍会清除
 settings 并生成新 BLE identity，但它不是无线访问控制。
 
 量产前必须另行确定配对/授权模型；API v1 的通道分离、Device ID、request ID
@@ -251,7 +251,8 @@ settings 并生成新 BLE identity，但它不是无线访问控制。
 - Reliable UART 重复 sequence 不会重复写 UART；
 - indication 期间断线，重连订阅后相同 sequence 可重发并被客户端去重；
 - NUS 写入 `@i?` 会原样到 UART，不触发管理命令；
-- GPIO0 + GND 恢复出厂后 BLE 地址变化，Device ID 保持不变。
+- 恢复出厂后 BLE 地址变化，Device ID 保持不变。C3 使用 GPIO0，
+  C5 DevKitC 使用 GPIO28（BOOT），均在启动时接地保持两秒。
 
 参考实现：网页端 `web/app.js`，Python/bleak 客户端
 `tools/linkr_ble_terminal.py`。

@@ -1,8 +1,10 @@
-# Linkr Bee
+<p align="center">
+  <img src="assets/linkr-bee-logo.svg" alt="Linkr Bee" width="520">
+</p>
 
 > English: [README.md](README.md) | Linkr 端接入：[BLE 配件 API 对接文档](docs/LINKR_BLE_API.zh-CN.md)
 
-基于 Zephyr 的 ESP32-C3 BLE 串口桥应用。第一个里程碑是一个纯粹的蓝牙 LE UART 窗口：
+基于 Zephyr 的 ESP32-C3/C5 BLE 串口桥应用。第一个里程碑是一个纯粹的蓝牙 LE UART 窗口：
 
 - BLE 外设以 `Linkr BLE UART-3` 广播
 - 兼容 Nordic UART Service 的 UUID
@@ -31,6 +33,7 @@ Linkr 端通过上方 BLE 配件 API 文档实现发现、串口、配网和局�
 - [BLE 终端](#ble-终端)
   - [Linux 或 Linkr Buildroot 的 C 终端](#linux-或-linkr-buildroot-的-c-终端)
 - [Web Bluetooth 终端](#web-bluetooth-终端)
+- [手机 App](#手机-app)
 - [配置参考](#配置参考)
 
 ---
@@ -61,7 +64,7 @@ tools/serve_web.sh  # 打开 http://127.0.0.1:8765/
 
 ## 支持环境
 
-- 固件目标：ESP32-C3 DevKitM、DevKitC 与 Super Mini
+- 固件目标：ESP32-C3 DevKitM、DevKitC、Super Mini 与 ESP32-C5 DevKitC
 - Zephyr：**v4.4.1**
 - 唯一固件功能：BLE UART bridge、WiFi station 控制、匿名 HTTP WebDAV 日志上传
   与 UART-over-WebSocket 局域网访问
@@ -89,15 +92,21 @@ ESP32-C3 Super Mini：
 west build -b esp32c3_supermini linkr-bee
 ```
 
+ESP32-C5 DevKitC：
+
+```sh
+west build -b esp32c5_devkitc/esp32c5/hpcore linkr-bee
+```
+
 ### GitHub Actions 构建与刷写
 
-`.github/workflows/build.yml` 只构建一个量产固件：面向
-`esp32c3_supermini` 的默认 WiFi + BLE 配置。它会在 `main` push、版本 tag、
-pull request 和手动触发时运行，使用 Zephyr v4.4.1 与 Zephyr SDK 1.0.1。
+`.github/workflows/build.yml` 使用矩阵构建 `esp32c3_supermini` 与
+`esp32c5_devkitc/esp32c5/hpcore` 的默认 WiFi + BLE 配置。它会在 `main`
+push、版本 tag、pull request 和手动触发时运行，使用 Zephyr v4.4.1 与
+Zephyr SDK 1.0.1。
 
-从完成的 Actions run 下载 `linkr-bee-esp32c3-supermini` artifact，解压后在
-macOS 或 Linux 安装
-[`esptool`](https://docs.espressif.com/projects/esptool/en/latest/esp32c3/)，
+从完成的 Actions run 下载与目标板匹配的 artifact，解压后在 macOS 或 Linux 安装
+[`esptool`](https://docs.espressif.com/projects/esptool/en/latest/)，
 连接设备并执行：
 
 ```sh
@@ -110,15 +119,18 @@ macOS 或 Linux 安装
 ./flash_firmware.sh --port /dev/cu.usbmodemXXXX
 ```
 
-脚本会把合并后的 ESP32-C3 镜像写入 `0x0`，但不执行整片擦除。它只重写镜像
-覆盖的扇区，不会触碰位于 `0x3b0000` 的 settings 分区，因此普通升级会保留
-BLE identity 和已保存配置；需要清除它们时仍使用 GPIO0 + GND 恢复
-出厂。artifact 还包含 `FLASHING.txt`、`firmware.json`、ELF、linker map、
+脚本会按标准镜像名自动选择芯片，并将 C3 写入 `0x0`、C5 写入 `0x2000`，
+但不执行整片擦除。它只重写镜像覆盖的扇区，因此普通升级会保留 BLE identity
+和已保存配置；需要清除它们时使用板型对应的恢复出厂输入。artifact 还包含
+`FLASHING.txt`、`firmware.json`、ELF、linker map、
 最终 Kconfig、runner metadata 与 `SHA256SUMS`，便于调试和追溯。
 
 ## UART 选择
 
-应用从 devicetree chosen 节点 `zephyr,linkr-ble-uart` 读取 UART。提供的 ESP32-C3 overlay 将其绑定到 `uart0`。若不存在桥专用 chosen 节点，应用回退到 `zephyr,shell-uart`，再回退到 `zephyr,console`。
+应用从 devicetree chosen 节点 `zephyr,linkr-ble-uart` 读取 UART。提供的
+ESP32-C3 overlay 将其绑定到 `uart0`；ESP32-C5 DevKitC overlay 将其绑定到
+GPIO11/12 上的 `uart1`。若不存在桥专用 chosen 节点，应用回退到
+`zephyr,shell-uart`，再回退到 `zephyr,console`。
 
 在 `esp32c3_supermini` 上，`uart0` 用于桥流量：
 
@@ -202,14 +214,19 @@ Web 终端(`web/`)的「连接」卡片里有 BLE/局域网切换;局域网模�
 
 | 项目 | 默认值 / 持久化规则 | 清除或移交方式 |
 | --- | --- | --- |
-| BLE identity/address | 随机静态 Linkr identity 持久化在 NVS，正常重启继续复用 | GPIO0 恢复出厂会生成新的 identity/address，避免系统沿用旧名称缓存 |
+| BLE identity/address | 随机静态 Linkr identity 持久化在 NVS，正常重启继续复用 | 板级恢复出厂会生成新的 identity/address，避免系统沿用旧名称缓存 |
 | WiFi SSID/PSK | 默认仅 RAM；`CONFIG_LINKR_BLE_BRIDGE_PERSIST_CREDENTIALS=y` 才保存并在启动时重连 | `@w off` 停用并断开；恢复出厂会擦除 |
 | WebDAV 目标 | 匿名 URL 独立于 WiFi 凭据持久化设置，默认也会保存 | `@d off` 停用；恢复出厂会擦除 |
 | 上传 boot ID | 上传器分配新的 boot ID 时保存，避免重启后复用文件名 | 恢复出厂会擦除 |
 
 保存的 WiFi 和 WebDAV 配置都是单条、带版本的 settings 记录；启动时会忽略无效或不安全的记录。凭据持久化 Kconfig 是量产前提，不是运行时检测：只有在 secure boot 与 flash encryption 确实已完成烧录时才能开启。未加密设备把 SSID/PSK 写入 NVS 后，仍可能被从 flash 读取。`@w off` 是功能性清除，不是经过验证的安全擦除；设备报废或重新配置时应使用恢复出厂。
 
-恢复出厂时，在设备复位或上电后将 **GPIO0 与 GND 短接**，并持续保持两秒。固件会在 Bluetooth 与 settings 加载前擦除整个 `storage_partition`，清除 Bluetooth identity 数据、Linkr 的 WiFi/WebDAV 配置和上传 boot 计数器，并生成新的随机静态 BLE identity/address。不要让 GPIO0 永久接地，并将该焊盘或按键的物理访问视为恢复出厂权限。该操作不会擦除固件、测试 marker 分区或 coredump 存储。
+恢复出厂时，在设备复位或上电后将恢复输入与 GND 短接并持续保持两秒：C3
+使用 GPIO0，C5 DevKitC 使用 GPIO28/BOOT。固件会在 Bluetooth 与 settings
+加载前擦除整个 `storage_partition`，清除 Bluetooth identity 数据、Linkr 的
+WiFi/WebDAV 配置和上传 boot 计数器，并生成新的随机静态 BLE
+identity/address。不要让恢复输入永久接地，并将该焊盘或按键的物理访问视为
+恢复出厂权限。该操作不会擦除固件、测试 marker 分区或 coredump 存储。
 
 Python、C 与 Web Bluetooth 客户端都会直接发送管理命令；`--pair` 仅作为兼容参数保留，当前是无操作。WebDAV 上传器也只接受匿名 HTTP，因此只能在可信局域网使用。
 
@@ -307,8 +324,8 @@ WebDAV 控制。Python 客户端提供相同的 Management v1 自动化操作。
 
 所有测试选项默认关闭。
 
-可重复执行的本地回归检查只构建唯一的 WiFi + BLE 固件，并检查 Python 与 shell
-语法：
+可重复执行的本地回归检查会构建 C3 与 C5 的 WiFi + BLE 固件，并检查 Python
+与 shell 语法：
 
 ```sh
 tools/verify.sh
@@ -361,7 +378,7 @@ coredump 扇区。
 ├─────────────────────────────────────────────────────────────┤
 │                    BLE GATT (ATT MTU 247)                    │
 ├─────────────────────────────────────────────────────────────┤
-│              ESP32-C3 固件 (Zephyr v4.4.1)                   │
+│             ESP32-C3/C5 固件 (Zephyr v4.4.1)                 │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐ │
 │  │  BLE 协议栈  │  │  UART 桥接  │  │  WiFi/WebSocket     │ │
 │  └─────────────┘  └─────────────┘  └─────────────────────┘ │
@@ -596,7 +613,37 @@ http://127.0.0.1:8765/
 - 显示可选的本地回显和调试 I/O 跟踪
 - 将接收字节保存为日志文件
 
-这在已有 Chrome 的机器上便于快速访问。页面从 jsDelivr 加载 xterm.js，因此 Python 终端仍是打包离线使用、自动化和回环测试的更好选择。
+这在已有 Chrome 的机器上便于快速访问。固定版本的 xterm.js 与 addon-fit 已
+放在 `web/vendor`，因此终端也能在离线配网环境中使用。
+
+---
+
+## 手机 App
+
+同一套终端 UI、Management v1 和 Reliable UART v1 实现也可以封装为手机 App，
+网页端仍然作为独立入口保留。
+
+| 平台 | 原生接入方式 | 当前仓库状态 |
+| --- | --- | --- |
+| Android | Capacitor 与原生 BLE 插件 | 已生成工程，已验证网页构建和插件同步 |
+| iOS | Capacitor 与 CoreBluetooth 插件 | 已生成工程，已验证网页构建和插件同步 |
+| HarmonyOS NEXT | ArkWeb UI，通过 `JavaScriptProxy` 连接 ArkTS BLE host | 已实现 API 26 Stage 工程；ArkTS 类型检查和未签名 HAP 构建已通过，待真机验证 |
+
+构建共享资源并同步 Android/iOS 原生工程：
+
+```sh
+cd mobile
+npm install
+npm run build
+npm run cap:sync
+npm run build:harmony:hap
+```
+
+Android/iOS 环境要求见 [`mobile/README.md`](mobile/README.md)，HarmonyOS host
+接口见 [`harmonyos/README.md`](harmonyos/README.md) 和
+[`harmonyos/BRIDGE_PROTOCOL.md`](harmonyos/BRIDGE_PROTOCOL.md)，其中也包含调试
+签名和无设备测试说明。首版手机 App 仅支持前台运行。当前固件还允许开放 BLE
+访问，因此对外发布前还需要定义设备所有权、配对或等价的授权机制。
 
 ---
 

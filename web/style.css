@@ -223,7 +223,11 @@ button {
   width: 100%;
   height: 100dvh;
   margin: 0 auto;
-  padding: var(--layout-gutter);
+  padding:
+    max(var(--layout-gutter), env(safe-area-inset-top, 0px))
+    max(var(--layout-gutter), env(safe-area-inset-right, 0px))
+    max(var(--layout-gutter), env(safe-area-inset-bottom, 0px))
+    max(var(--layout-gutter), env(safe-area-inset-left, 0px));
 }
 
 .topbar {
@@ -1024,9 +1028,10 @@ body.terminal-fullscreen-fallback {
 @media (max-width: 900px) {
   .app-shell {
     grid-template-columns: 1fr;
-    grid-template-rows: auto auto 1fr auto;
-    height: auto;
-    min-height: 100dvh;
+    grid-template-rows: auto minmax(0, 1fr);
+    height: 100dvh;
+    min-height: 0;
+    overflow: hidden;
   }
 
   .topbar {
@@ -1048,13 +1053,69 @@ body.terminal-fullscreen-fallback {
 
   .workpanel {
     grid-column: 1;
-    min-height: 460px;
+    min-height: 0;
+    overflow: hidden;
   }
 }
 
 @media (max-width: 520px) {
   .app-shell {
-    padding: 10px;
+    padding:
+      max(10px, env(safe-area-inset-top, 0px))
+      max(10px, env(safe-area-inset-right, 0px))
+      max(10px, env(safe-area-inset-bottom, 0px))
+      max(10px, env(safe-area-inset-left, 0px));
+  }
+
+  .topbar {
+    gap: 8px;
+    padding: 11px 12px;
+    border-radius: var(--radius);
+  }
+
+  .brand {
+    gap: 10px;
+  }
+
+  .logo {
+    width: 34px;
+    height: 34px;
+    border-radius: 9px;
+  }
+
+  h1 {
+    font-size: 16px;
+  }
+
+  .support-text {
+    margin-top: 1px;
+    font-size: 11.5px;
+  }
+
+  .top-right {
+    gap: 8px;
+    flex-wrap: nowrap;
+  }
+
+  .top-actions {
+    gap: 6px;
+    flex-wrap: nowrap;
+  }
+
+  .top-actions .icon-btn {
+    width: 44px;
+    padding: 0;
+    justify-content: center;
+  }
+
+  #themeButton .btn-label {
+    display: none;
+  }
+
+  .status-pill {
+    min-width: 0;
+    padding: 6px 10px;
+    font-size: 12.5px;
   }
 
   .btn-grid {
@@ -1068,11 +1129,31 @@ body.terminal-fullscreen-fallback {
   .terminal-head {
     align-items: flex-start;
     flex-direction: column;
+    gap: 7px;
+    padding: 8px 10px;
   }
 
   .term-tools {
     width: 100%;
     justify-content: flex-start;
+    flex-wrap: nowrap;
+  }
+
+  .term-hint {
+    margin-left: auto;
+  }
+
+  .terminal-output {
+    padding: 8px;
+  }
+
+  .terminal-input-bar {
+    min-height: 50px;
+    padding: 5px 7px 5px 10px;
+  }
+
+  .terminal-input-hint {
+    font-size: 11.5px;
   }
 
   .wifi-connected-summary {
@@ -1251,12 +1332,37 @@ details.ref[open] summary::before {
   }
 
   .workpanel {
-    min-height: 68vh;
+    min-height: 0;
+    gap: 8px;
   }
 
   .terminal-card {
-    flex: none;
-    height: 68vh;
+    flex: 1 1 auto;
+    height: auto;
+    min-height: 0;
+  }
+
+  .presets {
+    flex: 0 0 auto;
+    flex-wrap: nowrap;
+    gap: 6px;
+    overflow-x: auto;
+    padding-bottom: 2px;
+    scrollbar-width: none;
+  }
+
+  .presets::-webkit-scrollbar {
+    display: none;
+  }
+
+  .preset-chip {
+    flex: 0 0 auto;
+  }
+
+  .statusbar {
+    flex: 0 0 auto;
+    gap: 10px;
+    padding: 8px 10px;
   }
 }
 
@@ -1294,6 +1400,19 @@ body,
 .drawer-head .icon-close {
   height: 34px;
   width: 34px;
+  padding: 0;
+  justify-content: center;
+}
+
+.drawer-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.drawer-head-actions .icon-btn {
+  width: 34px;
+  height: 34px;
   padding: 0;
   justify-content: center;
 }
@@ -1416,6 +1535,12 @@ body,
 .preset-chip:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+@media (max-width: 900px) {
+  .presets {
+    flex-wrap: nowrap;
+  }
 }
 
 .preset-chip:focus-visible,
@@ -1621,4 +1746,547 @@ body,
   .term-tools {
     gap: 5px;
   }
+}
+
+/* ---------- Compact phone terminal ---------- */
+@media (max-width: 520px) {
+  .app-shell {
+    gap: 6px;
+    padding:
+      max(6px, env(safe-area-inset-top, 0px))
+      max(6px, env(safe-area-inset-right, 0px))
+      max(6px, env(safe-area-inset-bottom, 0px))
+      max(6px, env(safe-area-inset-left, 0px));
+  }
+
+  .topbar {
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 8px;
+  }
+
+  .brand {
+    gap: 8px;
+  }
+
+  .logo {
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+  }
+
+  .logo svg {
+    width: 17px;
+    height: 17px;
+  }
+
+  h1 {
+    font-size: 15px;
+  }
+
+  .support-text,
+  .status-pill {
+    display: none;
+  }
+
+  .top-right,
+  .top-actions {
+    width: auto;
+  }
+
+  .top-right {
+    margin-left: auto;
+  }
+
+  .top-actions {
+    gap: 5px;
+  }
+
+  .top-actions .mobile-connect {
+    display: inline-flex;
+    flex: 0 0 auto;
+    width: auto;
+    min-width: 104px;
+    height: 40px;
+    min-height: 40px;
+    margin-left: 0;
+    padding: 0 12px;
+  }
+
+  #themeButton,
+  #langButton {
+    display: none;
+  }
+
+  .top-actions .icon-btn {
+    width: 40px;
+    height: 40px;
+    min-height: 40px;
+  }
+
+  .workpanel {
+    gap: 5px;
+  }
+
+  .terminal-head {
+    min-height: 42px;
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 6px 4px 9px;
+  }
+
+  .term-title {
+    flex: 0 0 auto;
+    font-size: 11px;
+  }
+
+  .term-tools {
+    width: auto;
+    min-width: 0;
+    margin-left: auto;
+    gap: 4px;
+  }
+
+  .term-tool {
+    min-width: 34px;
+    width: 34px;
+    height: 34px;
+    padding: 0 5px;
+    font-size: 11px;
+  }
+
+  .term-hint {
+    display: none;
+  }
+
+  .terminal-output {
+    padding: 5px;
+  }
+
+  .terminal-input-bar {
+    min-height: 36px;
+    padding: 3px 5px 3px 8px;
+  }
+
+  .terminal-input-hint {
+    font-size: 11px;
+  }
+
+  .terminal-break {
+    height: 32px;
+    min-height: 32px;
+    padding: 3px 8px;
+    font-size: 11px;
+  }
+
+  .presets {
+    gap: 4px;
+    padding-bottom: 0;
+  }
+
+  .preset-chip {
+    min-height: 36px;
+    padding: 4px 10px;
+    font-size: 11px;
+  }
+
+  .statusbar {
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: var(--radius-sm);
+    font-size: 11.5px;
+  }
+
+  .statusbar .sb-item b {
+    font-size: 11.5px;
+  }
+}
+
+/* ---------- Mobile and tablet interaction layout ---------- */
+.settings-tabs {
+  display: none;
+}
+
+.settings-tab {
+  min-width: 0;
+  min-height: 38px;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-weight: 650;
+  font-size: 12.5px;
+}
+
+.settings-tab.active {
+  background: var(--panel-3);
+  color: var(--text);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+}
+
+.terminal-keyboard {
+  display: none;
+  min-height: 30px;
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+@media (max-width: 1100px) {
+  .settings-tabs {
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 4px;
+    flex: 0 0 auto;
+    padding: 4px;
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    background: var(--panel-2);
+  }
+
+  .controls[data-settings-active="connection"] [data-settings-page]:not([data-settings-page="connection"]),
+  .controls[data-settings-active="terminal"] [data-settings-page]:not([data-settings-page="terminal"]),
+  .controls[data-settings-active="network"] [data-settings-page]:not([data-settings-page="network"]) {
+    display: none;
+  }
+
+  .terminal-keyboard {
+    display: inline-flex;
+  }
+}
+
+@media (min-width: 901px) and (max-width: 1100px) {
+  .app-shell {
+    grid-template-columns: minmax(0, 1fr) minmax(320px, 38vw);
+  }
+
+  .app-shell.controls-hidden {
+    grid-template-columns: minmax(0, 1fr) 0;
+  }
+
+  .controls {
+    grid-column: 2;
+    grid-row: 2;
+    padding-right: 0;
+  }
+
+  .workpanel {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .mobile-connect {
+    display: inline-flex;
+  }
+
+  .settings-tabs {
+    top: -1px;
+  }
+}
+
+@media (max-width: 900px) {
+  .topbar {
+    flex-direction: row;
+    align-items: center;
+  }
+
+  .top-right {
+    width: auto;
+    margin-left: auto;
+    flex-wrap: nowrap;
+  }
+
+  .status-pill {
+    display: none;
+  }
+
+  .controls {
+    top: 0;
+    right: 0;
+    left: auto;
+    width: min(440px, 68vw);
+    padding:
+      max(14px, env(safe-area-inset-top, 0px))
+      max(14px, env(safe-area-inset-right, 0px))
+      max(14px, env(safe-area-inset-bottom, 0px))
+      max(14px, env(safe-area-inset-left, 0px));
+    border-right: 0;
+    border-left: 1px solid var(--line);
+    transform: translateX(100%);
+  }
+
+  .drawer-head {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    flex: 0 0 auto;
+    background: var(--panel);
+  }
+
+  .settings-tabs {
+    top: 49px;
+  }
+
+  .app-shell.sidebar-open .controls {
+    transform: translateX(0);
+  }
+}
+
+@media (max-width: 600px) {
+  .support-text,
+  #themeButton,
+  #langButton {
+    display: none;
+  }
+
+  .controls {
+    width: 100vw;
+    padding:
+      max(8px, env(safe-area-inset-top, 0px))
+      max(8px, env(safe-area-inset-right, 0px))
+      max(10px, env(safe-area-inset-bottom, 0px))
+      max(8px, env(safe-area-inset-left, 0px));
+    border-left: 0;
+  }
+
+  .drawer-head {
+    min-height: 46px;
+    margin-bottom: 0;
+    padding: 3px 2px 8px;
+  }
+
+  .settings-tabs {
+    top: 46px;
+    margin-bottom: 2px;
+  }
+
+  .controls .card {
+    padding: 13px;
+    border-radius: 8px;
+    box-shadow: none;
+  }
+
+  .controls [data-settings-page="connection"] .btn-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .terminal-keyboard,
+  .terminal-break {
+    width: 34px;
+    height: 32px;
+    min-height: 32px;
+    justify-content: center;
+    padding: 0;
+  }
+
+  .terminal-keyboard .btn-label {
+    display: none;
+  }
+
+  .terminal-input-actions {
+    gap: 4px;
+  }
+
+  .terminal-input-hint {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+/* ---------- Soft keyboard workspace ---------- */
+html.settings-drawer-layout .app-shell {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+html.settings-drawer-layout .workpanel {
+  grid-column: 1;
+  grid-row: 2;
+}
+
+html.settings-drawer-layout .mobile-connect {
+  display: inline-flex;
+}
+
+html.settings-drawer-layout .controls {
+  position: fixed;
+  top: max(12px, env(safe-area-inset-top, 0px));
+  right: max(12px, env(safe-area-inset-right, 0px));
+  bottom: max(12px, env(safe-area-inset-bottom, 0px));
+  left: auto;
+  z-index: 60;
+  width: min(420px, calc(100vw - 32px));
+  padding: 14px;
+  overflow-y: auto;
+  visibility: visible;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+  transform: translateX(calc(100% + 32px));
+  transition: transform 0.25s ease;
+}
+
+html.settings-drawer-layout .app-shell.sidebar-open .controls {
+  transform: translateX(0);
+}
+
+html.settings-drawer-layout .drawer-backdrop {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: rgba(0, 0, 0, 0.5);
+}
+
+html.settings-drawer-layout .app-shell.sidebar-open .drawer-backdrop {
+  display: block;
+}
+
+html.settings-drawer-layout .drawer-head {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  flex: 0 0 auto;
+  background: var(--panel);
+}
+
+html.settings-drawer-layout .settings-tabs {
+  position: sticky;
+  top: 49px;
+  z-index: 3;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+  flex: 0 0 auto;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--panel-2);
+}
+
+html.settings-drawer-layout .controls[data-settings-active="connection"] [data-settings-page]:not([data-settings-page="connection"]),
+html.settings-drawer-layout .controls[data-settings-active="terminal"] [data-settings-page]:not([data-settings-page="terminal"]),
+html.settings-drawer-layout .controls[data-settings-active="network"] [data-settings-page]:not([data-settings-page="network"]) {
+  display: none;
+}
+
+@media (max-width: 600px) {
+  html.settings-drawer-layout .controls {
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 100vw;
+    padding:
+      max(8px, env(safe-area-inset-top, 0px))
+      max(8px, env(safe-area-inset-right, 0px))
+      max(10px, env(safe-area-inset-bottom, 0px))
+      max(8px, env(safe-area-inset-left, 0px));
+    border: 0;
+    border-radius: 0;
+  }
+}
+
+html.soft-keyboard-open,
+html.soft-keyboard-open body {
+  height: 100%;
+  overflow: hidden;
+}
+
+html.soft-keyboard-open .app-shell {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  gap: 0;
+  height: 100dvh;
+  min-height: 0;
+  padding:
+    max(4px, env(safe-area-inset-top, 0px))
+    max(6px, env(safe-area-inset-right, 0px))
+    2px
+    max(6px, env(safe-area-inset-left, 0px));
+  overflow: hidden;
+}
+
+html.soft-keyboard-open .topbar,
+html.soft-keyboard-open .controls,
+html.soft-keyboard-open .presets,
+html.soft-keyboard-open .statusbar,
+html.soft-keyboard-open .drawer-backdrop {
+  display: none;
+}
+
+html.soft-keyboard-open .workpanel {
+  grid-column: 1;
+  grid-row: 1;
+  gap: 0;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+html.soft-keyboard-open .terminal-card {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  border-radius: var(--radius-sm);
+  box-shadow: none;
+}
+
+html.soft-keyboard-open .terminal-head {
+  flex: 0 0 auto;
+  min-height: 38px;
+  padding: 3px 5px 3px 10px;
+}
+
+html.soft-keyboard-open .term-tools {
+  width: auto;
+  margin-left: auto;
+  gap: 4px;
+}
+
+html.soft-keyboard-open #zoomOutBtn,
+html.soft-keyboard-open #zoomInBtn,
+html.soft-keyboard-open #fullscreenBtn,
+html.soft-keyboard-open .term-hint {
+  display: none;
+}
+
+html.soft-keyboard-open .term-tool {
+  width: 34px;
+  min-width: 34px;
+  height: 34px;
+  padding: 0;
+}
+
+html.soft-keyboard-open .terminal-output {
+  min-height: 72px;
+  padding: 5px;
+}
+
+html.soft-keyboard-open .terminal-input-bar {
+  flex: 0 0 auto;
+  justify-content: flex-end;
+  min-height: 36px;
+  padding: 2px 4px;
+}
+
+html.soft-keyboard-open .terminal-input-hint,
+html.soft-keyboard-open .terminal-keyboard {
+  display: none;
+}
+
+html.soft-keyboard-open .terminal-input-actions {
+  width: 100%;
+  justify-content: flex-end;
+}
+
+html.soft-keyboard-open .terminal-output:not(.connected) + .terminal-input-bar {
+  display: none;
 }

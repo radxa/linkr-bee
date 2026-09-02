@@ -1,0 +1,9 @@
+{
+  "name": "entry",
+  "version": "1.0.0",
+  "description": "Linkr Bee HarmonyOS NEXT entry module",
+  "main": "",
+  "author": "Linkr",
+  "license": "Apache-2.0",
+  "dependencies": {}
+}
