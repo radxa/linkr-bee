@@ -468,9 +468,18 @@ they do not write the ESP32-C3 coredump sector.
 
 | Service | UUID | Description |
 |---------|------|-------------|
-| Management Service v1 | `6e400001-b5a3-f393-e0a9-e50e24dcca9e` | API versioning, Device ID, config commands |
-| RX Write Characteristic | `6e400002-b5a3-f393-e0a9-e50e24dcca9e` | Host → Device write |
-| TX Notify Characteristic | `6e400003-b5a3-f393-e0a9-e50e24dcca9e` | Device → Host notifications |
+| Management Service v1 | `4c4b0001-9a7e-4f4e-8b8a-3d6f12a0c001` | API versioning, Device ID, config commands |
+| Management Protocol | `4c4b0002-9a7e-4f4e-8b8a-3d6f12a0c001` | Read protocol version and capabilities |
+| Management Device ID | `4c4b0003-9a7e-4f4e-8b8a-3d6f12a0c001` | Read stable device identifier |
+| Management Command | `4c4b0004-9a7e-4f4e-8b8a-3d6f12a0c001` | Write framed requests |
+| Management Response | `4c4b0005-9a7e-4f4e-8b8a-3d6f12a0c001` | Indicate framed responses and events |
+| Reliable UART Service v1 | `4c4b0010-9a7e-4f4e-8b8a-3d6f12a0c001` | Loss-detecting UART transport |
+| Reliable UART RX | `4c4b0011-9a7e-4f4e-8b8a-3d6f12a0c001` | Host → Device framed writes |
+| Reliable UART TX | `4c4b0012-9a7e-4f4e-8b8a-3d6f12a0c001` | Device → Host confirmed indications |
+| Reliable UART State | `4c4b0013-9a7e-4f4e-8b8a-3d6f12a0c001` | Read sequence and payload limits |
+| Legacy Nordic UART Service | `6e400001-b5a3-f393-e0a9-e50e24dcca9e` | Compatibility UART service |
+| Legacy Nordic UART RX | `6e400002-b5a3-f393-e0a9-e50e24dcca9e` | Host → Device unframed writes |
+| Legacy Nordic UART TX | `6e400003-b5a3-f393-e0a9-e50e24dcca9e` | Device → Host notifications |
 
 ### Data Flow
 

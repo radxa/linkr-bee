@@ -1,5 +1,7 @@
 "use strict";
 
+import { ManagementResponseTracker } from "./management_protocol.js";
+
 const NUS_SERVICE = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
 const NUS_RX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
 const NUS_TX = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
@@ -49,6 +51,7 @@ const state = {
   deviceId: "",
   nextRequestId: 1,
   mgmtRx: null,
+  mgmtResponses: new ManagementResponseTracker(),
   controlWriteQueue: Promise.resolve(),
   mode: "ble",
   ws: null,
@@ -1660,31 +1663,40 @@ async function sendControl(command) {
   frame.set(payload, MGMT_HEADER_SIZE);
 
   const operation = state.controlWriteQueue.then(async () => {
+    if (!state.connected || !state.mgmtReady || !state.device) {
+      throw new Error("Management characteristic is not ready");
+    }
+    const response = state.mgmtResponses.wait(requestId);
     /* The first GATT write must contain the complete 12-byte management
      * header. Keep 20 bytes as the minimum even if the terminal's raw UART
      * chunk-size control is configured lower. */
-    const size = Math.max(20, chunkSize());
-    for (let offset = 0; offset < frame.length; offset += size) {
-      const chunk = frame.slice(offset, offset + size);
-      if (elements.debugInput.checked) {
-        appendLine(
-          sensitive
-            ? `MGMT TX #${requestId} <redacted ${chunk.length} bytes>`
-            : `MGMT TX #${requestId} ${chunk.length} bytes`,
+    try {
+      const size = Math.max(20, chunkSize());
+      for (let offset = 0; offset < frame.length; offset += size) {
+        const chunk = frame.slice(offset, offset + size);
+        if (elements.debugInput.checked) {
+          appendLine(
+            sensitive
+              ? `MGMT TX #${requestId} <redacted ${chunk.length} bytes>`
+              : `MGMT TX #${requestId} ${chunk.length} bytes`,
+          );
+        }
+        await bleTransport.write(
+          state.device.id,
+          MGMT_SERVICE,
+          MGMT_COMMAND,
+          chunk,
+          true,
         );
       }
-      await bleTransport.write(
-        state.device.id,
-        MGMT_SERVICE,
-        MGMT_COMMAND,
-        chunk,
-        true,
-      );
+    } catch (error) {
+      state.mgmtResponses.reject(requestId, error);
     }
+    await response;
+    return requestId;
   });
   state.controlWriteQueue = operation.catch(() => {});
-  await operation;
-  return requestId;
+  return operation;
 }
 
 function dispatchManagementMessage(message) {
@@ -1701,6 +1713,7 @@ function dispatchManagementMessage(message) {
       appendLine(`[${kind} #${message.requestId}] ${line}`);
     }
   }
+  state.mgmtResponses.settle({ ...message, text });
 }
 
 function onManagementIndication(value) {
@@ -1846,6 +1859,9 @@ function onDisconnected() {
   state.reliableWriteSize = BLE_MAX_ATT_VALUE;
   state.reliableRx = null;
   state.mgmtRx = null;
+  state.mgmtResponses.rejectAll(
+    new Error("Disconnected before management response"),
+  );
   state.deviceId = "";
   state.ws = null;
   state.scanning = false;

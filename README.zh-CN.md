@@ -389,9 +389,18 @@ coredump 扇区。
 
 | 服务 | UUID | 说明 |
 |------|------|------|
-| Management Service v1 | `6e400001-b5a3-f393-e0a9-e50e24dcca9e` | API 版本、Device ID、配置命令 |
-| RX 写特征 | `6e400002-b5a3-f393-e0a9-e50e24dcca9e` | 主机 → 设备写入 |
-| TX 通知特征 | `6e400003-b5a3-f393-e0a9-e50e24dcca9e` | 设备 → 主机通知 |
+| Management Service v1 | `4c4b0001-9a7e-4f4e-8b8a-3d6f12a0c001` | API 版本、Device ID、配置命令 |
+| Management Protocol | `4c4b0002-9a7e-4f4e-8b8a-3d6f12a0c001` | 读取协议版本和能力位 |
+| Management Device ID | `4c4b0003-9a7e-4f4e-8b8a-3d6f12a0c001` | 读取稳定设备标识 |
+| Management Command | `4c4b0004-9a7e-4f4e-8b8a-3d6f12a0c001` | 写入带帧请求 |
+| Management Response | `4c4b0005-9a7e-4f4e-8b8a-3d6f12a0c001` | indication 带帧响应和事件 |
+| Reliable UART Service v1 | `4c4b0010-9a7e-4f4e-8b8a-3d6f12a0c001` | 可检测丢包的串口传输 |
+| Reliable UART RX | `4c4b0011-9a7e-4f4e-8b8a-3d6f12a0c001` | 主机 → 设备带帧写入 |
+| Reliable UART TX | `4c4b0012-9a7e-4f4e-8b8a-3d6f12a0c001` | 设备 → 主机确认 indication |
+| Reliable UART State | `4c4b0013-9a7e-4f4e-8b8a-3d6f12a0c001` | 读取序号和 payload 限制 |
+| 兼容 Nordic UART Service | `6e400001-b5a3-f393-e0a9-e50e24dcca9e` | 兼容旧版客户端的串口服务 |
+| 兼容 Nordic UART RX | `6e400002-b5a3-f393-e0a9-e50e24dcca9e` | 主机 → 设备无帧写入 |
+| 兼容 Nordic UART TX | `6e400003-b5a3-f393-e0a9-e50e24dcca9e` | 设备 → 主机通知 |
 
 ### 数据流
 
