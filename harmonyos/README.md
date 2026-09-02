@@ -7,8 +7,8 @@ BLE access and exposes it through the JSON-RPC contract in
 
 ## Current implementation
 
-- HarmonyOS API 26 Stage project and phone entry module;
-- runtime `ohos.permission.ACCESS_BLUETOOTH` handling;
+- HarmonyOS API 26 Stage project with phone and tablet support;
+- runtime `ohos.permission.ACCESS_BLUETOOTH` handling and local-network access;
 - Management Service-filtered scan and native device picker;
 - GATT connect, service discovery, MTU 247 request, serialized reads/writes, and
   indication subscriptions;
@@ -78,7 +78,8 @@ native request timeout.
 ## Validation boundary
 
 The project currently passes ArkTS type checking and builds an unsigned API 26
-HAP. Installation, BLE permission behavior, scanning, GATT data transfer,
-disconnect recovery, and UI behavior have not yet been tested on a HarmonyOS
+HAP. The HAP, ArkWeb UI, responsive phone/tablet layout, and JavaScript bridge
+have been exercised in the API 26 emulator. BLE permission behavior, scanning,
+GATT data transfer, and disconnect recovery still require a real HarmonyOS
 device. The first version is foreground-only; background BLE and ArkWeb lifecycle
 recovery require a separate hardware acceptance pass.

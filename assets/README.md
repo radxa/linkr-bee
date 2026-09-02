@@ -6,6 +6,9 @@
 | `linkr-bee-mark.svg` | Icon-only mark for repository avatars, favicons and hardware labels |
 | `linkr-bee-logo-mono.svg` | Single-color printing, laser marking and silkscreen reference |
 | `linkr-bee-logo-concept.png` | White-background visual concept sheet |
+| `screenshots/linkr-bee-terminal-desktop.jpg` | Desktop terminal-first layout |
+| `screenshots/linkr-bee-terminal-controls.jpg` | Desktop layout with connection and settings panel |
+| `screenshots/linkr-bee-terminal-mobile.jpg` | Compact mobile terminal layout |
 
 ## Brand colors
 
