@@ -5,6 +5,8 @@ set -eu
 repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 boards=${BOARD:-"esp32c3_supermini esp32c5_devkitc/esp32c5/hpcore"}
 
+python3 -m unittest discover -s "$repo_dir/tests" -v
+
 for board in $boards; do
   build_name=$(printf '%s' "$board" | tr '/_' '--')
   build_dir="$repo_dir/build-verify-$build_name"
@@ -22,6 +24,7 @@ for board in $boards; do
   grep -qx 'CONFIG_HTTP_SERVER_WEBSOCKET=y' "$config"
   grep -qx 'CONFIG_ZVFS_EVENTFD_MAX=2' "$config"
   grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE=y' "$config"
+  grep -qx 'CONFIG_LINKR_BLE_BRIDGE_UART_RX_DROP_NO_CONN=y' "$config"
   grep -qx '# CONFIG_BT_SMP is not set' "$config"
 done
 

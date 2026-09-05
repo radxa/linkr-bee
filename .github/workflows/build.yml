@@ -17,6 +17,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  host:
+    name: Host regression tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python3 -m unittest discover -s tests -v
+
   mobile:
     name: Web and mobile
     runs-on: ubuntu-latest
@@ -114,6 +125,7 @@ jobs:
           grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WIFI_OPERATION_TIMEOUT_MS=30000' "${config}"
           grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WEBDAV=y' "${config}"
           grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE=y' "${config}"
+          grep -qx 'CONFIG_LINKR_BLE_BRIDGE_UART_RX_DROP_NO_CONN=y' "${config}"
           grep -qx 'CONFIG_WIFI=y' "${config}"
           grep -qx 'CONFIG_NETWORKING=y' "${config}"
           grep -qx 'CONFIG_NET_TCP=y' "${config}"

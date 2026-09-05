@@ -1549,6 +1549,7 @@ static void upload_thread(void *a, void *b, void *c)
 
     static uint8_t chunk[WEBDAV_UPLOAD_CHUNK];
     size_t pending_total = 0;
+    atomic_val_t pending_generation = 0;
     uint32_t pending_sequence = 0;
     uint32_t pending_uptime = 0;
 
@@ -1574,6 +1575,13 @@ static void upload_thread(void *a, void *b, void *c)
         url_local[sizeof(url_local) - 1] = '\0';
         upload_generation = atomic_get(&webdav_generation);
         k_mutex_unlock(&cfg_lock);
+
+        /* A retry survives the outer sleep, but its target must not. Compare
+         * the batch's original generation before adopting the new config. */
+        if (pending_total && pending_generation != upload_generation) {
+            pending_total = 0;
+            atomic_clear(&upload_pending_bytes);
+        }
 
         if (parse_webdav_url(url_local, &u) != 0) {
             LOG_WRN("bad webdav url: %s", url_local);
@@ -1602,6 +1610,7 @@ static void upload_thread(void *a, void *b, void *c)
                 }
                 k_mutex_unlock(&log_lock);
                 if (pending_total) {
+                    pending_generation = upload_generation;
                     atomic_set(&upload_pending_bytes,
                                (atomic_val_t)pending_total);
                     pending_sequence = ++log_sequence;

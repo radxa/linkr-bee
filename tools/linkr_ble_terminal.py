@@ -534,7 +534,7 @@ async def run(args: argparse.Namespace) -> None:
     )
 
     disconnected = asyncio.Event()
-    notify_queue: asyncio.Queue[bytes] = asyncio.Queue()
+    notify_queue: asyncio.Queue[bytes] | None = None
     loop = asyncio.get_running_loop()
 
     def on_disconnect(_client: BleakClient) -> None:
@@ -553,7 +553,8 @@ async def run(args: argparse.Namespace) -> None:
 
             def on_notify(_char, data: bytearray) -> None:
                 payload = bytes(data)
-                notify_queue.put_nowait(payload)
+                if notify_queue is not None:
+                    notify_queue.put_nowait(payload)
                 if args.debug_io:
                     stderr(f"RX {payload!r}")
                 if log_file:
@@ -660,8 +661,13 @@ async def run(args: argparse.Namespace) -> None:
 
             if args.loopback_test is not None:
                 payload = args.loopback_test.encode()
-                ok = await loopback_test(client, payload, cfg, notify_queue,
-                                         args.loopback_timeout, reliable)
+                notify_queue = asyncio.Queue()
+                try:
+                    ok = await loopback_test(client, payload, cfg, notify_queue,
+                                             args.loopback_timeout, reliable)
+                finally:
+                    # Ordinary terminal output has no queue consumer.
+                    notify_queue = None
                 if not ok:
                     raise RuntimeError("loopback test failed")
 

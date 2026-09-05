@@ -256,6 +256,11 @@ chips and counters working, and disables management controls that require BLE
 (`@u`/`@w`/`@d`/`@i?`). When BLE diagnostics report an IP, the LAN address
 field is prefilled with it. The WebDAV log upload keeps running in parallel.
 
+The shipped configuration enables
+`CONFIG_LINKR_BLE_BRIDGE_UART_RX_DROP_NO_CONN=y` on every board. After a BLE
+session disconnects, UART capture continues feeding WebSocket clients and the
+log uploader; bytes discarded from BLE delivery are not replayed on reconnect.
+
 ### Open BLE access, persistence, and factory reset
 
 BLE pairing, bonding, and owner enforcement are currently disabled to keep the

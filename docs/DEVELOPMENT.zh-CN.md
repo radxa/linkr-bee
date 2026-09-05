@@ -209,6 +209,10 @@ WiFi 拿到 IP 地址后,固件还会把桥接 UART 暴露为 WebSocket 端点,�
 
 Web 终端(`web/`)的「连接」卡片里有 BLE/局域网切换;局域网模式连接 `ws://<主机>/ws`,终端输入、快捷命令、计数器照常工作,仅 BLE 专属的控制按钮(`@u`/`@w`/`@d`/`@i?`)被禁用。当 BLE 诊断拿到 IP 时,局域网地址输入框会自动预填。WebDAV 日志上传并行运行不受影响。
 
+出厂构建在所有板型上启用 `CONFIG_LINKR_BLE_BRIDGE_UART_RX_DROP_NO_CONN=y`。
+BLE 会话断开后，UART 采集继续向 WebSocket 客户端和日志上传器转发；
+BLE 路径丢弃的数据不会在重连后补发。
+
 ### 开放 BLE 访问、持久化与恢复出厂
 
 为保证当前开发流程稳定，固件暂时关闭 BLE 配对、bond 与 owner 门禁。附近任何能够连接 Management 或 UART 服务的中心设备，都可以使用 UART 数据流以及 WiFi、WebDAV、WebSocket 等全部管理命令。不要把含敏感信息的 console 接到此开发固件，也不要在不可信的无线环境中部署。
