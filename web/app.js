@@ -1,6 +1,7 @@
 "use strict";
 
 import { ManagementResponseTracker } from "./management_protocol.js";
+import { applyInputModifiers, terminalKeySequence } from "./terminal_keys.js";
 
 const NUS_SERVICE = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
 const NUS_RX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
@@ -77,6 +78,9 @@ const state = {
   txBytes: 0,
   writeQueue: Promise.resolve(),
   writeGeneration: 0,
+  controlPending: false,
+  shiftPending: false,
+  altPending: false,
   deviceRestored: false,
   sidebarCollapsed: true,
   scanning: false,
@@ -120,6 +124,11 @@ const elements = {
   terminalInputHint: $("terminalInputHint"),
   focusTerminalButton: $("focusTerminalButton"),
   breakButton: $("breakButton"),
+  terminalKeyBar: $("terminalKeyBar"),
+  controlKeyButton: $("controlKeyButton"),
+  modifierButtons: document.querySelectorAll("[data-modifier]"),
+  pasteTerminalButton: $("pasteTerminalButton"),
+  terminalKeyButtons: document.querySelectorAll("[data-terminal-key]"),
   uartInput: $("uartInput"),
   enterSelect: $("enterSelect"),
   chunkInput: $("chunkInput"),
@@ -261,6 +270,16 @@ const I18N = {
     set: "Set",
     off: "Off",
     ctrlC: "Ctrl-C",
+    terminalKeys: "Terminal keys · swipe for more",
+    keyUp: "Up arrow · previous command",
+    keyDown: "Down arrow · next command",
+    keyLeft: "Left arrow",
+    keyRight: "Right arrow",
+    paste: "Paste",
+    backspace: "Backspace",
+    modifierNext: "{key}: combine with the next key; tap again to cancel",
+    modifierActive: "{key} active · next key only · tap again to cancel",
+    pasteUnavailable: "Clipboard unavailable. Long-press in the terminal to paste.",
     keyboard: "Keyboard",
     uart: "UART",
     enterKey: "Enter key",
@@ -293,7 +312,7 @@ const I18N = {
     serialOutput: "Serial Terminal",
     terminalAria: "Interactive serial terminal",
     xterm: "xterm.js",
-    terminalInputHint: "Type here · Tab completes · Arrow keys browse history",
+    terminalInputHint: "Modifiers apply once · Swipe right-hand keys for more",
     terminalInputDisconnected: "Connect a device to enable terminal input",
     placeholderWifiSsid: "SSID",
     placeholderWifiPassword: "Leave blank for an open network",
@@ -395,6 +414,16 @@ const I18N = {
     set: "设置",
     off: "关闭",
     ctrlC: "Ctrl-C",
+    terminalKeys: "终端按键 · 左右滑动查看更多",
+    keyUp: "向上 · 上一条命令",
+    keyDown: "向下 · 下一条命令",
+    keyLeft: "向左",
+    keyRight: "向右",
+    paste: "粘贴",
+    backspace: "退格",
+    modifierNext: "{key}：与下一个按键组合，再点一次取消",
+    modifierActive: "{key} 已开启 · 仅作用于下一键 · 再点取消",
+    pasteUnavailable: "无法读取剪贴板，请长按终端进行粘贴。",
     keyboard: "键盘",
     uart: "UART",
     enterKey: "回车键",
@@ -427,7 +456,7 @@ const I18N = {
     serialOutput: "串口终端",
     terminalAria: "交互式串口终端",
     xterm: "xterm.js",
-    terminalInputHint: "直接输入 · Tab 补全 · 方向键浏览历史",
+    terminalInputHint: "组合键单次生效 · 左右滑动右侧按键查看更多",
     terminalInputDisconnected: "连接设备后即可在终端内直接输入",
     placeholderWifiSsid: "SSID",
     placeholderWifiPassword: "开放网络可留空",
@@ -805,6 +834,7 @@ function applyLang() {
   renderDiagnostics();
   updateWifiConnectionView();
   updateFullscreenButton();
+  updateModifierButtons();
 }
 
 function fitTerminal() {
@@ -1481,6 +1511,13 @@ function setConnected(connected) {
   elements.setUartButton.disabled = !canControl;
   elements.focusTerminalButton.disabled = !connected;
   elements.breakButton.disabled = !connected;
+  elements.controlKeyButton.disabled = !connected;
+  elements.modifierButtons.forEach((button) => { button.disabled = !connected; });
+  elements.pasteTerminalButton.disabled = !connected;
+  elements.terminalKeyButtons.forEach((button) => {
+    button.disabled = !connected;
+  });
+  if (!connected) resetModifiers();
   elements.terminalOutput.classList.toggle("connected", connected);
   elements.terminalInputHint.textContent = t(
     connected ? "terminalInputHint" : "terminalInputDisconnected",
@@ -1721,11 +1758,36 @@ function sendText(text) {
   return writeText(payload);
 }
 
-function onTerminalData(data) {
+function pendingModifiers() {
+  return { ctrl: state.controlPending, shift: state.shiftPending, alt: state.altPending };
+}
+
+function updateModifierButtons() {
+  const modifiers = pendingModifiers();
+  elements.modifierButtons.forEach((button) => {
+    const active = modifiers[button.dataset.modifier];
+    const label = t(active ? "modifierActive" : "modifierNext")
+      .replace("{key}", button.textContent);
+    button.setAttribute("aria-pressed", String(active));
+    button.setAttribute("aria-label", label);
+    button.title = label;
+  });
+}
+
+function resetModifiers() {
+  state.controlPending = state.shiftPending = state.altPending = false;
+  updateModifierButtons();
+}
+
+function onTerminalData(data, { raw = false } = {}) {
   if (!state.connected || !data) {
     return;
   }
-  const payload = normalizeEnter(data);
+  const modifiers = pendingModifiers();
+  const modified = Object.values(modifiers).some(Boolean);
+  if (modified) data = applyInputModifiers(data, modifiers);
+  resetModifiers();
+  const payload = raw || modified ? data : normalizeEnter(data);
   if (elements.localEchoInput.checked) {
     appendOutput(payload);
   }
@@ -2382,6 +2444,10 @@ function syncSoftKeyboardLayout() {
     heightLoss > keyboardHeight &&
     (terminalHasFocus() || softKeyboardLayout.active);
 
+  // iOS/Android WebViews may resize only the visual viewport, leaving dvh
+  // unchanged. Size the workspace to the area actually above the keyboard.
+  document.documentElement.style.setProperty("--terminal-viewport-height", `${height}px`);
+
   if (active === softKeyboardLayout.active) {
     return;
   }
@@ -2622,10 +2688,48 @@ function bind() {
 
   elements.saveButton.addEventListener("click", saveLog);
 
-  elements.breakButton.addEventListener("click", () => {
-    enqueueBytes(new Uint8Array([0x03]))
-      .then(() => state.term?.focus())
-      .catch((error) => appendLine(`[error] ${error.message}`));
+  // Keep the terminal textarea focused when a pointer activates an accessory
+  // key. Focus synchronously on click so iOS can retain/open its soft keyboard.
+  elements.terminalKeyBar.addEventListener("mousedown", (event) => {
+    if (event.target.closest("button")) event.preventDefault();
+  });
+  elements.modifierButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      if (!state.connected) return;
+      const field = { ctrl: "controlPending", shift: "shiftPending", alt: "altPending" }
+        [button.dataset.modifier];
+      state[field] = !state[field];
+      updateModifierButtons();
+      state.term?.focus();
+    });
+  });
+  elements.terminalKeyButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      if (!state.connected) return;
+      const key = button.dataset.terminalKey;
+      const modifiers = pendingModifiers();
+      const data = terminalKeySequence(key, state.term?.modes.applicationCursorKeysMode, modifiers);
+      resetModifiers();
+      state.term?.focus();
+      onTerminalData(data, { raw: key !== "Enter" || Object.values(modifiers).some(Boolean) });
+    });
+  });
+
+  elements.pasteTerminalButton.addEventListener("click", async () => {
+    if (!state.connected) return;
+    const generation = state.writeGeneration;
+    resetModifiers();
+    state.term?.focus();
+    try {
+      const text = await navigator.clipboard.readText();
+      if (state.connected && generation === state.writeGeneration) {
+        // xterm applies the remote application's bracketed-paste mode.
+        resetModifiers();
+        state.term?.paste(text);
+      }
+    } catch (_error) {
+      toast(t("pasteUnavailable"), "error");
+    }
   });
 
   elements.focusTerminalButton.addEventListener("click", () => {

@@ -10,7 +10,7 @@
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%233fc88a'/%3E%3Cpath d='M7 7l10 10-4 4V3l4 4L7 17' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"
     />
     <link rel="stylesheet" href="./vendor/xterm/xterm.css" />
-    <link rel="stylesheet" href="./style.css?v=20260905-hardening1" />
+    <link rel="stylesheet" href="./style.css?v=20260905-terminalkeys2" />
   </head>
   <body>
     <main class="app-shell">
@@ -354,17 +354,53 @@
             <span id="terminalInputHint" class="terminal-input-hint" data-i18n="terminalInputDisconnected">
               Connect a device to enable terminal input
             </span>
-            <div class="terminal-input-actions">
-              <button id="focusTerminalButton" class="btn terminal-keyboard" type="button" disabled="" data-i18n-title="keyboard" data-i18n-aria="keyboard" aria-label="Open keyboard">
-                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <rect x="3" y="5" width="18" height="14" rx="2"></rect>
-                  <path d="M7 9h.01M11 9h.01M15 9h.01M19 9h.01M7 13h.01M11 13h.01M15 13h.01M19 13h.01M8 16h8"></path>
-                </svg>
-                <span class="btn-label" data-i18n="keyboard">Keyboard</span>
-              </button>
-              <button id="breakButton" class="btn terminal-break" type="button" disabled="">
-                <span class="btn-label" data-i18n="ctrlC">Ctrl-C</span>
-              </button>
+            <div id="terminalKeyBar" class="terminal-input-actions" role="group" data-i18n-aria="terminalKeys" aria-label="Terminal keys · swipe for more">
+              <div class="terminal-key-group terminal-modifiers">
+                <button id="focusTerminalButton" class="btn terminal-key terminal-keyboard" type="button" disabled data-i18n-title="keyboard" data-i18n-aria="keyboard" aria-label="Open keyboard"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"></rect><path d="M7 9h.01M11 9h.01M15 9h.01M19 9h.01M7 13h.01M11 13h.01M15 13h.01M19 13h.01M8 16h8"></path></svg></button>
+                <button class="btn terminal-key" type="button" disabled data-terminal-key="Escape">Esc</button>
+                <button class="btn terminal-key" type="button" disabled data-terminal-key="Tab">Tab</button>
+                <button id="shiftKeyButton" class="btn terminal-key terminal-modifier" type="button" disabled aria-pressed="false" data-modifier="shift">Shift</button>
+                <button id="controlKeyButton" class="btn terminal-key terminal-modifier" type="button" disabled aria-pressed="false" data-modifier="ctrl">Ctrl</button>
+                <button id="altKeyButton" class="btn terminal-key terminal-modifier" type="button" disabled aria-pressed="false" data-modifier="alt">Alt</button>
+              </div>
+              <div class="terminal-key-scroll">
+                <div class="terminal-key-group terminal-navigation">
+                  <button class="btn terminal-key" type="button" disabled data-terminal-key="Home">Home</button>
+                  <button class="btn terminal-key" type="button" disabled data-terminal-key="ArrowUp" data-i18n-aria="keyUp" aria-label="Up arrow">↑</button>
+                  <button class="btn terminal-key" type="button" disabled data-terminal-key="End">End</button>
+                  <button class="btn terminal-key" type="button" disabled data-terminal-key="ArrowLeft" data-i18n-aria="keyLeft" aria-label="Left arrow">←</button>
+                  <button class="btn terminal-key" type="button" disabled data-terminal-key="ArrowDown" data-i18n-aria="keyDown" aria-label="Down arrow">↓</button>
+                  <button class="btn terminal-key" type="button" disabled data-terminal-key="ArrowRight" data-i18n-aria="keyRight" aria-label="Right arrow">→</button>
+                </div>
+                <div class="terminal-key-group terminal-editing">
+                  <button id="pasteTerminalButton" class="btn terminal-key" type="button" disabled data-i18n="paste">Paste</button>
+                  <button class="btn terminal-key" type="button" disabled data-terminal-key="PageUp">PgUp</button>
+                  <button class="btn terminal-key" type="button" disabled data-terminal-key="Enter">Enter</button>
+                  <button class="btn terminal-key" type="button" disabled data-terminal-key="Ctrl-C" id="breakButton">Ctrl-C</button>
+                  <button class="btn terminal-key" type="button" disabled data-terminal-key="PageDown">PgDn</button>
+                  <button class="btn terminal-key" type="button" disabled data-terminal-key="Backspace" data-i18n-aria="backspace" aria-label="Backspace">⌫</button>
+                </div>
+                <div class="terminal-key-group terminal-symbols">
+                  <button class="btn terminal-key" type="button" disabled data-terminal-key="/">/</button>
+                  <button class="btn terminal-key" type="button" disabled data-terminal-key="|">|</button>
+                  <button class="btn terminal-key" type="button" disabled data-terminal-key="~">~</button>
+                  <button class="btn terminal-key" type="button" disabled data-terminal-key="\">\</button>
+                  <button class="btn terminal-key" type="button" disabled data-terminal-key="`">`</button>
+                  <button class="btn terminal-key" type="button" disabled data-terminal-key="-">-</button>
+                </div>
+                <div class="terminal-key-group terminal-shortcuts">
+                  <button class="btn terminal-key" type="button" disabled data-terminal-key="Ctrl-D">Ctrl-D</button>
+                  <button class="btn terminal-key" type="button" disabled data-terminal-key="Ctrl-Z">Ctrl-Z</button>
+                  <button class="btn terminal-key" type="button" disabled data-terminal-key="Ctrl-L">Ctrl-L</button>
+                  <button class="btn terminal-key" type="button" disabled data-terminal-key="Ctrl-A">Ctrl-A</button>
+                  <button class="btn terminal-key" type="button" disabled data-terminal-key="Ctrl-E">Ctrl-E</button>
+                  <button class="btn terminal-key" type="button" disabled data-terminal-key="Ctrl-R">Ctrl-R</button>
+                </div>
+                <div class="terminal-key-group terminal-key-pair">
+                  <button class="btn terminal-key" type="button" disabled data-terminal-key="Ctrl-U">Ctrl-U</button>
+                  <button class="btn terminal-key" type="button" disabled data-terminal-key="Delete">Del</button>
+                </div>
+              </div>
             </div>
           </div>
         </section>
@@ -394,6 +430,6 @@
     <script src="./vendor/xterm/xterm.js"></script>
     <script src="./vendor/addon-fit/addon-fit.js"></script>
     <script type="module" src="./ble_transport.js?v=20260901-mobile1"></script>
-    <script type="module" src="./app.js?v=20260905-hardening1"></script>
+    <script type="module" src="./app.js?v=20260905-terminalkeys2"></script>
   </body>
 </html>

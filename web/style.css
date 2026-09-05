@@ -2267,7 +2267,7 @@ html.soft-keyboard-open .app-shell {
   grid-template-columns: minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
   gap: 0;
-  height: 100dvh;
+  height: var(--terminal-viewport-height, 100dvh);
   min-height: 0;
   padding:
     max(4px, env(safe-area-inset-top, 0px))
@@ -2352,4 +2352,89 @@ html.soft-keyboard-open .terminal-input-actions {
 
 html.soft-keyboard-open .terminal-output:not(.connected) + .terminal-input-bar {
   display: none;
+}
+
+/* Two-row accessory keyboard: fixed modifiers, then scrollable key groups. */
+.terminal-card .terminal-input-bar {
+  --terminal-key-size: clamp(44px, 5vw, 56px);
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: stretch;
+  min-width: 0;
+  gap: 4px;
+  padding: 6px 8px;
+}
+
+.terminal-card .terminal-input-actions {
+  width: 100%;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.terminal-key-group {
+  display: grid;
+  grid-template-columns: repeat(3, var(--terminal-key-size));
+  grid-template-rows: repeat(2, 44px);
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+.terminal-modifiers {
+  padding: 2px 0;
+}
+
+.terminal-key-pair {
+  grid-template-columns: var(--terminal-key-size);
+}
+
+.terminal-key-scroll {
+  display: flex;
+  flex: 1 1 0;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 12px;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+  padding: 2px 0;
+}
+
+.terminal-card .terminal-key,
+.terminal-card .terminal-keyboard {
+  display: inline-flex;
+  width: 100%;
+  min-width: 44px;
+  height: 44px;
+  min-height: 44px;
+  justify-content: center;
+  padding: 0 2px;
+  border-radius: 8px;
+  background: var(--panel-3);
+  font-family: var(--font-mono);
+  font-size: clamp(11px, 1.2vw, 13px);
+  white-space: nowrap;
+  touch-action: manipulation;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.terminal-card .terminal-key[aria-pressed="true"] {
+  color: var(--accent-ink);
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.terminal-key:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -3px;
+}
+
+html.soft-keyboard-open .terminal-card .terminal-input-bar {
+  padding: 4px;
+}
+
+html.soft-keyboard-open .terminal-card .terminal-keyboard {
+  display: inline-flex;
 }

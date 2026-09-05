@@ -4,6 +4,18 @@ This directory packages the shared `web/` terminal for Android and iOS. The UI,
 Management v1 protocol, and Reliable UART v1 implementation remain shared; only
 the BLE transport is native.
 
+## Touch terminal keys
+
+The terminal has a two-row accessory keyboard on phones and tablets. Keyboard,
+Esc, Tab and Shift/Ctrl/Alt stay on the left; the right side scrolls through an
+inverted-T arrow cluster, Home/End, Paste, Enter, Page Up/Down, Backspace, symbols
+and common Ctrl shortcuts. Tap a modifier before the next key; tap again to
+cancel. Modifiers reset after use or disconnect. For example, Ctrl then C sends
+an interrupt, Shift + Tab sends reverse Tab, and Alt + B moves back a word in
+shells that support it. Paste uses the clipboard when available and otherwise
+prompts you to long-press the terminal. Both rows stay above the soft keyboard
+and are shared with the Web and HarmonyOS clients.
+
 ## Build web assets
 
 ```sh
