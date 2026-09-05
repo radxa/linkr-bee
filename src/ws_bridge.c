@@ -40,17 +40,29 @@ LOG_MODULE_REGISTER(linkr_ws, LOG_LEVEL_INF);
 
 BUILD_ASSERT((WS_TX_BUF_SIZE & (WS_TX_BUF_SIZE - 1)) == 0,
 	     "LINKR_BLE_BRIDGE_WS_BRIDGE_CLIENT_BUFFER_SIZE must be a power of two");
+BUILD_ASSERT(sizeof(CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_AUTH_TOKEN) <=
+		     WS_RX_BUF_SIZE,
+	     "WebSocket auth token must fit in one receive buffer");
+
+enum ws_client_state {
+	WS_CLIENT_FREE,
+	WS_CLIENT_CLAIMED,
+	WS_CLIENT_ACTIVE,
+	WS_CLIENT_CLOSING,
+};
 
 struct ws_client {
-	atomic_t in_use;
+	atomic_t state;
 	int sock;
+	struct k_sem start_sem;
 	struct k_sem tx_sem;
 	struct k_mutex tx_lock;
 	struct ring_buf tx_ring;
 	uint8_t tx_buf[WS_TX_BUF_SIZE];
-	uint32_t tx_bytes;
-	uint32_t rx_bytes;
-	uint32_t tx_dropped;
+	atomic_t tx_bytes;
+	atomic_t rx_bytes;
+	atomic_t tx_dropped;
+	bool rx_fragmented;
 };
 
 static struct ws_client clients[WS_MAX_CLIENTS];
@@ -58,13 +70,21 @@ static struct k_thread ws_handler_threads[WS_MAX_CLIENTS];
 K_THREAD_STACK_ARRAY_DEFINE(ws_client_stacks, WS_MAX_CLIENTS,
 			    CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_STACK);
 
-static uint8_t ws_rx_buf[WS_MAX_CLIENTS][WS_RX_BUF_SIZE];
+/* All upgraded-socket receive calls are serialized by ws_rx_lock, so one
+ * scratch buffer is sufficient regardless of the configured client count. */
+static uint8_t ws_rx_buf[WS_RX_BUF_SIZE];
 static uint8_t ws_handshake_buf[1024];
+/* Zephyr's HTTP resource API supplies one receive scratch buffer per resource,
+ * not per upgraded socket. Drain it to EAGAIN under this lock so two client
+ * parsers never retain or overwrite each other's buffered bytes. */
+K_MUTEX_DEFINE(ws_rx_lock);
 
 static struct net_mgmt_event_callback ws_net_cb;
 static atomic_t server_running;
 static atomic_t active_clients;
 static atomic_t ws_enabled = ATOMIC_INIT(1);
+
+static int ws_client_rx_drain_locked(struct ws_client *client, int slot);
 
 /* ------------------------------------------------------------------------ */
 /* Settings persistence ("linkr/ws/en")                                      */
@@ -117,10 +137,27 @@ static int ws_settings_save(bool enabled)
 
 static void ws_client_cleanup(struct ws_client *client)
 {
-	(void)websocket_unregister(client->sock);
+	int sock;
+
+	atomic_set(&client->state, WS_CLIENT_CLOSING);
+
+	k_mutex_lock(&client->tx_lock, K_FOREVER);
+	sock = client->sock;
 	client->sock = -1;
-	atomic_set(&client->in_use, 0);
+	client->rx_fragmented = false;
+	ring_buf_reset(&client->tx_ring);
+	while (k_sem_take(&client->tx_sem, K_NO_WAIT) == 0) {
+	}
+	k_mutex_unlock(&client->tx_lock);
+	if (sock >= 0) {
+		(void)websocket_unregister(sock);
+	}
+
 	atomic_dec(&active_clients);
+	/* Publishing FREE is the final teardown action. The persistent handler
+	 * thread loops back to start_sem, so neither its stack nor sync objects are
+	 * reinitialized while another context may still reference them. */
+	atomic_set(&client->state, WS_CLIENT_FREE);
 }
 
 static bool ws_client_auth(struct ws_client *client, int slot)
@@ -129,6 +166,8 @@ static bool ws_client_auth(struct ws_client *client, int slot)
 	struct zsock_pollfd fds[1];
 	uint32_t message_type;
 	uint64_t remaining;
+	int64_t deadline;
+	bool authenticated;
 	int received;
 
 	if (!token[0]) {
@@ -137,17 +176,88 @@ static bool ws_client_auth(struct ws_client *client, int slot)
 
 	fds[0].fd = client->sock;
 	fds[0].events = ZSOCK_POLLIN;
+	deadline = k_uptime_get() + WS_AUTH_TIMEOUT_MS;
 	if (zsock_poll(fds, 1, WS_AUTH_TIMEOUT_MS) <= 0) {
 		return false;
 	}
-	received = websocket_recv_msg(client->sock, ws_rx_buf[slot],
-				      sizeof(ws_rx_buf[slot]) - 1, &message_type,
-				      &remaining, 0);
-	if (received <= 0 || !(message_type & WEBSOCKET_FLAG_TEXT)) {
+	if (!(fds[0].revents & ZSOCK_POLLIN) ||
+	    (fds[0].revents &
+	     (ZSOCK_POLLHUP | ZSOCK_POLLERR | ZSOCK_POLLNVAL))) {
 		return false;
 	}
-	return received == (int)strlen(token) &&
-	       !memcmp(ws_rx_buf[slot], token, received);
+	k_mutex_lock(&ws_rx_lock, K_FOREVER);
+	/* poll() only proves that some bytes are ready. Let recv finish a frame
+	 * split across TCP packets, while keeping the original auth deadline. */
+	int32_t timeout_ms = (int32_t)MAX(deadline - k_uptime_get(), 0);
+
+	received = websocket_recv_msg(client->sock, ws_rx_buf,
+				      sizeof(ws_rx_buf) - 1, &message_type,
+				      &remaining, timeout_ms);
+	authenticated = received > 0 && remaining == 0 &&
+			(message_type & WEBSOCKET_FLAG_TEXT) &&
+			(message_type & WEBSOCKET_FLAG_FINAL) &&
+			received == (int)strlen(token) &&
+			!memcmp(ws_rx_buf, token, received);
+	if (authenticated && ws_client_rx_drain_locked(client, slot) != 0) {
+		authenticated = false;
+	}
+	k_mutex_unlock(&ws_rx_lock);
+	return authenticated;
+}
+
+static bool ws_client_is_data_fragment(struct ws_client *client,
+				       uint32_t message_type,
+				       uint64_t remaining)
+{
+	bool starts_data = (message_type & (WEBSOCKET_FLAG_BINARY |
+					   WEBSOCKET_FLAG_TEXT)) != 0;
+	bool control = (message_type & (WEBSOCKET_FLAG_CLOSE |
+					WEBSOCKET_FLAG_PING |
+					WEBSOCKET_FLAG_PONG)) != 0;
+	bool continuation = !starts_data && !control && client->rx_fragmented;
+
+	if (remaining == 0) {
+		if (starts_data) {
+			client->rx_fragmented =
+				(message_type & WEBSOCKET_FLAG_FINAL) == 0;
+		} else if (continuation &&
+			   (message_type & WEBSOCKET_FLAG_FINAL)) {
+			client->rx_fragmented = false;
+		}
+	}
+	return starts_data || continuation;
+}
+
+static int ws_client_rx_drain_locked(struct ws_client *client, int slot)
+{
+	for (;;) {
+		uint32_t message_type;
+		uint64_t remaining;
+		int received = websocket_recv_msg(
+			client->sock, ws_rx_buf, sizeof(ws_rx_buf),
+			&message_type, &remaining, 0);
+
+		if (received == -EAGAIN) {
+			return 0;
+		}
+		if (received < 0 || (message_type & WEBSOCKET_FLAG_CLOSE)) {
+			return received < 0 ? received : -ENOTCONN;
+		}
+		if (message_type & WEBSOCKET_FLAG_PING) {
+			(void)websocket_send_msg(client->sock, ws_rx_buf,
+					 received, WEBSOCKET_OPCODE_PONG, false,
+					 true, 100);
+		} else if (ws_client_is_data_fragment(client, message_type,
+						   remaining) &&
+			   received > 0) {
+			if (linkr_uart_write(ws_rx_buf, received) != 0) {
+				LOG_WRN("[%d] UART queue full; dropping %d WS RX bytes",
+					slot, received);
+			} else {
+				atomic_add(&client->rx_bytes, received);
+			}
+		}
+	}
 }
 
 static int ws_client_tx_drain(struct ws_client *client)
@@ -173,7 +283,7 @@ static int ws_client_tx_drain(struct ws_client *client)
 		if (err < 0) {
 			return err;
 		}
-		client->tx_bytes += got;
+		atomic_add(&client->tx_bytes, got);
 	}
 	return 0;
 }
@@ -187,63 +297,52 @@ static void ws_client_thread(void *p1, void *p2, void *p3)
 	ARG_UNUSED(p2);
 	ARG_UNUSED(p3);
 
-	if (!ws_client_auth(client, slot)) {
-		LOG_WRN("[%d] WS auth failed", slot);
-		goto out;
-	}
-	LOG_INF("[%d] WS client connected", slot);
-
-	fds[0].fd = client->sock;
-	fds[0].events = ZSOCK_POLLIN;
-
 	for (;;) {
-		int ret = zsock_poll(fds, 1, WS_POLL_MS);
-
-		if (ret < 0) {
-			LOG_WRN("[%d] WS poll error: %d", slot, errno);
-			break;
+		k_sem_take(&client->start_sem, K_FOREVER);
+		if (atomic_get(&client->state) != WS_CLIENT_ACTIVE) {
+			continue;
 		}
-		if (fds[0].revents & (ZSOCK_POLLHUP | ZSOCK_POLLERR | ZSOCK_POLLNVAL)) {
-			break;
-		}
-		if (fds[0].revents & ZSOCK_POLLIN) {
-			uint32_t message_type;
-			uint64_t remaining;
-			int received = websocket_recv_msg(
-				client->sock, ws_rx_buf[slot],
-				sizeof(ws_rx_buf[slot]), &message_type,
-				&remaining, 0);
 
-			if (received < 0 || (message_type & WEBSOCKET_FLAG_CLOSE)) {
+		if (!ws_client_auth(client, slot)) {
+			LOG_WRN("[%d] WS auth failed", slot);
+			goto out;
+		}
+		LOG_INF("[%d] WS client connected", slot);
+
+		fds[0].fd = client->sock;
+		fds[0].events = ZSOCK_POLLIN;
+
+		for (;;) {
+			int ret = zsock_poll(fds, 1, WS_POLL_MS);
+
+			if (ret < 0) {
+				LOG_WRN("[%d] WS poll error: %d", slot, errno);
 				break;
 			}
-			if (message_type & WEBSOCKET_FLAG_PING) {
-				(void)websocket_send_msg(client->sock,
-							 ws_rx_buf[slot], received,
-							 WEBSOCKET_OPCODE_PONG,
-							 false, true, 100);
-			} else if (received > 0 &&
-				   (message_type & (WEBSOCKET_FLAG_BINARY |
-						    WEBSOCKET_FLAG_TEXT))) {
-				if (linkr_uart_write(ws_rx_buf[slot],
-						     received) != 0) {
-					LOG_WRN("[%d] UART queue full; "
-						"dropping %d WS RX bytes",
-						slot, received);
-				} else {
-					client->rx_bytes += received;
+			if (fds[0].revents &
+			    (ZSOCK_POLLHUP | ZSOCK_POLLERR | ZSOCK_POLLNVAL)) {
+				break;
+			}
+			if (fds[0].revents & ZSOCK_POLLIN) {
+				int err;
+
+				k_mutex_lock(&ws_rx_lock, K_FOREVER);
+				err = ws_client_rx_drain_locked(client, slot);
+				k_mutex_unlock(&ws_rx_lock);
+				if (err) {
+					break;
 				}
 			}
+			if (ws_client_tx_drain(client) != 0) {
+				LOG_WRN("[%d] WS send failed; closing", slot);
+				break;
+			}
 		}
-		if (ws_client_tx_drain(client) != 0) {
-			LOG_WRN("[%d] WS send failed; closing", slot);
-			break;
-		}
-	}
 
 out:
-	LOG_INF("[%d] WS client disconnected", slot);
-	ws_client_cleanup(client);
+		LOG_INF("[%d] WS client disconnected", slot);
+		ws_client_cleanup(client);
+	}
 }
 
 static int linkr_ws_setup(int ws_socket, struct http_request_ctx *request_ctx,
@@ -255,7 +354,8 @@ static int linkr_ws_setup(int ws_socket, struct http_request_ctx *request_ctx,
 	ARG_UNUSED(user_data);
 
 	for (int i = 0; i < WS_MAX_CLIENTS; i++) {
-		if (!atomic_get(&clients[i].in_use)) {
+		if (atomic_cas(&clients[i].state, WS_CLIENT_FREE,
+			       WS_CLIENT_CLAIMED)) {
 			slot = i;
 			break;
 		}
@@ -267,26 +367,20 @@ static int linkr_ws_setup(int ws_socket, struct http_request_ctx *request_ctx,
 
 	struct ws_client *client = &clients[slot];
 
-	atomic_set(&client->in_use, 1);
+	k_mutex_lock(&client->tx_lock, K_FOREVER);
 	client->sock = ws_socket;
-	client->tx_bytes = 0;
-	client->rx_bytes = 0;
-	client->tx_dropped = 0;
-	k_sem_init(&client->tx_sem, 0, 1);
-	k_mutex_init(&client->tx_lock);
-	ring_buf_init(&client->tx_ring, sizeof(client->tx_buf), client->tx_buf);
-	atomic_inc(&active_clients);
-
-	k_thread_create(&ws_handler_threads[slot], ws_client_stacks[slot],
-			K_THREAD_STACK_SIZEOF(ws_client_stacks[slot]),
-			ws_client_thread, INT_TO_POINTER(slot), NULL, NULL,
-			K_PRIO_PREEMPT(8), 0, K_NO_WAIT);
-	if (IS_ENABLED(CONFIG_THREAD_NAME)) {
-		char name[sizeof("ws[0]")];
-
-		snprintk(name, sizeof(name), "ws[%d]", slot);
-		k_thread_name_set(&ws_handler_threads[slot], name);
+	client->rx_fragmented = false;
+	atomic_clear(&client->tx_bytes);
+	atomic_clear(&client->rx_bytes);
+	atomic_clear(&client->tx_dropped);
+	ring_buf_reset(&client->tx_ring);
+	while (k_sem_take(&client->tx_sem, K_NO_WAIT) == 0) {
 	}
+	k_mutex_unlock(&client->tx_lock);
+
+	atomic_inc(&active_clients);
+	atomic_set(&client->state, WS_CLIENT_ACTIVE);
+	k_sem_give(&client->start_sem);
 	return 0;
 }
 
@@ -326,9 +420,12 @@ HTTP_RESOURCE_DEFINE(linkr_ws_resource, linkr_ws_service, "/ws",
 static void ws_close_all_clients(void)
 {
 	for (int i = 0; i < WS_MAX_CLIENTS; i++) {
-		if (atomic_get(&clients[i].in_use)) {
+		k_mutex_lock(&clients[i].tx_lock, K_FOREVER);
+		if (atomic_get(&clients[i].state) != WS_CLIENT_FREE &&
+		    clients[i].sock >= 0) {
 			(void)zsock_shutdown(clients[i].sock, ZSOCK_SHUT_RDWR);
 		}
+		k_mutex_unlock(&clients[i].tx_lock);
 	}
 }
 
@@ -381,10 +478,35 @@ static void ws_net_event_handler(struct net_mgmt_event_callback *cb,
 
 int linkr_ws_init(void)
 {
+	for (int i = 0; i < WS_MAX_CLIENTS; i++) {
+		struct ws_client *client = &clients[i];
+
+		client->sock = -1;
+		atomic_set(&client->state, WS_CLIENT_FREE);
+		k_sem_init(&client->start_sem, 0, 1);
+		k_sem_init(&client->tx_sem, 0, 1);
+		k_mutex_init(&client->tx_lock);
+		ring_buf_init(&client->tx_ring, sizeof(client->tx_buf),
+			      client->tx_buf);
+		k_thread_create(&ws_handler_threads[i], ws_client_stacks[i],
+				K_THREAD_STACK_SIZEOF(ws_client_stacks[i]),
+				ws_client_thread, INT_TO_POINTER(i), NULL, NULL,
+				K_PRIO_PREEMPT(8), 0, K_NO_WAIT);
+		if (IS_ENABLED(CONFIG_THREAD_NAME)) {
+			char name[sizeof("ws[0]")];
+
+			snprintk(name, sizeof(name), "ws[%d]", i);
+			k_thread_name_set(&ws_handler_threads[i], name);
+		}
+	}
+
 	net_mgmt_init_event_callback(&ws_net_cb, ws_net_event_handler,
 				     NET_EVENT_IPV4_ADDR_ADD |
 					     NET_EVENT_IPV4_ADDR_DEL);
 	net_mgmt_add_event_callback(&ws_net_cb);
+	if (atomic_get(&ws_enabled) && linkr_wifi_has_ip()) {
+		return ws_server_start();
+	}
 	return 0;
 }
 
@@ -422,10 +544,14 @@ void linkr_ws_feed(const uint8_t *data, size_t len)
 		uint32_t discarded = 0;
 		uint32_t written;
 
-		if (!atomic_get(&client->in_use)) {
+		if (atomic_get(&client->state) != WS_CLIENT_ACTIVE) {
 			continue;
 		}
 		k_mutex_lock(&client->tx_lock, K_FOREVER);
+		if (atomic_get(&client->state) != WS_CLIENT_ACTIVE) {
+			k_mutex_unlock(&client->tx_lock);
+			continue;
+		}
 		if (keep > WS_TX_BUF_SIZE) {
 			discarded += keep - WS_TX_BUF_SIZE;
 			src += keep - WS_TX_BUF_SIZE;
@@ -437,11 +563,11 @@ void linkr_ws_feed(const uint8_t *data, size_t len)
 			discarded += ring_buf_get(&client->tx_ring, NULL, oldest);
 		}
 		written = ring_buf_put(&client->tx_ring, src, keep);
-		k_mutex_unlock(&client->tx_lock);
-		client->tx_dropped += discarded + keep - written;
+		atomic_add(&client->tx_dropped, discarded + keep - written);
 		if (written) {
 			k_sem_give(&client->tx_sem);
 		}
+		k_mutex_unlock(&client->tx_lock);
 	}
 }
 
@@ -462,9 +588,9 @@ int linkr_ws_diagnostics(char *buf, size_t len)
 	uint32_t dropped = 0;
 
 	for (int i = 0; i < WS_MAX_CLIENTS; i++) {
-		tx += clients[i].tx_bytes;
-		rx += clients[i].rx_bytes;
-		dropped += clients[i].tx_dropped;
+		tx += (uint32_t)atomic_get(&clients[i].tx_bytes);
+		rx += (uint32_t)atomic_get(&clients[i].rx_bytes);
+		dropped += (uint32_t)atomic_get(&clients[i].tx_dropped);
 	}
 	return snprintk(buf, len,
 			"state=%s port=%u clients=%d tx=%u rx=%u dropped=%u",

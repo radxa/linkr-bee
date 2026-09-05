@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 IMAGE=${LINKR_IMAGE:-}
 CHIP=${LINKR_CHIP:-}
 FLASH_ADDRESS=${LINKR_FLASH_ADDRESS:-}

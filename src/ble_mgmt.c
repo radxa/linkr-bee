@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include <zephyr/bluetooth/gatt.h>
+#include <zephyr/bluetooth/hci.h>
 #include <zephyr/drivers/hwinfo.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -26,6 +27,15 @@ LOG_MODULE_REGISTER(linkr_ble_mgmt, LOG_LEVEL_INF);
 #define LINKR_MGMT_TX_QUEUE_DEPTH CONFIG_LINKR_BLE_BRIDGE_MGMT_TX_QUEUE_DEPTH
 #define LINKR_MGMT_INDICATE_TIMEOUT_MS 5000
 #define LINKR_MGMT_FRAGMENT_MAX 244
+
+#define LINKR_MGMT_CAPABILITIES                                               \
+	(LINKR_MGMT_CAP_DEVICE_ID | LINKR_MGMT_CAP_RELIABLE_UART |             \
+	 (IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_WIFI) ?                            \
+		(LINKR_MGMT_CAP_WIFI | LINKR_MGMT_CAP_ASYNC_EVENTS) : 0) |      \
+	 (IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_WEBDAV) ?                          \
+		LINKR_MGMT_CAP_WEBDAV : 0) |                                    \
+	 (IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE) ?                       \
+		LINKR_MGMT_CAP_WEBSOCKET : 0))
 
 struct linkr_mgmt_protocol_info {
 	uint8_t major;
@@ -79,14 +89,8 @@ static const struct linkr_mgmt_protocol_info protocol_info = {
 		(LINKR_MGMT_MAX_PAYLOAD >> 8) & 0xff,
 	},
 	.capabilities_le = {
-		(LINKR_MGMT_CAP_WIFI | LINKR_MGMT_CAP_WEBDAV |
-		 LINKR_MGMT_CAP_WEBSOCKET | LINKR_MGMT_CAP_DEVICE_ID |
-		 LINKR_MGMT_CAP_ASYNC_EVENTS |
-		 LINKR_MGMT_CAP_RELIABLE_UART) & 0xff,
-		((LINKR_MGMT_CAP_WIFI | LINKR_MGMT_CAP_WEBDAV |
-		  LINKR_MGMT_CAP_WEBSOCKET | LINKR_MGMT_CAP_DEVICE_ID |
-		  LINKR_MGMT_CAP_ASYNC_EVENTS |
-		  LINKR_MGMT_CAP_RELIABLE_UART) >> 8) & 0xff,
+		LINKR_MGMT_CAPABILITIES & 0xff,
+		(LINKR_MGMT_CAPABILITIES >> 8) & 0xff,
 		0,
 		0,
 	},
@@ -197,7 +201,8 @@ static ssize_t command_write(struct bt_conn *conn,
 		header = (const struct linkr_mgmt_header *)bytes;
 		if (header->magic[0] != 'L' || header->magic[1] != 'K' ||
 		    header->version != LINKR_MGMT_API_MAJOR ||
-		    header->type != LINKR_MGMT_MSG_REQUEST) {
+		    header->type != LINKR_MGMT_MSG_REQUEST ||
+		    sys_get_le32(header->request_id_le) == 0) {
 			err = BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
 			goto out;
 		}
@@ -273,6 +278,12 @@ static void indication_complete(struct bt_conn *conn,
 	ARG_UNUSED(params);
 
 	indication_result = err ? -EIO : 0;
+	/* params remains owned by the GATT stack until the destroy callback. */
+}
+
+static void indication_destroy(struct bt_gatt_indicate_params *params)
+{
+	ARG_UNUSED(params);
 	k_sem_give(&indication_done);
 }
 
@@ -292,6 +303,7 @@ static int indicate_fragment(struct bt_conn *conn, const uint8_t *data,
 	memset(&indication_params, 0, sizeof(indication_params));
 	indication_params.attr = &linkr_mgmt_service.attrs[8];
 	indication_params.func = indication_complete;
+	indication_params.destroy = indication_destroy;
 	indication_params.data = data;
 	indication_params.len = len;
 
@@ -301,6 +313,11 @@ static int indicate_fragment(struct bt_conn *conn, const uint8_t *data,
 	}
 	if (k_sem_take(&indication_done,
 		       K_MSEC(LINKR_MGMT_INDICATE_TIMEOUT_MS)) != 0) {
+		/* The params object cannot be reused until destroy runs. Disconnect to
+		 * complete the outstanding ATT procedure, then wait for its cleanup. */
+		LOG_WRN("Management indication timed out; disconnecting peer");
+		(void)bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+		(void)k_sem_take(&indication_done, K_FOREVER);
 		return -ETIMEDOUT;
 	}
 	return indication_result;
@@ -444,7 +461,6 @@ void linkr_mgmt_disconnected(struct bt_conn *conn)
 	while (k_msgq_get(&tx_queue, &message, K_NO_WAIT) == 0) {
 		tx_message_free(message);
 	}
-	k_sem_give(&indication_done);
 }
 
 int linkr_mgmt_send(struct bt_conn *conn, uint8_t type, uint32_t request_id,

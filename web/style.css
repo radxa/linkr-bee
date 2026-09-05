@@ -430,6 +430,24 @@ h1 {
   display: none;
 }
 
+.field-error {
+  display: block;
+  margin-top: 6px;
+  color: var(--danger);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.field-error[hidden] {
+  display: none;
+}
+
+input[aria-invalid="true"] {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 16%, transparent);
+}
+
 /* ---------- Buttons ---------- */
 .btn {
   display: inline-flex;
@@ -479,6 +497,10 @@ h1 {
   box-shadow:
     0 8px 20px rgba(47, 179, 119, 0.38),
     inset 0 1px 0 rgba(255, 255, 255, 0.22);
+}
+
+.connect-icon[hidden] {
+  display: none;
 }
 
 .btn-soft {
@@ -1254,10 +1276,22 @@ details.ref[open] summary::before {
 
 .ref-item {
   display: flex;
+  width: 100%;
   gap: 10px;
   align-items: baseline;
   padding: 5px 0;
   border-bottom: 1px dashed var(--line-soft);
+}
+
+button.ref-item {
+  appearance: none;
+  border-top: 0;
+  border-right: 0;
+  border-left: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
 }
 
 .ref-item[data-cmd] {
@@ -1268,8 +1302,18 @@ details.ref[open] summary::before {
   transition: background-color 0.15s ease;
 }
 
-.ref-item[data-cmd]:hover {
+.ref-item[data-cmd]:hover:not(:disabled) {
   background: var(--panel-3);
+}
+
+.ref-item[data-cmd]:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.ref-item[data-cmd]:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
 }
 
 .ref-item:last-child {
@@ -1299,7 +1343,7 @@ details.ref[open] summary::before {
 }
 
 @media (max-width: 900px) {
-  .controls {
+  .app-shell .controls {
     position: fixed;
     top: 0;
     left: 0;
@@ -1312,11 +1356,15 @@ details.ref[open] summary::before {
     border-right: 1px solid var(--line);
     box-shadow: var(--shadow);
     transform: translateX(-100%);
-    transition: transform 0.25s ease;
+    visibility: hidden;
+    transition: transform 0.25s ease, visibility 0s 0.25s,
+      background-color 0.25s ease, border-color 0.25s ease;
   }
 
   .app-shell.sidebar-open .controls {
     transform: translateX(0);
+    visibility: visible;
+    transition-delay: 0s;
   }
 
   .drawer-backdrop {
@@ -1364,6 +1412,10 @@ details.ref[open] summary::before {
     gap: 10px;
     padding: 8px 10px;
   }
+}
+
+body.drawer-open {
+  overflow: hidden;
 }
 
 /* ---------- Theme transition ---------- */
@@ -1526,6 +1578,17 @@ body,
   border-color: var(--accent);
   color: var(--text);
   transform: translateY(-1px);
+}
+
+.preset-chip[data-danger="true"]:not(:disabled) {
+  border-color: color-mix(in srgb, var(--danger) 55%, var(--line));
+  color: var(--danger);
+}
+
+.preset-chip[data-danger="true"]:hover:not(:disabled) {
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, var(--panel-2));
+  color: var(--danger);
 }
 
 .preset-chip:active:not(:disabled) {

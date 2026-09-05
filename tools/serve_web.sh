@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+ROOT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 PORT=${1:-8765}
 
 cd "$ROOT_DIR"

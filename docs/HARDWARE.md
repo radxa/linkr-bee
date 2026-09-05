@@ -152,10 +152,10 @@ ESP32-C5 DevKitC 差异：
 
 ```sh
 # 在含 hal_espressif 的 west workspace 内
-west build -b esp32c3_supermini /path/to/linkr-ble
+west build -b esp32c3_supermini /path/to/linkr-bee
 west flash --esp-device /dev/cu.usbmodemXXXX
 
-west build -b esp32c5_devkitc/esp32c5/hpcore /path/to/linkr-ble
+west build -b esp32c5_devkitc/esp32c5/hpcore /path/to/linkr-bee
 tools/flash_firmware.sh --image build/zephyr/zephyr.bin --chip esp32c5
 ```
 

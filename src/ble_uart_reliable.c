@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include <zephyr/bluetooth/gatt.h>
+#include <zephyr/bluetooth/hci.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/atomic.h>
@@ -208,6 +209,12 @@ static void indication_complete(struct bt_conn *conn,
 	ARG_UNUSED(conn);
 	ARG_UNUSED(params);
 	indication_result = err ? -EIO : 0;
+	/* params remains owned by the GATT stack until the destroy callback. */
+}
+
+static void indication_destroy(struct bt_gatt_indicate_params *params)
+{
+	ARG_UNUSED(params);
 	k_sem_give(&indication_done);
 }
 
@@ -228,6 +235,7 @@ static int indicate_fragment(struct bt_conn *conn, const uint8_t *data,
 		memset(&indication_params, 0, sizeof(indication_params));
 		indication_params.attr = &linkr_uart_reliable_service.attrs[4];
 		indication_params.func = indication_complete;
+		indication_params.destroy = indication_destroy;
 		indication_params.data = data;
 		indication_params.len = len;
 		err = bt_gatt_indicate(conn, &indication_params);
@@ -240,6 +248,11 @@ static int indicate_fragment(struct bt_conn *conn, const uint8_t *data,
 		return err;
 	}
 	if (k_sem_take(&indication_done, K_MSEC(INDICATE_TIMEOUT_MS))) {
+		/* Do not return while Zephyr still owns indication_params. Force the
+		 * connection down so GATT completes the request, then wait for destroy. */
+		LOG_WRN("Reliable UART indication timed out; disconnecting peer");
+		(void)bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+		(void)k_sem_take(&indication_done, K_FOREVER);
 		return -ETIMEDOUT;
 	}
 	return indication_result;
@@ -264,7 +277,6 @@ void linkr_uart_reliable_disconnected(struct bt_conn *conn)
 	}
 	k_mutex_unlock(&rx_lock);
 	atomic_clear(&indication_enabled);
-	k_sem_give(&indication_done);
 }
 
 bool linkr_uart_reliable_mode(void)

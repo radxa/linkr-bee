@@ -234,6 +234,16 @@ config LINKR_BLE_BRIDGE_WIFI_CONNECT_STACK
 	range 1024 16384
 	depends on LINKR_BLE_BRIDGE_WIFI
 
+config LINKR_BLE_BRIDGE_WIFI_OPERATION_TIMEOUT_MS
+	int "WiFi connect and DHCP timeout in milliseconds"
+	default 30000
+	range 5000 300000
+	depends on LINKR_BLE_BRIDGE_WIFI
+	help
+	  Bound the time spent waiting for association or an IPv4 lease. When the
+	  deadline expires, the pending operation fails, the interface is reset,
+	  and the normal reconnect policy is resumed.
+
 config LINKR_BLE_BRIDGE_WEBDAV
 	bool "Enable WebDAV serial log upload"
 	default y
@@ -351,6 +361,24 @@ config LINKR_BLE_BRIDGE_MGMT_REQUEST_STACK
 	int "BLE management request thread stack size"
 	default 4096
 	range 1024 8192
+
+# Size Zephyr's shared HTTP/WebSocket resources only when the bridge exists.
+# Keeping these defaults here avoids invalid prj.conf assignments in builds
+# that intentionally compile the optional service out.
+config HTTP_SERVER_MAX_CLIENTS
+	default LINKR_BLE_BRIDGE_WS_BRIDGE_MAX_CLIENTS if LINKR_BLE_BRIDGE_WS_BRIDGE
+
+config WEBSOCKET_MAX_CONTEXTS
+	default LINKR_BLE_BRIDGE_WS_BRIDGE_MAX_CLIENTS if LINKR_BLE_BRIDGE_WS_BRIDGE
+
+config HTTP_SERVER_VERSION_2
+	default n if LINKR_BLE_BRIDGE_WS_BRIDGE
+	help
+	  Linkr only uses the HTTP/1.1 WebSocket upgrade path. Keeping HTTP/2 out
+	  avoids reserving its parser, HPACK, and Huffman resources on ESP32-C3.
+
+config HTTP_SERVER_STACK_SIZE
+	default 8192 if LINKR_BLE_BRIDGE_WS_BRIDGE
 
 endmenu
 

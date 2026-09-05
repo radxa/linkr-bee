@@ -16,11 +16,17 @@ const RELIABLE_UART_TX = "4c4b0012-9a7e-4f4e-8b8a-3d6f12a0c001";
 const RELIABLE_UART_STATE = "4c4b0013-9a7e-4f4e-8b8a-3d6f12a0c001";
 const MGMT_HEADER_SIZE = 12;
 const MGMT_API_MAJOR = 1;
+const MGMT_CAP_WIFI = 1 << 0;
+const MGMT_CAP_WEBDAV = 1 << 1;
+const MGMT_CAP_DEVICE_ID = 1 << 3;
+const MGMT_CAP_ASYNC_EVENTS = 1 << 4;
+const MGMT_CAP_RELIABLE_UART = 1 << 5;
 const RELIABLE_UART_HEADER_SIZE = 12;
 const BLE_MAX_ATT_VALUE = 244;
 const BLE_DEVICE_NAME_PREFIX = "Linkr BLE UART";
 const WIFI_SCAN_CMD = "@w scan";
 const WIFI_SCAN_PREFIX = "@scan ";
+const WIFI_SCAN_TIMEOUT_MS = 50000;
 const WS_CONNECT_TIMEOUT_MS = 15000;
 const bleTransport = window.LinkrBleTransport;
 const coarsePointerMedia = window.matchMedia("(pointer: coarse)");
@@ -49,6 +55,8 @@ const state = {
   reliableWriteSize: BLE_MAX_ATT_VALUE,
   reliableRx: null,
   deviceId: "",
+  mgmtCapabilities: 0,
+  mgmtMaxPayload: 512,
   nextRequestId: 1,
   mgmtRx: null,
   mgmtResponses: new ManagementResponseTracker(),
@@ -76,7 +84,6 @@ const state = {
   scanTimer: null,
   wifiRefreshTimers: [],
   wifiStatus: { connected: false, ssid: "", ip: "down" },
-  rxBuffer: "",
   diagnostics: {},
   logSize: 0,
 };
@@ -86,6 +93,10 @@ const LOG_CAP_BYTES = 4 * 1024 * 1024;
 const $ = (id) => document.getElementById(id);
 
 const elements = {
+  appShell: document.querySelector(".app-shell"),
+  topbar: document.querySelector(".topbar"),
+  controlsPanel: $("controlsPanel"),
+  workpanel: document.querySelector(".workpanel"),
   supportText: $("supportText"),
   statusDot: $("statusDot"),
   statusText: $("statusText"),
@@ -158,6 +169,7 @@ const elements = {
   lanModeBtn: $("lanModeBtn"),
   wsHostField: $("wsHostField"),
   wsHostInput: $("wsHostInput"),
+  wsHostError: $("wsHostError"),
   mobileConnectBtn: $("mobileConnectBtn"),
 };
 
@@ -192,6 +204,7 @@ const TERMINAL_FONTS = {
 const XTERM_DARK = {
   background: "#05080d",
   foreground: "#d8f3dc",
+  brightBlack: "#8d9bb0",
   cursor: "#d8f3dc",
   selectionBackground: "#2b5340",
 };
@@ -199,6 +212,7 @@ const XTERM_DARK = {
 const XTERM_LIGHT = {
   background: "#f8fafc",
   foreground: "#1f6b43",
+  brightBlack: "#5c6a82",
   cursor: "#1f6b43",
   selectionBackground: "#bfe3cf",
 };
@@ -298,6 +312,16 @@ const I18N = {
     grpPerm: "Permissions & Processes",
     panel: "Settings",
     close: "Close",
+    controls: "Control panel",
+    connectionControls: "Connection controls",
+    transport: "Transport",
+    togglePanel: "Toggle control panel",
+    closePanel: "Close control panel",
+    terminalSettingsAria: "Terminal settings",
+    wifiWebdavAria: "WiFi and WebDAV settings",
+    cheatsheetAria: "Command cheat sheet",
+    quickSend: "Quick send commands",
+    statusAria: "Connection statistics",
     theme: "Theme",
     language: "Language",
     zoomIn: "Increase font size",
@@ -318,6 +342,8 @@ const I18N = {
     sent: "Sent",
     cleared: "Screen cleared",
     copied: "Copied to clipboard",
+    copyFailed: "Copy failed. Select the text and copy it manually.",
+    confirmReboot: "Reboot the connected device now?",
     scan: "Scan",
     scanning: "Scanning…",
     foundN: "Found {n} networks",
@@ -420,6 +446,16 @@ const I18N = {
     grpPerm: "权限与进程",
     panel: "设置",
     close: "关闭",
+    controls: "控制面板",
+    connectionControls: "连接控制",
+    transport: "连接方式",
+    togglePanel: "切换控制面板",
+    closePanel: "关闭控制面板",
+    terminalSettingsAria: "终端设置",
+    wifiWebdavAria: "WiFi 与 WebDAV 设置",
+    cheatsheetAria: "命令速查",
+    quickSend: "快捷发送命令",
+    statusAria: "连接统计",
     theme: "主题",
     language: "语言",
     zoomIn: "放大字体",
@@ -440,6 +476,8 @@ const I18N = {
     sent: "已发送",
     cleared: "已清屏",
     copied: "已复制到剪贴板",
+    copyFailed: "复制失败，请选中文本后手动复制。",
+    confirmReboot: "确定立即重启当前连接的设备吗？",
     scan: "扫描",
     scanning: "扫描中…",
     foundN: "找到 {n} 个网络",
@@ -483,7 +521,9 @@ function escapeHtml(value) {
   return String(value)
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function updateXtermTheme() {
@@ -598,15 +638,40 @@ function setSupportText() {
     : t("unsupported");
 }
 
+function setWsHostError(message = "", focus = false, i18nKey = "") {
+  const hasError = Boolean(message);
+  elements.wsHostInput.setAttribute("aria-invalid", String(hasError));
+  elements.wsHostError.textContent = message;
+  elements.wsHostError.hidden = !hasError;
+  elements.wsHostError.dataset.i18nKey = hasError ? i18nKey : "";
+  if (hasError && focus) {
+    elements.wsHostInput.focus();
+  }
+}
+
+function syncTransportControls() {
+  const isWs = state.mode === "ws";
+  elements.bleModeBtn.classList.toggle("active", !isWs);
+  elements.lanModeBtn.classList.toggle("active", isWs);
+  elements.bleModeBtn.setAttribute("aria-pressed", String(!isWs));
+  elements.lanModeBtn.setAttribute("aria-pressed", String(isWs));
+  elements.wsHostField.hidden = !isWs;
+  document.querySelectorAll(".connect-icon-ble").forEach((icon) => {
+    icon.toggleAttribute("hidden", isWs);
+  });
+  document.querySelectorAll(".connect-icon-lan").forEach((icon) => {
+    icon.toggleAttribute("hidden", !isWs);
+  });
+}
+
 function setTransportMode(mode) {
-  if (state.connected || mode === state.mode) {
+  if (state.connected || !["ble", "ws"].includes(mode)) {
     return;
   }
   state.mode = mode;
   saveSetting(TRANSPORT_KEY, mode);
-  elements.bleModeBtn.classList.toggle("active", mode === "ble");
-  elements.lanModeBtn.classList.toggle("active", mode === "ws");
-  elements.wsHostField.hidden = mode !== "ws";
+  syncTransportControls();
+  setWsHostError();
   setConnected(false);
   setSupportText();
 }
@@ -688,6 +753,7 @@ function renderRefLists() {
   const cheat = document.getElementById("cheatList");
   const shortcut = document.getElementById("shortcutList");
   if (cheat) {
+    const disabled = state.connected ? "" : " disabled";
     cheat.innerHTML = CHEATS.map(
       (g) => `
         <div class="ref-group">
@@ -695,10 +761,10 @@ function renderRefLists() {
           ${g.items
             .map(
               (it) => `
-            <div class="ref-item" data-cmd="${escapeHtml(it.c)}">
+            <button class="ref-item" type="button" data-cmd="${escapeHtml(it.c)}"${disabled}>
               <code class="ref-cmd">${escapeHtml(it.c)}</code>
               <span class="ref-desc">${escapeHtml(tl(it.d))}</span>
-            </div>`,
+            </button>`,
             )
             .join("")}
         </div>`,
@@ -729,6 +795,10 @@ function applyLang() {
   document.querySelectorAll("[data-i18n-aria]").forEach((el) => {
     el.setAttribute("aria-label", t(el.getAttribute("data-i18n-aria")));
   });
+  const wsErrorKey = elements.wsHostError.dataset.i18nKey;
+  if (!elements.wsHostError.hidden && wsErrorKey) {
+    setWsHostError(t(wsErrorKey), false, wsErrorKey);
+  }
   updateToggleLabels();
   renderRefLists();
   refreshDynamicTexts();
@@ -1073,11 +1143,19 @@ function clearWifiRefreshTimers() {
   state.wifiRefreshTimers = [];
 }
 
+function hasManagementCapability(capability) {
+  return (state.mgmtCapabilities & capability) !== 0;
+}
+
 function requestWifiState() {
   if (!state.connected || state.mode !== "ble") {
     return Promise.resolve();
   }
-  return Promise.all([sendControl("@w?"), requestDiagnostics()]);
+  const requests = [requestDiagnostics()];
+  if (hasManagementCapability(MGMT_CAP_WIFI)) {
+    requests.push(sendControl("@w?"));
+  }
+  return Promise.all(requests);
 }
 
 function scheduleWifiStateRefresh() {
@@ -1204,12 +1282,11 @@ function handleInfoLine(line) {
   state.diagnostics[group] = fields;
 }
 
-function feedRx(text) {
-  state.rxBuffer += text;
-  const lines = state.rxBuffer.split(/\r?\n/);
-  state.rxBuffer = lines.pop() || "";
-  for (const line of lines) {
-    handleRxLine(line);
+function feedManagementText(text) {
+  for (const line of String(text).split(/\r?\n/)) {
+    if (line) {
+      handleRxLine(line);
+    }
   }
 }
 
@@ -1255,7 +1332,11 @@ function handleRxLine(line) {
 }
 
 async function scanWifi() {
-  if (!state.connected) {
+  if (
+    !state.connected ||
+    !hasManagementCapability(MGMT_CAP_WIFI) ||
+    !hasManagementCapability(MGMT_CAP_ASYNC_EVENTS)
+  ) {
     return;
   }
   state.scanning = true;
@@ -1264,7 +1345,7 @@ async function scanWifi() {
   elements.wifiFeedback.textContent = t("scanning");
   elements.wifiScanButton.disabled = true;
   clearTimeout(state.scanTimer);
-  state.scanTimer = setTimeout(finishScan, 50000);
+  state.scanTimer = setTimeout(finishScan, WIFI_SCAN_TIMEOUT_MS);
   try {
     await sendControl(WIFI_SCAN_CMD);
     toast(t("scanning"));
@@ -1281,7 +1362,11 @@ function finishScan(failed = false) {
   state.scanning = false;
   clearTimeout(state.scanTimer);
   updateWifiDatalist();
-  elements.wifiScanButton.disabled = !state.connected;
+  elements.wifiScanButton.disabled = !(
+    state.connected &&
+    hasManagementCapability(MGMT_CAP_WIFI) &&
+    hasManagementCapability(MGMT_CAP_ASYNC_EVENTS)
+  );
   if (failed) {
     elements.wifiFeedback.textContent = t("scanFailed");
     toast(t("scanFailed"), "error");
@@ -1354,6 +1439,11 @@ function setConnected(connected) {
   const canConnect =
     Boolean(state.term) && (isWs || Boolean(bleTransport?.isAvailable()));
   const canControl = connected && !isWs;
+  const canControlWifi = canControl && hasManagementCapability(MGMT_CAP_WIFI);
+  const canMutateWifi =
+    canControlWifi && hasManagementCapability(MGMT_CAP_ASYNC_EVENTS);
+  const canControlWebdav =
+    canControl && hasManagementCapability(MGMT_CAP_WEBDAV);
 
   state.writeGeneration += 1;
   state.connected = connected;
@@ -1395,18 +1485,21 @@ function setConnected(connected) {
   elements.terminalInputHint.textContent = t(
     connected ? "terminalInputHint" : "terminalInputDisconnected",
   );
-  elements.wifiSetButton.disabled = !canControl;
-  elements.wifiOffButton.disabled = !canControl;
-  elements.wifiQueryButton.disabled = !canControl;
-  elements.wifiScanButton.disabled = !canControl;
-  elements.webdavSetButton.disabled = !canControl;
-  elements.webdavOffButton.disabled = !canControl;
-  elements.webdavQueryButton.disabled = !canControl;
+  elements.wifiSetButton.disabled = !canMutateWifi;
+  elements.wifiOffButton.disabled = !canMutateWifi;
+  elements.wifiQueryButton.disabled = !canControlWifi;
+  elements.wifiScanButton.disabled = !canMutateWifi;
+  elements.webdavSetButton.disabled = !canControlWebdav;
+  elements.webdavOffButton.disabled = !canControlWebdav;
+  elements.webdavQueryButton.disabled = !canControlWebdav;
   if (elements.presetChips) {
     elements.presetChips
       .querySelectorAll(".preset-chip")
       .forEach((chip) => (chip.disabled = !connected));
   }
+  document
+    .querySelectorAll("#cheatList button[data-cmd]")
+    .forEach((button) => (button.disabled = !connected));
   if (connected) {
     setAutoScroll(true, true);
     state.term.focus();
@@ -1651,6 +1744,9 @@ async function sendControl(command) {
   const requestId = state.nextRequestId || 1;
   state.nextRequestId = requestId === 0xffffffff ? 1 : requestId + 1;
   const payload = encoder.encode(command);
+  if (payload.length === 0 || payload.length > state.mgmtMaxPayload) {
+    throw new Error("Management command payload is outside the advertised limit");
+  }
   const frame = new Uint8Array(MGMT_HEADER_SIZE + payload.length);
   const view = new DataView(frame.buffer);
   frame[0] = 0x4c;
@@ -1707,7 +1803,7 @@ function dispatchManagementMessage(message) {
       `[mgmt ${kind} #${message.requestId} flags=0x${message.flags.toString(16)}]`,
     );
   }
-  feedRx(text);
+  feedManagementText(text);
   for (const line of text.split(/\r?\n/)) {
     if (line) {
       appendLine(`[${kind} #${message.requestId}] ${line}`);
@@ -1743,6 +1839,14 @@ function onManagementIndication(value) {
       payload: [],
       received: 0,
     };
+    if (
+      state.mgmtRx.expected === 0 ||
+      state.mgmtRx.expected > state.mgmtMaxPayload
+    ) {
+      appendLine("[error] oversized management response header");
+      state.mgmtRx = null;
+      return;
+    }
     fragment = bytes.slice(MGMT_HEADER_SIZE);
   }
 
@@ -1793,6 +1897,15 @@ function onReliableUartIndication(value) {
       chunks: [],
       received: 0,
     };
+    if (
+      state.reliableRx.sequence === 0 ||
+      state.reliableRx.expected === 0 ||
+      state.reliableRx.expected > state.reliableMaxPayload
+    ) {
+      appendLine("[error] invalid Reliable UART frame header");
+      state.reliableRx = null;
+      return;
+    }
     fragment = bytes.slice(RELIABLE_UART_HEADER_SIZE);
   }
 
@@ -1839,7 +1952,6 @@ function handleIncomingBytes(bytes) {
   if (elements.debugInput.checked) {
     appendLine(`RX ${bytes.length}: ${JSON.stringify(text)}`);
   }
-  feedRx(text);
   appendOutput(bytes);
 }
 
@@ -1863,9 +1975,10 @@ function onDisconnected() {
     new Error("Disconnected before management response"),
   );
   state.deviceId = "";
+  state.mgmtCapabilities = 0;
+  state.mgmtMaxPayload = 512;
   state.ws = null;
   state.scanning = false;
-  state.rxBuffer = "";
   state.diagnostics = {};
   rxDecoder = new TextDecoder();
   clearWifiRefreshTimers();
@@ -1883,9 +1996,11 @@ function connectWs() {
   return new Promise((resolve, reject) => {
     const host = elements.wsHostInput.value.trim();
     if (!host) {
+      setWsHostError(t("wsMissingHost"), true, "wsMissingHost");
       reject(new Error(t("wsMissingHost")));
       return;
     }
+    setWsHostError();
     saveSetting(WS_HOST_KEY, host);
     const url = /^wss?:\/\//.test(host) ? host : `ws://${host}/ws`;
     const ws = new WebSocket(url);
@@ -1922,6 +2037,7 @@ function connectWs() {
       settled = true;
       clearConnectTimer();
       opened = true;
+      setWsHostError();
       setConnected(true);
       appendLine("[ready]");
       resolve();
@@ -1954,6 +2070,9 @@ async function connect() {
     try {
       await connectWs();
     } catch (error) {
+      if (elements.wsHostError.hidden) {
+        setWsHostError(error.message, true);
+      }
       appendLine(`[error] ${error.message}`);
       setConnected(false);
     } finally {
@@ -1994,11 +2113,25 @@ async function connect() {
     if (protocolValue.byteLength < 10 || protocolValue.getUint8(0) !== MGMT_API_MAJOR) {
       throw new Error("Unsupported Linkr Management API version");
     }
+    state.mgmtMaxPayload = protocolValue.getUint16(2, true);
+    if (state.mgmtMaxPayload === 0) {
+      throw new Error("Invalid Linkr Management payload limit");
+    }
+    state.mgmtCapabilities = protocolValue.getUint32(4, true);
+    if (!hasManagementCapability(MGMT_CAP_DEVICE_ID)) {
+      throw new Error("Device does not advertise Device ID support");
+    }
+    if (!hasManagementCapability(MGMT_CAP_RELIABLE_UART)) {
+      throw new Error("Device does not advertise Reliable UART support");
+    }
     const deviceIdValue = await bleTransport.read(
       device.id,
       MGMT_SERVICE,
       MGMT_DEVICE_ID,
     );
+    if (deviceIdValue.byteLength !== 16) {
+      throw new Error("Invalid Linkr Device ID length");
+    }
     state.deviceId = Array.from(
       new Uint8Array(
         deviceIdValue.buffer.slice(
@@ -2020,19 +2153,29 @@ async function connect() {
       RELIABLE_UART_SERVICE,
       RELIABLE_UART_STATE,
     );
-    if (reliableState.byteLength < 16 || reliableState.getUint8(0) !== 1) {
+    if (reliableState.byteLength !== 16 || reliableState.getUint8(0) !== 1) {
       throw new Error("Unsupported Reliable UART version");
+    }
+    const reliablePayloadLimit = reliableState.getUint16(2, true);
+    const reliableTxSequence = reliableState.getUint32(4, true);
+    const reliableRxSequence = reliableState.getUint32(8, true);
+    if (
+      reliablePayloadLimit === 0 ||
+      reliableTxSequence === 0 ||
+      reliableRxSequence === 0
+    ) {
+      throw new Error("Invalid Reliable UART state");
     }
     state.reliableMaxPayload = Math.max(
       1,
       Math.min(
-        reliableState.getUint16(2, true),
+        reliablePayloadLimit,
         BLE_MAX_ATT_VALUE - RELIABLE_UART_HEADER_SIZE,
       ),
     );
     state.reliableWriteSize = BLE_MAX_ATT_VALUE;
-    state.reliableTxSequence = reliableState.getUint32(4, true);
-    state.reliableRxSequence = reliableState.getUint32(8, true);
+    state.reliableTxSequence = reliableTxSequence;
+    state.reliableRxSequence = reliableRxSequence;
     await bleTransport.startNotifications(
       device.id,
       RELIABLE_UART_SERVICE,
@@ -2284,29 +2427,103 @@ function initSoftKeyboardLayout() {
   });
 }
 
-function applySidebar() {
-  const shell = document.querySelector(".app-shell");
-  if (state.sidebarCollapsed && !usesSettingsDrawer()) {
-    shell.classList.add("controls-hidden");
+function setInert(element, inert) {
+  if (!element) {
+    return;
   }
+  element.inert = inert;
+  element.toggleAttribute("inert", inert);
+}
+
+function syncSidebarAccessibility({ focusDrawer = false, restoreToggle = false } = {}) {
+  const drawerLayout = usesSettingsDrawer();
+  const drawerOpen =
+    drawerLayout && elements.appShell.classList.contains("sidebar-open");
+  const sidebarHidden = drawerLayout
+    ? !drawerOpen
+    : elements.appShell.classList.contains("controls-hidden");
+
+  if (!drawerOpen) {
+    setInert(elements.topbar, false);
+    setInert(elements.workpanel, false);
+    if (
+      restoreToggle &&
+      elements.controlsPanel.contains(document.activeElement)
+    ) {
+      elements.panelToggle.focus();
+    }
+  }
+
+  elements.panelToggle.setAttribute("aria-expanded", String(!sidebarHidden));
+  elements.controlsPanel.setAttribute("aria-hidden", String(sidebarHidden));
+  setInert(elements.controlsPanel, sidebarHidden);
+  elements.drawerBackdrop.setAttribute("aria-hidden", String(!drawerOpen));
+  document.body.classList.toggle("drawer-open", drawerOpen);
+  if (drawerOpen) {
+    setInert(elements.topbar, true);
+    setInert(elements.workpanel, true);
+  }
+
+  if (drawerLayout) {
+    elements.controlsPanel.setAttribute("role", "dialog");
+    if (drawerOpen) {
+      elements.controlsPanel.setAttribute("aria-modal", "true");
+    } else {
+      elements.controlsPanel.removeAttribute("aria-modal");
+    }
+  } else {
+    elements.controlsPanel.removeAttribute("role");
+    elements.controlsPanel.removeAttribute("aria-modal");
+  }
+
+  if (focusDrawer && drawerOpen) {
+    requestAnimationFrame(() => elements.drawerClose.focus());
+  } else if (
+    restoreToggle &&
+    !drawerOpen &&
+    document.activeElement !== elements.panelToggle
+  ) {
+    requestAnimationFrame(() => elements.panelToggle.focus());
+  }
+}
+
+function setMobileSidebarOpen(open, { restoreFocus = true } = {}) {
+  if (!usesSettingsDrawer()) {
+    return;
+  }
+  elements.appShell.classList.toggle("sidebar-open", open);
+  syncSidebarAccessibility({
+    focusDrawer: open,
+    restoreToggle: !open && restoreFocus,
+  });
+}
+
+function applySidebar() {
+  if (state.sidebarCollapsed && !usesSettingsDrawer()) {
+    elements.appShell.classList.add("controls-hidden");
+  }
+  syncSidebarAccessibility();
 }
 
 function toggleSidebar() {
-  const shell = document.querySelector(".app-shell");
   if (usesSettingsDrawer()) {
-    const open = shell.classList.toggle("sidebar-open");
-    elements.panelToggle.setAttribute("aria-expanded", String(open));
+    setMobileSidebarOpen(
+      !elements.appShell.classList.contains("sidebar-open"),
+    );
   } else {
-    const hidden = shell.classList.toggle("controls-hidden");
+    const hidden = elements.appShell.classList.toggle("controls-hidden");
     state.sidebarCollapsed = hidden;
     saveSetting("linkr-sidebar", hidden ? "collapsed" : "open");
+    syncSidebarAccessibility();
   }
 }
 
-function closeSidebar() {
-  const shell = document.querySelector(".app-shell");
-  shell.classList.remove("sidebar-open");
-  elements.panelToggle.setAttribute("aria-expanded", "false");
+function closeSidebar({ restoreFocus = true } = {}) {
+  const wasOpen = elements.appShell.classList.contains("sidebar-open");
+  elements.appShell.classList.remove("sidebar-open");
+  syncSidebarAccessibility({
+    restoreToggle: wasOpen && restoreFocus,
+  });
 }
 
 function setSettingsPage(page) {
@@ -2323,13 +2540,16 @@ function setSettingsPage(page) {
 }
 
 function syncSidebarForViewport() {
-  const shell = document.querySelector(".app-shell");
-  closeSidebar();
+  elements.appShell.classList.remove("sidebar-open");
   if (usesSettingsDrawer()) {
-    shell.classList.remove("controls-hidden");
+    elements.appShell.classList.remove("controls-hidden");
   } else {
-    shell.classList.toggle("controls-hidden", state.sidebarCollapsed);
+    elements.appShell.classList.toggle(
+      "controls-hidden",
+      state.sidebarCollapsed,
+    );
   }
+  syncSidebarAccessibility();
   scheduleFit();
 }
 
@@ -2483,6 +2703,10 @@ function bind() {
       chip.addEventListener("click", () => {
         const cmd = chip.getAttribute("data-cmd");
         if (cmd) {
+          const confirmKey = chip.dataset.confirm;
+          if (confirmKey && !window.confirm(t(confirmKey))) {
+            return;
+          }
           sendText(cmd).catch((error) =>
             appendLine(`[error] ${error.message}`),
           );
@@ -2521,9 +2745,13 @@ function bind() {
     }
     const sel = state.term.getSelection();
     if (sel) {
+      if (!navigator.clipboard?.writeText) {
+        toast(t("copyFailed"), "error");
+        return;
+      }
       navigator.clipboard.writeText(sel).then(
         () => toast(t("copied")),
-        () => toast(t("copied")),
+        () => toast(t("copyFailed"), "error"),
       );
     }
   });
@@ -2537,11 +2765,12 @@ function bind() {
   elements.lanModeBtn.addEventListener("click", () => setTransportMode("ws"));
 
   elements.panelToggle.addEventListener("click", toggleSidebar);
-  elements.drawerClose.addEventListener("click", closeSidebar);
-  elements.drawerBackdrop.addEventListener("click", closeSidebar);
+  elements.drawerClose.addEventListener("click", () => closeSidebar());
+  elements.drawerBackdrop.addEventListener("click", () => closeSidebar());
   elements.settingsTabs.forEach((tab) => {
     tab.addEventListener("click", () => setSettingsPage(tab.dataset.settingsTarget));
   });
+  elements.wsHostInput.addEventListener("input", () => setWsHostError());
 
   let drawerTouchStart = null;
   elements.controls.addEventListener("touchstart", (event) => {
@@ -2568,7 +2797,13 @@ function bind() {
 
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
-      closeSidebar();
+      if (
+        usesSettingsDrawer() &&
+        elements.appShell.classList.contains("sidebar-open")
+      ) {
+        event.preventDefault();
+        closeSidebar();
+      }
       if (
         elements.terminalCard.classList.contains(
           "terminal-fullscreen-fallback",

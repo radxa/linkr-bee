@@ -705,9 +705,14 @@ static int wifi_scan_respond(struct bt_conn *conn, const char *line)
 	char payload[96];
 	uint32_t request_id = (uint32_t)atomic_get(&wifi_scan_request_id);
 	int len = snprintk(payload, sizeof(payload), "%s\r\n", line);
-	uint16_t flags = strstr(line, "done") || strstr(line, "error") ?
+	bool failed = strcmp(line, "@scan error") == 0;
+	uint16_t flags = failed || strcmp(line, "@scan done") == 0 ?
 			 LINKR_MGMT_FLAG_FINAL : 0;
 	int err;
+
+	if (failed) {
+		flags |= LINKR_MGMT_FLAG_ERROR;
+	}
 
 	if (len <= 0) {
 		return -EINVAL;
@@ -730,6 +735,7 @@ static void wifi_state_event(uint32_t operation_id,
 	struct bt_conn *conn;
 	char status[96];
 	char payload[144];
+	uint16_t flags = 0;
 	int err;
 	int len;
 
@@ -745,11 +751,15 @@ static void wifi_state_event(uint32_t operation_id,
 			"@event wifi operation=%u phase=%s result=%d %s\r\n",
 			operation_id, linkr_wifi_state_name(state), error, status);
 	if (len > 0) {
-		err = linkr_mgmt_event(conn, operation_id,
-				       state == LINKR_WIFI_STATE_READY ||
-				       state == LINKR_WIFI_STATE_FAILED ||
-				       state == LINKR_WIFI_STATE_OFF ?
-				       LINKR_MGMT_FLAG_FINAL : 0,
+		if (state == LINKR_WIFI_STATE_READY ||
+		    state == LINKR_WIFI_STATE_FAILED ||
+		    state == LINKR_WIFI_STATE_OFF) {
+			flags |= LINKR_MGMT_FLAG_FINAL;
+		}
+		if (state == LINKR_WIFI_STATE_FAILED) {
+			flags |= LINKR_MGMT_FLAG_ERROR;
+		}
+		err = linkr_mgmt_event(conn, operation_id, flags,
 				       payload,
 				       MIN(len, (int)sizeof(payload) - 1));
 		if (err) {
@@ -774,6 +784,14 @@ static char *trim_spaces(char *s)
 	}
 
 	return s;
+}
+
+static bool string_equal_ignore_case(const char *value, const char *expected)
+{
+	size_t expected_len = strlen(expected);
+
+	return strlen(value) == expected_len &&
+	       strncasecmp(value, expected, expected_len) == 0;
 }
 
 static int parse_uart_line(char *value, struct uart_config *cfg)
@@ -821,11 +839,14 @@ static int parse_uart_line(char *value, struct uart_config *cfg)
 		return -EINVAL;
 	}
 
-	if (!strcasecmp(parity, "n") || !strcasecmp(parity, "none")) {
+	if (string_equal_ignore_case(parity, "n") ||
+	    string_equal_ignore_case(parity, "none")) {
 		cfg->parity = UART_CFG_PARITY_NONE;
-	} else if (!strcasecmp(parity, "o") || !strcasecmp(parity, "odd")) {
+	} else if (string_equal_ignore_case(parity, "o") ||
+		   string_equal_ignore_case(parity, "odd")) {
 		cfg->parity = UART_CFG_PARITY_ODD;
-	} else if (!strcasecmp(parity, "e") || !strcasecmp(parity, "even")) {
+	} else if (string_equal_ignore_case(parity, "e") ||
+		   string_equal_ignore_case(parity, "even")) {
 		cfg->parity = UART_CFG_PARITY_EVEN;
 	} else {
 		return -EINVAL;
@@ -839,10 +860,12 @@ static int parse_uart_line(char *value, struct uart_config *cfg)
 		return -EINVAL;
 	}
 
-	if (!strcasecmp(flow, "n") || !strcasecmp(flow, "none") ||
-	    !strcasecmp(flow, "off")) {
+	if (string_equal_ignore_case(flow, "n") ||
+	    string_equal_ignore_case(flow, "none") ||
+	    string_equal_ignore_case(flow, "off")) {
 		cfg->flow_ctrl = UART_CFG_FLOW_CTRL_NONE;
-	} else if (!strcasecmp(flow, "rtscts") || !strcasecmp(flow, "hw")) {
+	} else if (string_equal_ignore_case(flow, "rtscts") ||
+		   string_equal_ignore_case(flow, "hw")) {
 		cfg->flow_ctrl = UART_CFG_FLOW_CTRL_RTS_CTS;
 	} else {
 		return -EINVAL;
@@ -954,9 +977,16 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 	if (!strcmp(body, "help") || !strcmp(body, "h")) {
 		(void)send_control_response(conn,
 					    "OK cmds: @i? @u?|@u=baud,data,par,stop,flow "
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_WIFI)
 					    "@w?|@w=ssid,pass|@w off|@w scan "
+#endif
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_WEBDAV)
 					    "@d?|@d=http://host/path/|@d off "
-					    "@s?|@s on|@s off\r\n");
+#endif
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE)
+					    "@s?|@s on|@s off"
+#endif
+					    "\r\n");
 		return true;
 	}
 
@@ -1061,6 +1091,7 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 		return true;
 	}
 
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_WEBDAV)
 	/* ---- WebDAV (@d / @linkr webdav) ---- */
 	if (!strcmp(body, "webdav?") || !strcmp(body, "d?")) {
 		char status[CONFIG_LINKR_BLE_BRIDGE_WEBDAV_URL_MAX + 32];
@@ -1104,7 +1135,9 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 					    err);
 		return true;
 	}
+#endif /* CONFIG_LINKR_BLE_BRIDGE_WEBDAV */
 
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE)
 	/* ---- WebSocket bridge (@s / @linkr socket) ---- */
 	if (!strcmp(body, "socket?") || !strcmp(body, "s?")) {
 		char status[64];
@@ -1128,6 +1161,7 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 					    err);
 		return true;
 	}
+#endif /* CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE */
 #endif /* CONFIG_LINKR_BLE_BRIDGE_WIFI */
 
 	(void)send_control_response(conn, "ERR unknown command\r\n");
@@ -1724,12 +1758,13 @@ int main(void)
 		return err;
 	}
 
+	/* Install sinks before init: saved credentials may complete quickly enough
+	 * to publish state while linkr_wifi_init() is still running. */
+	linkr_wifi_set_respond_fn(wifi_scan_respond);
+	linkr_wifi_set_event_fn(wifi_state_event);
 	err = linkr_wifi_init();
 	if (err) {
 		LOG_WRN("WiFi init failed: %d (WiFi disabled)", err);
-	} else {
-		linkr_wifi_set_respond_fn(wifi_scan_respond);
-		linkr_wifi_set_event_fn(wifi_state_event);
 	}
 
 	err = linkr_ws_init();

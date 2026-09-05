@@ -7,13 +7,14 @@ CC         ?= gcc
 PKG_CONFIG ?= pkg-config
 SYSROOT    ?=
 CFLAGS     ?= -O2 -Wall -Wextra -std=c11 -D_GNU_SOURCE
-DBUS_CFLAGS ?=
-DBUS_LIBS   ?=
-
 ifneq ($(SYSROOT),)
-    DBUS_CFLAGS ?= -I$(SYSROOT)/usr/include/dbus-1.0 \
+ifeq ($(strip $(DBUS_CFLAGS)),)
+    DBUS_CFLAGS := -I$(SYSROOT)/usr/include/dbus-1.0 \
                    -I$(SYSROOT)/usr/lib/dbus-1.0/include
-    DBUS_LIBS   ?= -L$(SYSROOT)/usr/lib -ldbus-1
+endif
+ifeq ($(strip $(DBUS_LIBS)),)
+    DBUS_LIBS := -L$(SYSROOT)/usr/lib -ldbus-1
+endif
 endif
 
 # Allow pkg-config to locate dbus if available.

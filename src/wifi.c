@@ -42,19 +42,22 @@ LOG_MODULE_REGISTER(linkr_wifi, CONFIG_LOG_DEFAULT_LEVEL);
 
 #define SSID_MAX   CONFIG_LINKR_BLE_BRIDGE_WIFI_SSID_MAX
 #define PSK_MAX    CONFIG_LINKR_BLE_BRIDGE_WIFI_PSK_MAX
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_WEBDAV)
 #define URL_MAX    CONFIG_LINKR_BLE_BRIDGE_WEBDAV_URL_MAX
 #define CRED_MAX   CONFIG_LINKR_BLE_BRIDGE_WEBDAV_CRED_MAX
 /* Staging for periodic WebDAV upload, drained every
  * CONFIG_LINKR_BLE_BRIDGE_WEBDAV_UPLOAD_INTERVAL_MS; older bytes are
  * dropped and counted (see log_dropped_bytes). The ESP32-C5 board
  * overlay trims the default to two upload chunks. */
-#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_WEBDAV)
 #define LOG_RING_SIZE CONFIG_LINKR_BLE_BRIDGE_LOG_RING_SIZE
 #define WEBDAV_UPLOAD_CHUNK CONFIG_LINKR_BLE_BRIDGE_WEBDAV_UPLOAD_CHUNK
-#define WEBDAV_UPLOAD_INTERVAL_MS CONFIG_LINKR_BLE_BRIDGE_WEBDAV_UPLOAD_INTERVAL_MS
+#define WEBDAV_UPLOAD_INTERVAL_MS \
+    CONFIG_LINKR_BLE_BRIDGE_WEBDAV_UPLOAD_INTERVAL_MS
 #else
-/* Keep the module buildable when WEBDAV is disabled, even if upload
- * settings are not generated. */
+/* Keep the shared settings/diagnostic implementation compilable when the
+ * optional uploader is excluded and its settings are not generated. */
+#define URL_MAX    1
+#define CRED_MAX   1
 #define LOG_RING_SIZE CONFIG_LINKR_BLE_BRIDGE_UART_RX_BUFFER_SIZE
 #define WEBDAV_UPLOAD_CHUNK 512
 #define WEBDAV_UPLOAD_INTERVAL_MS 1000
@@ -85,12 +88,26 @@ static atomic_t scan_in_progress;
 static struct k_work wifi_scan_work;
 static struct k_mutex scan_cache_lock;
 static struct k_work_delayable wifi_retry_work;
+static struct k_work_delayable wifi_operation_timeout_work;
 static atomic_t wifi_connected;
 static atomic_t wifi_ip_ready;
 static atomic_t wifi_last_error;
 static atomic_t wifi_reconnect_enabled;
 static atomic_t wifi_state;
 static atomic_t wifi_operation_id;
+/* Only one driver connect/disconnect transaction may own the global result
+ * events at a time. REQUESTING handles drivers that publish a terminal event
+ * synchronously from inside net_mgmt(). */
+enum wifi_operation_phase {
+	WIFI_OP_IDLE,
+	WIFI_OP_PREPARING,
+	WIFI_OP_ACTIVE,
+	WIFI_OP_REQUESTING,
+	WIFI_OP_TERMINAL,
+	WIFI_OP_RECOVERING,
+};
+static atomic_t wifi_operation_phase;
+static struct k_work_sync wifi_operation_timeout_sync;
 static linkr_wifi_event_fn wifi_event_sink;
 static atomic_t webdav_configured;
 static atomic_t webdav_generation;
@@ -119,7 +136,6 @@ static struct k_mutex upload_lock;
 #define UPLOAD_PRIO   6
 static struct k_thread upload_thread_data;
 static K_THREAD_STACK_DEFINE(upload_stack, UPLOAD_STACK);
-static struct k_work_delayable wifi_retry_work;
 
 struct linkr_wifi_settings {
     uint32_t magic;
@@ -523,6 +539,62 @@ static void wifi_publish_state(enum linkr_wifi_state state, int error)
 	}
 }
 
+static bool wifi_operation_claim(void)
+{
+	return atomic_cas(&wifi_operation_phase, WIFI_OP_IDLE,
+			  WIFI_OP_PREPARING);
+}
+
+static bool wifi_operation_begin_driver(void)
+{
+	return atomic_cas(&wifi_operation_phase, WIFI_OP_PREPARING,
+			  WIFI_OP_REQUESTING);
+}
+
+/* Returns true if a terminal event was delivered synchronously by the driver. */
+static bool wifi_operation_finish_driver(int request_error)
+{
+	for (;;) {
+		atomic_val_t phase = atomic_get(&wifi_operation_phase);
+
+		if (phase == WIFI_OP_TERMINAL) {
+			if (atomic_cas(&wifi_operation_phase, WIFI_OP_TERMINAL,
+				       WIFI_OP_IDLE)) {
+				return true;
+			}
+			continue;
+		}
+		if (phase != WIFI_OP_REQUESTING) {
+			LOG_ERR("Unexpected WiFi operation phase: %ld", phase);
+			return false;
+		}
+		if (atomic_cas(&wifi_operation_phase, WIFI_OP_REQUESTING,
+			       request_error ? WIFI_OP_RECOVERING : WIFI_OP_ACTIVE)) {
+			return false;
+		}
+	}
+}
+
+static void wifi_operation_complete(void)
+{
+	for (;;) {
+		atomic_val_t phase = atomic_get(&wifi_operation_phase);
+		atomic_val_t next;
+
+		if (phase == WIFI_OP_REQUESTING) {
+			next = WIFI_OP_TERMINAL;
+		} else if (phase == WIFI_OP_ACTIVE ||
+			   phase == WIFI_OP_RECOVERING) {
+			next = WIFI_OP_IDLE;
+		} else {
+			return;
+		}
+		if (atomic_cas(&wifi_operation_phase, phase, next)) {
+			return;
+		}
+	}
+}
+
 /* ------------------------------------------------------------------------ */
 /* WiFi management                                                          */
 /* ------------------------------------------------------------------------ */
@@ -535,6 +607,106 @@ static void schedule_wifi_retry(void)
     }
 }
 
+static void wifi_operation_timeout_cancel(void)
+{
+	(void)k_work_cancel_delayable(&wifi_operation_timeout_work);
+}
+
+/* New commands remain in PREPARING while this waits. That prevents a stale
+ * timeout handler from claiming the new transaction before net_mgmt() starts. */
+static void wifi_operation_timeout_cancel_sync(void)
+{
+	(void)k_work_cancel_delayable_sync(&wifi_operation_timeout_work,
+					  &wifi_operation_timeout_sync);
+}
+
+static void wifi_operation_timeout_arm(void)
+{
+	int err = k_work_reschedule(
+		&wifi_operation_timeout_work,
+		K_MSEC(CONFIG_LINKR_BLE_BRIDGE_WIFI_OPERATION_TIMEOUT_MS));
+
+	if (err < 0) {
+		LOG_ERR("WiFi operation timeout schedule failed: %d", err);
+	}
+}
+
+static void wifi_operation_timeout_handler(struct k_work *work)
+{
+	enum linkr_wifi_state state = linkr_wifi_get_state();
+	atomic_val_t phase = atomic_get(&wifi_operation_phase);
+	int err;
+
+	ARG_UNUSED(work);
+
+	/* A disconnect result normally releases RECOVERING. Bound that wait too,
+	 * so a missing driver event can never leave the BLE control plane busy. */
+	if (state == LINKR_WIFI_STATE_FAILED && phase == WIFI_OP_RECOVERING) {
+		LOG_ERR("WiFi recovery timed out; releasing operation gate");
+		atomic_set(&wifi_operation_phase, WIFI_OP_IDLE);
+		schedule_wifi_retry();
+		return;
+	}
+
+	/* A successful disconnect request should normally produce a result event.
+	 * Do not leave the operation gate occupied forever if the driver omits it. */
+	if (!atomic_get(&wifi_reconnect_enabled) && phase == WIFI_OP_ACTIVE) {
+		if (!atomic_cas(&wifi_operation_phase, WIFI_OP_ACTIVE,
+				WIFI_OP_RECOVERING)) {
+			return;
+		}
+		LOG_ERR("WiFi disconnect timed out; releasing operation gate");
+		atomic_set(&wifi_connected, 0);
+		atomic_set(&wifi_ip_ready, 0);
+		if (wifi_iface) {
+			net_dhcpv4_stop(wifi_iface);
+		}
+		wifi_publish_state(LINKR_WIFI_STATE_FAILED, -ETIMEDOUT);
+		atomic_clear(&wifi_operation_id);
+		wifi_operation_complete();
+		return;
+	}
+
+	if (state != LINKR_WIFI_STATE_CONNECTING &&
+	    state != LINKR_WIFI_STATE_DHCP) {
+		return;
+	}
+
+	if (phase == WIFI_OP_ACTIVE) {
+		if (!atomic_cas(&wifi_operation_phase, WIFI_OP_ACTIVE,
+				WIFI_OP_RECOVERING)) {
+			return;
+		}
+	} else if (phase == WIFI_OP_IDLE) {
+		/* Lease loss after READY is a background operation with ID zero. */
+		if (!atomic_cas(&wifi_operation_phase, WIFI_OP_IDLE,
+				WIFI_OP_RECOVERING)) {
+			return;
+		}
+	} else {
+		return;
+	}
+
+	LOG_WRN("WiFi %s timed out", linkr_wifi_state_name(state));
+	atomic_set(&wifi_connected, 0);
+	atomic_set(&wifi_ip_ready, 0);
+	wifi_publish_state(LINKR_WIFI_STATE_FAILED, -ETIMEDOUT);
+	atomic_clear(&wifi_operation_id);
+	if (wifi_iface) {
+		net_dhcpv4_stop(wifi_iface);
+	}
+	err = linkr_wifi_disconnect();
+	if (err) {
+		LOG_WRN("WiFi timeout disconnect failed: %d", err);
+		(void)atomic_cas(&wifi_operation_phase, WIFI_OP_RECOVERING,
+				 WIFI_OP_IDLE);
+		schedule_wifi_retry();
+	} else if (atomic_get(&wifi_operation_phase) == WIFI_OP_RECOVERING) {
+		/* The disconnect result may be asynchronous or absent. */
+		wifi_operation_timeout_arm();
+	}
+}
+
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-variable"
 static void wifi_retry_work_handler(struct k_work *work)
@@ -545,7 +717,12 @@ static void wifi_retry_work_handler(struct k_work *work)
 
 	ARG_UNUSED(work);
 
-	if (!atomic_get(&wifi_reconnect_enabled)) {
+	if (!atomic_get(&wifi_reconnect_enabled) ||
+	    atomic_get(&wifi_connected) || atomic_get(&wifi_ip_ready)) {
+		return;
+	}
+	if (!wifi_operation_claim()) {
+		schedule_wifi_retry();
 		return;
 	}
 
@@ -557,7 +734,7 @@ static void wifi_retry_work_handler(struct k_work *work)
 	k_mutex_unlock(&cfg_lock);
 
 	if (!ssid[0]) {
-		schedule_wifi_retry();
+		atomic_set(&wifi_operation_phase, WIFI_OP_IDLE);
 		return;
 	}
 
@@ -569,6 +746,7 @@ static void wifi_retry_work_handler(struct k_work *work)
 	msg.operation_id = 0;
 	msg.retry = true;
 	if (k_msgq_put(&wifi_connect_msgq, &msg, K_NO_WAIT) != 0) {
+		atomic_set(&wifi_operation_phase, WIFI_OP_IDLE);
 		schedule_wifi_retry();
 	}
 }
@@ -582,23 +760,44 @@ static void wifi_event_handler(struct net_mgmt_event_callback *cb,
 
     ARG_UNUSED(cb);
 
-    if (wifi_iface && iface != wifi_iface) {
-        return;
-    }
+	if (wifi_iface && iface != wifi_iface) {
+		return;
+	}
+	/* A command owns the gate before its driver request is issued. Events in
+	 * this window belong to the previous/background lifecycle and must not
+	 * complete the newly accepted operation. */
+	if (atomic_get(&wifi_operation_phase) == WIFI_OP_PREPARING) {
+		LOG_DBG("Ignoring WiFi event 0x%llx while operation is preparing",
+			mgmt_event);
+		return;
+	}
 
-    if (mgmt_event == NET_EVENT_WIFI_CONNECT_RESULT) {
-        status = (const struct wifi_status *)cb->info;
-        if (status && status->status == 0) {
+	if (mgmt_event == NET_EVENT_WIFI_CONNECT_RESULT) {
+		status = (const struct wifi_status *)cb->info;
+		if (status && status->status == 0) {
+			if (!atomic_get(&wifi_reconnect_enabled) ||
+			    atomic_get(&wifi_operation_phase) == WIFI_OP_RECOVERING) {
+				LOG_WRN("Ignoring late WiFi connect during shutdown/recovery");
+				atomic_set(&wifi_connected, 0);
+				atomic_set(&wifi_ip_ready, 0);
+				(void)linkr_wifi_disconnect();
+				return;
+			}
             atomic_set(&wifi_connected, 1);
-            atomic_set(&wifi_ip_ready, 0);
-            atomic_clear(&wifi_last_error);
-            LOG_INF("WiFi connected to \"%s\"", wifi_ssid);
-            /* Start DHCPv4 ourselves (no CONFIG_NET_CONFIG_AUTO_INIT). */
-            if (iface) {
-                net_dhcpv4_start(iface);
-            }
+			atomic_set(&wifi_ip_ready, 0);
+			atomic_clear(&wifi_last_error);
+			LOG_INF("WiFi connected to \"%s\"", wifi_ssid);
+			/* Publish and arm before starting DHCP. Some drivers can report an
+			 * address synchronously; READY must remain the final state in that
+			 * case instead of being overwritten by DHCP afterwards. */
 			wifi_publish_state(LINKR_WIFI_STATE_DHCP, 0);
-        } else {
+			wifi_operation_timeout_arm();
+			/* Start DHCPv4 ourselves (no CONFIG_NET_CONFIG_AUTO_INIT). */
+			if (iface) {
+				net_dhcpv4_start(iface);
+			}
+		} else {
+			wifi_operation_timeout_cancel();
             atomic_set(&wifi_connected, 0);
             atomic_set(&wifi_ip_ready, 0);
             atomic_set(&wifi_last_error, status ? status->status : -1);
@@ -607,10 +806,12 @@ static void wifi_event_handler(struct net_mgmt_event_callback *cb,
 			wifi_publish_state(LINKR_WIFI_STATE_FAILED,
 					   status ? status->status : -1);
 			atomic_clear(&wifi_operation_id);
+			wifi_operation_complete();
 			schedule_wifi_retry();
         }
     } else if (mgmt_event == NET_EVENT_WIFI_DISCONNECT_RESULT) {
 		enum linkr_wifi_state next_state;
+		wifi_operation_timeout_cancel();
         /* The application owns DHCP when ESP32 auto-DHCP is disabled. Stop
          * it here so a later reconnect starts a fresh lease transaction and
          * produces a new IPv4 address event. */
@@ -627,22 +828,29 @@ static void wifi_event_handler(struct net_mgmt_event_callback *cb,
 				atomic_get(&wifi_reconnect_enabled) ?
 				(int)atomic_get(&wifi_last_error) : 0);
 		}
-		if (atomic_get(&wifi_reconnect_enabled)) {
-			atomic_clear(&wifi_operation_id);
-		}
+		atomic_clear(&wifi_operation_id);
+		wifi_operation_complete();
 		schedule_wifi_retry();
-    } else if (mgmt_event == NET_EVENT_IPV4_ADDR_ADD) {
+	} else if (mgmt_event == NET_EVENT_IPV4_ADDR_ADD) {
+		if (!atomic_get(&wifi_reconnect_enabled) ||
+		    atomic_get(&wifi_operation_phase) == WIFI_OP_RECOVERING) {
+			LOG_WRN("Ignoring IPv4 address while WiFi shutdown/recovery is active");
+			return;
+		}
+		wifi_operation_timeout_cancel();
         atomic_set(&wifi_ip_ready, 1);
         LOG_INF("WiFi IPv4 address ready");
 		wifi_publish_state(LINKR_WIFI_STATE_READY, 0);
 		/* READY is the final event for the accepted management operation.
 		 * Later lease or link changes are background events (operation 0). */
 		atomic_clear(&wifi_operation_id);
+		wifi_operation_complete();
     } else if (mgmt_event == NET_EVENT_IPV4_ADDR_DEL) {
         atomic_set(&wifi_ip_ready, 0);
         LOG_INF("WiFi IPv4 address removed");
 		if (atomic_get(&wifi_connected)) {
 			wifi_publish_state(LINKR_WIFI_STATE_DHCP, 0);
+			wifi_operation_timeout_arm();
 		}
     }
 }
@@ -850,6 +1058,7 @@ static void wifi_connect_thread_fn(void *p1, void *p2, void *p3)
 			continue;
 		}
 		if (msg.retry && !atomic_get(&wifi_reconnect_enabled)) {
+			atomic_set(&wifi_operation_phase, WIFI_OP_IDLE);
 			continue;
 		}
 		if (msg.wait_for_release) {
@@ -860,9 +1069,11 @@ static void wifi_connect_thread_fn(void *p1, void *p2, void *p3)
 			if (released_operation_id != msg.operation_id) {
 				LOG_ERR("WiFi operation order mismatch: %u != %u",
 					released_operation_id, msg.operation_id);
+				atomic_set(&wifi_operation_phase, WIFI_OP_IDLE);
 				continue;
 			}
 		}
+		wifi_operation_timeout_cancel_sync();
 		atomic_set(&wifi_operation_id, msg.operation_id);
 		wifi_publish_state(LINKR_WIFI_STATE_QUEUED, 0);
 		if (msg.commit_config) {
@@ -876,6 +1087,7 @@ static void wifi_connect_thread_fn(void *p1, void *p2, void *p3)
 				LOG_WRN("commit WiFi settings failed: %d", err);
 				wifi_publish_state(LINKR_WIFI_STATE_FAILED, err);
 				atomic_clear(&wifi_operation_id);
+				atomic_set(&wifi_operation_phase, WIFI_OP_IDLE);
 				continue;
 			}
 
@@ -890,26 +1102,67 @@ static void wifi_connect_thread_fn(void *p1, void *p2, void *p3)
 
 		if (msg.ssid[0]) {
 			int err;
+			bool terminal_event;
 
 			wifi_publish_state(LINKR_WIFI_STATE_CONNECTING, 0);
 			LOG_INF("WiFi connect thread: %s", msg.ssid);
+			if (!wifi_operation_begin_driver()) {
+				LOG_ERR("Could not start WiFi connect operation");
+				atomic_clear(&wifi_operation_id);
+				atomic_set(&wifi_operation_phase, WIFI_OP_IDLE);
+				continue;
+			}
 			err = linkr_wifi_connect(msg.ssid, msg.psk);
+			terminal_event = wifi_operation_finish_driver(err);
 			LOG_INF("WiFi connect thread result: %d", err);
-			if (err) {
+			if (!err && !terminal_event &&
+			    atomic_get(&wifi_operation_phase) == WIFI_OP_ACTIVE &&
+			    (linkr_wifi_get_state() == LINKR_WIFI_STATE_CONNECTING ||
+			     linkr_wifi_get_state() == LINKR_WIFI_STATE_DHCP)) {
+				wifi_operation_timeout_arm();
+			}
+			if (err && !terminal_event) {
 				wifi_publish_state(LINKR_WIFI_STATE_FAILED, err);
 				atomic_clear(&wifi_operation_id);
+				wifi_operation_complete();
 			}
 		} else {
+			int err;
+			bool terminal_event;
+
 			LOG_INF("WiFi disconnect thread");
+			wifi_operation_timeout_cancel();
 			atomic_set(&wifi_reconnect_enabled, 0);
 			(void)k_work_cancel_delayable(&wifi_retry_work);
-			(void)linkr_wifi_disconnect();
-			if (linkr_wifi_get_state() != LINKR_WIFI_STATE_OFF) {
-				wifi_publish_state(LINKR_WIFI_STATE_OFF, 0);
+			if (!wifi_operation_begin_driver()) {
+				LOG_ERR("Could not start WiFi disconnect operation");
+				atomic_clear(&wifi_operation_id);
+				atomic_set(&wifi_operation_phase, WIFI_OP_IDLE);
+				continue;
 			}
-			/* OFF is final; do not reuse its request ID for a later
-			 * unsolicited WiFi state change. */
-			atomic_clear(&wifi_operation_id);
+			err = linkr_wifi_disconnect();
+			terminal_event = wifi_operation_finish_driver(err);
+			if (!err && !terminal_event &&
+			    atomic_get(&wifi_operation_phase) == WIFI_OP_ACTIVE) {
+				wifi_operation_timeout_arm();
+			}
+			if (err && !terminal_event) {
+				/* An accepted driver request completes through
+				 * NET_EVENT_WIFI_DISCONNECT_RESULT. If the interface was
+				 * already down, there will be no event to release the gate. */
+				LOG_DBG("WiFi disconnect request completed locally: %d",
+					err);
+				atomic_set(&wifi_connected, 0);
+				atomic_set(&wifi_ip_ready, 0);
+				if (wifi_iface) {
+					net_dhcpv4_stop(wifi_iface);
+				}
+				if (linkr_wifi_get_state() != LINKR_WIFI_STATE_OFF) {
+					wifi_publish_state(LINKR_WIFI_STATE_OFF, 0);
+				}
+				atomic_clear(&wifi_operation_id);
+				wifi_operation_complete();
+			}
 		}
 	}
 }
@@ -926,7 +1179,14 @@ int linkr_wifi_set_config_op(const char *ssid, const char *psk,
 	if (psk && strlen(psk) > PSK_MAX) {
 		return -EINVAL;
 	}
-
+	if (atomic_get(&wifi_connected) || atomic_get(&wifi_ip_ready)) {
+		return -EALREADY;
+	}
+	if (!wifi_operation_claim()) {
+		return -EBUSY;
+	}
+	wifi_operation_timeout_cancel();
+	(void)k_work_cancel_delayable(&wifi_retry_work);
 	memset(&msg, 0, sizeof(msg));
 	strncpy(msg.ssid, ssid, sizeof(msg.ssid) - 1);
 	msg.ssid[sizeof(msg.ssid) - 1] = '\0';
@@ -939,6 +1199,7 @@ int linkr_wifi_set_config_op(const char *ssid, const char *psk,
 	err = k_msgq_put(&wifi_connect_msgq, &msg, K_NO_WAIT);
 	if (err) {
 		LOG_WRN("WiFi connect msgq put failed: %d", err);
+		atomic_set(&wifi_operation_phase, WIFI_OP_IDLE);
 		return err;
 	}
 	return 0;
@@ -956,10 +1217,17 @@ int linkr_wifi_clear_config_op(uint32_t operation_id)
 		.wait_for_release = operation_id != 0,
 		.commit_config = true,
 	};
-	int err = k_msgq_put(&wifi_connect_msgq, &msg, K_NO_WAIT);
+	int err;
 
+	if (!wifi_operation_claim()) {
+		return -EBUSY;
+	}
+	wifi_operation_timeout_cancel();
+	(void)k_work_cancel_delayable(&wifi_retry_work);
+	err = k_msgq_put(&wifi_connect_msgq, &msg, K_NO_WAIT);
 	if (err) {
 		LOG_WRN("WiFi disconnect msgq put failed: %d", err);
+		atomic_set(&wifi_operation_phase, WIFI_OP_IDLE);
 		return err;
 	}
 
@@ -1481,6 +1749,8 @@ int linkr_wifi_init(void)
     k_mutex_init(&upload_lock);
     k_mutex_init(&scan_cache_lock);
     k_work_init_delayable(&wifi_retry_work, wifi_retry_work_handler);
+	k_work_init_delayable(&wifi_operation_timeout_work,
+			      wifi_operation_timeout_handler);
     k_work_init(&wifi_scan_work, wifi_scan_work_handler);
 	atomic_set(&wifi_state, LINKR_WIFI_STATE_OFF);
 
@@ -1581,12 +1851,35 @@ int linkr_wifi_init(void)
 
     /* A saved credential is only restored with explicit persistence enabled. */
     if (wifi_ssid[0]) {
+		int err;
+		bool terminal_event;
+
         strncpy(ssid, wifi_ssid, sizeof(ssid));
         strncpy(psk, wifi_psk, sizeof(psk));
-        atomic_set(&wifi_reconnect_enabled, 1);
-		wifi_publish_state(LINKR_WIFI_STATE_QUEUED, 0);
         LOG_INF("Auto-connecting to \"%s\"", wifi_ssid);
-        (void)linkr_wifi_connect(ssid, psk);
+		atomic_set(&wifi_operation_phase, WIFI_OP_PREPARING);
+		atomic_set(&wifi_reconnect_enabled, 1);
+		wifi_publish_state(LINKR_WIFI_STATE_QUEUED, 0);
+		wifi_publish_state(LINKR_WIFI_STATE_CONNECTING, 0);
+		if (!wifi_operation_begin_driver()) {
+			LOG_ERR("Could not start saved WiFi operation");
+			atomic_set(&wifi_operation_phase, WIFI_OP_IDLE);
+			return -EIO;
+		}
+		err = linkr_wifi_connect(ssid, psk);
+		terminal_event = wifi_operation_finish_driver(err);
+		if (!err && !terminal_event &&
+		    atomic_get(&wifi_operation_phase) == WIFI_OP_ACTIVE &&
+		    (linkr_wifi_get_state() == LINKR_WIFI_STATE_CONNECTING ||
+		     linkr_wifi_get_state() == LINKR_WIFI_STATE_DHCP)) {
+			wifi_operation_timeout_arm();
+		}
+		if (err && !terminal_event) {
+			wifi_publish_state(LINKR_WIFI_STATE_FAILED, err);
+			wifi_operation_complete();
+			schedule_wifi_retry();
+			LOG_WRN("Could not start saved WiFi configuration");
+		}
     } else {
         LOG_INF("WiFi idle (no saved SSID); send @w=ssid,pass to connect");
     }

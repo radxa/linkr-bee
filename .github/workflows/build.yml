@@ -111,13 +111,20 @@ jobs:
           set -euo pipefail
           config="${GITHUB_WORKSPACE}/app/build/zephyr/.config"
           grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WIFI=y' "${config}"
+          grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WIFI_OPERATION_TIMEOUT_MS=30000' "${config}"
+          grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WEBDAV=y' "${config}"
+          grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE=y' "${config}"
           grep -qx 'CONFIG_WIFI=y' "${config}"
           grep -qx 'CONFIG_NETWORKING=y' "${config}"
           grep -qx 'CONFIG_NET_TCP=y' "${config}"
+          grep -qx '# CONFIG_NET_IPV6 is not set' "${config}"
           grep -qx 'CONFIG_HTTP_SERVER=y' "${config}"
+          grep -qx 'CONFIG_HTTP_SERVER_VERSION_1=y' "${config}"
+          grep -qx '# CONFIG_HTTP_SERVER_VERSION_2 is not set' "${config}"
           grep -qx 'CONFIG_HTTP_SERVER_WEBSOCKET=y' "${config}"
           grep -qx 'CONFIG_ZVFS_EVENTFD_MAX=2' "${config}"
           grep -qx 'CONFIG_BT=y' "${config}"
+          grep -qx '# CONFIG_BT_SMP is not set' "${config}"
           grep -qx 'CONFIG_BUILD_OUTPUT_BIN=y' "${config}"
 
       - name: Package firmware
@@ -143,7 +150,8 @@ jobs:
 
           cd "${output}"
           sha256sum "linkr-bee-${{ matrix.slug }}.bin" > SHA256SUMS
-          version="$(sed -n 's/^CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION=\"\(.*\)\"/\1/p' firmware.config)"
+          version="$(sed -n 's/^CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION=\"\([^\"]*\)\"$/\1/p' firmware.config)"
+          test -n "${version}"
           cat > firmware.json <<EOF
           {
             "project": "linkr-bee",

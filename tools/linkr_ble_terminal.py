@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import math
 import os
 import struct
 import sys
@@ -15,7 +16,6 @@ import tty
 from dataclasses import dataclass
 
 from bleak import BleakClient, BleakScanner
-
 
 DEFAULT_NAME = "Linkr BLE UART"
 NUS_RX_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
@@ -30,6 +30,15 @@ RELIABLE_UART_STATE_UUID = "4c4b0013-9a7e-4f4e-8b8a-3d6f12a0c001"
 MGMT_HEADER = struct.Struct("<2sBBIHH")
 RELIABLE_UART_HEADER = struct.Struct("<2sBBIHH")
 MGMT_API_MAJOR = 1
+MGMT_CAP_WIFI = 1 << 0
+MGMT_CAP_WEBDAV = 1 << 1
+MGMT_CAP_DEVICE_ID = 1 << 3
+MGMT_CAP_ASYNC_EVENTS = 1 << 4
+MGMT_CAP_RELIABLE_UART = 1 << 5
+MGMT_FLAG_FINAL = 1 << 0
+MGMT_FLAG_ERROR = 1 << 1
+WIFI_OPERATION_TIMEOUT = 35.0
+WIFI_SCAN_TIMEOUT = 35.0
 
 
 @dataclass
@@ -67,11 +76,40 @@ def parse_escape(value: str) -> bytes:
     if len(value) == 2 and value[0] == "^":
         return bytes([ord(value[1].upper()) & 0x1F])
     if value.startswith("0x"):
-        return bytes([int(value, 16)])
+        try:
+            parsed = int(value, 16)
+        except ValueError as error:
+            raise argparse.ArgumentTypeError(
+                "escape must be one byte, like ^] or 0x1d"
+            ) from error
+        if not 0 <= parsed <= 0xFF:
+            raise argparse.ArgumentTypeError("hex escape must be between 0x00 and 0xff")
+        return bytes([parsed])
     raw = value.encode()
     if len(raw) != 1:
         raise argparse.ArgumentTypeError("escape must be one byte, like ^] or 0x1d")
     return raw
+
+
+def positive_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be greater than zero")
+    return parsed
+
+
+def nonnegative_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed < 0:
+        raise argparse.ArgumentTypeError("value must not be negative")
+    return parsed
+
+
+def ble_write_size(value: str) -> int:
+    parsed = int(value)
+    if not 0 <= parsed <= 244:
+        raise argparse.ArgumentTypeError("BLE write size must be between 0 and 244")
+    return parsed
 
 
 def normalize_uart_spec(spec: str) -> str:
@@ -84,7 +122,7 @@ def normalize_uart_spec(spec: str) -> str:
               "even": "e", "e": "e"}.get(parity.lower(), parity.lower())
     flow = {"none": "n", "off": "n", "n": "n", "rtscts": "rtscts",
             "hw": "rtscts"}.get(flow.lower(), flow.lower())
-    return ",".join([baud, data_bits, parity, stop_bits, flow])
+    return f"{baud},{data_bits},{parity},{stop_bits},{flow}"
 
 
 def translate_enter(data: bytes, mode: str) -> bytes:
@@ -148,7 +186,7 @@ async def find_device(name: str, address: str | None, timeout: float):
 
 async def ble_write(client: BleakClient, data: bytes, cfg: TerminalConfig,
                     sensitive: bool = False,
-                    reliable: "ReliableUartChannel | None" = None) -> None:
+                    reliable: ReliableUartChannel | None = None) -> None:
     if reliable:
         await reliable.write(data, sensitive=sensitive)
         return
@@ -168,9 +206,11 @@ async def ble_write(client: BleakClient, data: bytes, cfg: TerminalConfig,
 class ManagementChannel:
     """Linkr Management Service v1 request/response channel."""
 
-    def __init__(self, client: BleakClient, cfg: TerminalConfig) -> None:
+    def __init__(self, client: BleakClient, cfg: TerminalConfig,
+                 max_payload: int) -> None:
         self.client = client
         self.cfg = cfg
+        self.max_payload = max_payload
         self.next_request_id = 1
         self.current: dict | None = None
         self.pending: dict[int, asyncio.Future[bytes]] = {}
@@ -185,7 +225,8 @@ class ManagementChannel:
             magic, version, message_type, request_id, expected, flags = \
                 MGMT_HEADER.unpack_from(fragment)
             if magic != b"LK" or version != MGMT_API_MAJOR or \
-                    message_type not in (2, 3):
+                    message_type not in (2, 3) or expected == 0 or \
+                    expected > self.max_payload:
                 stderr("management <- invalid response header")
                 self.current = None
                 return
@@ -217,14 +258,26 @@ class ManagementChannel:
         if message["type"] == 2:
             future = self.pending.pop(message["request_id"], None)
             if future and not future.done():
-                future.set_result(body)
-        elif message["flags"] & 1:
+                if message["flags"] & MGMT_FLAG_ERROR:
+                    future.set_exception(
+                        RuntimeError(text or "management request failed")
+                    )
+                else:
+                    future.set_result(body)
+        elif message["flags"] & MGMT_FLAG_FINAL:
             future = self.pending_final.pop(message["request_id"], None)
             if future and not future.done():
-                future.set_result(body)
+                if message["flags"] & MGMT_FLAG_ERROR:
+                    future.set_exception(
+                        RuntimeError(text or "management operation failed")
+                    )
+                else:
+                    future.set_result(body)
 
     async def send(self, command: bytes, delay: float = 0.0,
                    wait_final_timeout: float = 0.0) -> bytes:
+        if not command or len(command) > self.max_payload:
+            raise ValueError("management command is outside the advertised limit")
         sensitive = command.startswith((b"@w=", b"@d="))
         if sensitive:
             stderr(f"control -> {command[:2].decode()}=<redacted>")
@@ -292,7 +345,8 @@ class ReliableUartChannel:
                 return
             magic, version, _flags, sequence, expected, _reserved = \
                 RELIABLE_UART_HEADER.unpack_from(fragment)
-            if magic != b"LR" or version != 1 or expected == 0:
+            if magic != b"LR" or version != 1 or sequence == 0 or \
+                    expected == 0 or expected > self.max_payload:
                 stderr("reliable UART <- invalid frame header")
                 self.current = None
                 return
@@ -481,9 +535,10 @@ async def run(args: argparse.Namespace) -> None:
 
     disconnected = asyncio.Event()
     notify_queue: asyncio.Queue[bytes] = asyncio.Queue()
+    loop = asyncio.get_running_loop()
 
     def on_disconnect(_client: BleakClient) -> None:
-        disconnected.set()
+        loop.call_soon_threadsafe(disconnected.set)
 
     stderr("Connecting...")
     log_file = open(args.log_file, "ab", buffering=0) if args.log_file else None
@@ -510,26 +565,55 @@ async def run(args: argparse.Namespace) -> None:
             protocol = bytes(await client.read_gatt_char(MGMT_PROTOCOL_UUID))
             if len(protocol) < 10 or protocol[0] != MGMT_API_MAJOR:
                 raise RuntimeError("unsupported Linkr Management API version")
+            capabilities = int.from_bytes(protocol[4:8], "little")
+            management_max_payload = int.from_bytes(protocol[2:4], "little")
+            if management_max_payload == 0:
+                raise RuntimeError("invalid Linkr Management payload limit")
+            if not capabilities & MGMT_CAP_DEVICE_ID:
+                raise RuntimeError("device does not advertise Device ID support")
+            if not capabilities & MGMT_CAP_RELIABLE_UART:
+                raise RuntimeError("device does not advertise Reliable UART support")
+            wifi_actions = any((
+                args.wifi, args.wifi_scan, args.wifi_off, args.query_wifi,
+            ))
+            if wifi_actions and not capabilities & MGMT_CAP_WIFI:
+                raise RuntimeError("device does not advertise WiFi support")
+            async_wifi_actions = any((args.wifi, args.wifi_scan, args.wifi_off))
+            if async_wifi_actions and not capabilities & MGMT_CAP_ASYNC_EVENTS:
+                raise RuntimeError("device does not advertise async event support")
+            webdav_actions = any((
+                args.webdav, args.webdav_off, args.query_webdav,
+            ))
+            if webdav_actions and not capabilities & MGMT_CAP_WEBDAV:
+                raise RuntimeError("device does not advertise WebDAV support")
             device_id = bytes(await client.read_gatt_char(MGMT_DEVICE_ID_UUID))
+            if len(device_id) != 16:
+                raise RuntimeError("invalid Linkr Device ID length")
             stderr(
                 f"Management API v{protocol[0]}.{protocol[1]}, "
                 f"device ID {device_id.hex()}"
             )
-            management = ManagementChannel(client, cfg)
+            management = ManagementChannel(client, cfg, management_max_payload)
             await client.start_notify(
                 MGMT_RESPONSE_UUID, management.on_indication
             )
             reliable_state = bytes(
                 await client.read_gatt_char(RELIABLE_UART_STATE_UUID)
             )
-            if len(reliable_state) < 16 or reliable_state[0] != 1:
+            if len(reliable_state) != 16 or reliable_state[0] != 1:
                 raise RuntimeError("unsupported Reliable UART version")
+            reliable_max_payload = int.from_bytes(reliable_state[2:4], "little")
+            reliable_tx_sequence = int.from_bytes(reliable_state[4:8], "little")
+            reliable_rx_sequence = int.from_bytes(reliable_state[8:12], "little")
+            if not reliable_max_payload or not reliable_tx_sequence or \
+                    not reliable_rx_sequence:
+                raise RuntimeError("invalid Reliable UART state")
             reliable = ReliableUartChannel(
                 client,
                 cfg,
-                int.from_bytes(reliable_state[2:4], "little"),
-                int.from_bytes(reliable_state[4:8], "little"),
-                int.from_bytes(reliable_state[8:12], "little"),
+                reliable_max_payload,
+                reliable_tx_sequence,
+                reliable_rx_sequence,
                 on_notify,
             )
             await client.start_notify(
@@ -548,17 +632,22 @@ async def run(args: argparse.Namespace) -> None:
 
             if args.wifi:
                 await management.send(
-                    f"@w={args.wifi}".encode(), wait_final_timeout=30.0
+                    f"@w={args.wifi}".encode(),
+                    wait_final_timeout=WIFI_OPERATION_TIMEOUT,
                 )
 
             if args.wifi_off:
-                await management.send(b"@w off", wait_final_timeout=10.0)
+                await management.send(
+                    b"@w off", wait_final_timeout=WIFI_OPERATION_TIMEOUT
+                )
 
             if args.query_wifi:
                 await management.send(b"@w?")
 
             if args.wifi_scan:
-                await management.send(b"@w scan", wait_final_timeout=25.0)
+                await management.send(
+                    b"@w scan", wait_final_timeout=WIFI_SCAN_TIMEOUT
+                )
 
             if args.webdav:
                 await management.send(f"@d={args.webdav}".encode())
@@ -614,7 +703,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--address", help="BLE address/UUID; skips name scan")
     parser.add_argument("--scan", action="store_true", help="list nearby BLE devices")
-    parser.add_argument("--timeout", type=float, default=8.0, help="scan timeout seconds")
+    parser.add_argument("--timeout", type=positive_float, default=8.0,
+                        help="scan timeout seconds")
     parser.add_argument("--query-info", action="store_true",
                         help="send @i? device diagnostics before terminal")
     parser.add_argument("--query-uart", action="store_true", help="send @u? before terminal")
@@ -631,14 +721,14 @@ def build_parser() -> argparse.ArgumentParser:
                         help="deprecated no-op; BLE pairing is disabled")
     parser.add_argument("--loopback-test", nargs="?", const="A",
                         help="send payload and require the same bytes back")
-    parser.add_argument("--loopback-timeout", type=float, default=3.0,
+    parser.add_argument("--loopback-timeout", type=positive_float, default=3.0,
                         help="seconds to wait for --loopback-test echo")
     parser.add_argument("--no-terminal", action="store_true", help="connect, run commands, exit")
-    parser.add_argument("--ble-write-size", type=int, default=0,
+    parser.add_argument("--ble-write-size", type=ble_write_size, default=0,
                         help="max bytes per BLE RX write; default auto")
     parser.add_argument("--write-response", action="store_true",
                         help="use GATT write-with-response")
-    parser.add_argument("--write-delay-ms", type=float, default=5.0,
+    parser.add_argument("--write-delay-ms", type=nonnegative_float, default=5.0,
                         help="delay between BLE write chunks")
     parser.add_argument("--enter", choices=["raw", "cr", "lf", "crlf"], default="raw",
                         help="translate Enter key bytes before BLE write")

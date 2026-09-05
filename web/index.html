@@ -10,7 +10,7 @@
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%233fc88a'/%3E%3Cpath d='M7 7l10 10-4 4V3l4 4L7 17' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"
     />
     <link rel="stylesheet" href="./vendor/xterm/xterm.css" />
-    <link rel="stylesheet" href="./style.css?v=20260902-terminal2" />
+    <link rel="stylesheet" href="./style.css?v=20260905-hardening1" />
   </head>
   <body>
     <main class="app-shell">
@@ -31,16 +31,17 @@
           <div class="top-actions">
             <button id="mobileConnectBtn" class="btn btn-primary mobile-connect" type="button">
               <span class="spinner" aria-hidden="true"></span>
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 7l10 10-4 4V3l4 4L7 17"></path></svg>
+              <svg class="connect-icon connect-icon-ble" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 7l10 10-4 4V3l4 4L7 17"></path></svg>
+              <svg class="connect-icon connect-icon-lan" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" hidden><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg>
               <span class="btn-label" data-i18n="connect">Connect</span>
             </button>
-            <button id="panelToggle" class="icon-btn" type="button" data-i18n-title="panel" aria-label="Toggle panel" aria-expanded="false">
+            <button id="panelToggle" class="icon-btn" type="button" data-i18n-title="togglePanel" data-i18n-aria="togglePanel" aria-label="Toggle panel" aria-controls="controlsPanel" aria-expanded="true">
               <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <rect x="3" y="3" width="18" height="18" rx="2"></rect>
                 <line x1="15" y1="3" x2="15" y2="21"></line>
               </svg>
             </button>
-            <button id="themeButton" class="icon-btn" type="button" data-i18n-title="theme" aria-label="Theme">
+            <button id="themeButton" class="icon-btn" type="button" data-i18n-title="theme" data-i18n-aria="theme" aria-label="Theme">
               <svg class="icon-sun" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <circle cx="12" cy="12" r="4"></circle>
                 <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path>
@@ -50,7 +51,7 @@
               </svg>
               <span class="btn-label">Light</span>
             </button>
-            <button id="langButton" class="icon-btn" type="button" data-i18n-title="language" aria-label="Language">
+            <button id="langButton" class="icon-btn" type="button" data-i18n-title="language" data-i18n-aria="language" aria-label="Language">
               <span class="btn-label">中</span>
             </button>
           </div>
@@ -62,11 +63,11 @@
         </div>
       </header>
 
-      <aside class="controls" aria-label="Controls" data-settings-active="connection">
+      <aside id="controlsPanel" class="controls" data-i18n-aria="controls" aria-label="Controls" data-settings-active="connection">
         <div class="drawer-head">
           <span data-i18n="panel">Panel</span>
           <div class="drawer-head-actions">
-            <button id="drawerThemeButton" class="icon-btn" type="button" data-i18n-title="theme" aria-label="Theme">
+            <button id="drawerThemeButton" class="icon-btn" type="button" data-i18n-title="theme" data-i18n-aria="theme" aria-label="Theme">
               <svg class="icon-sun" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <circle cx="12" cy="12" r="4"></circle>
                 <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path>
@@ -75,10 +76,10 @@
                 <path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z"></path>
               </svg>
             </button>
-            <button id="drawerLangButton" class="icon-btn" type="button" data-i18n-title="language" aria-label="Language">
+            <button id="drawerLangButton" class="icon-btn" type="button" data-i18n-title="language" data-i18n-aria="language" aria-label="Language">
               <span class="btn-label">中</span>
             </button>
-            <button id="drawerClose" class="icon-btn icon-close" type="button" data-i18n-title="close" aria-label="Close panel">
+            <button id="drawerClose" class="icon-btn icon-close" type="button" data-i18n-title="closePanel" data-i18n-aria="closePanel" aria-label="Close panel">
               <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <line x1="6" y1="6" x2="18" y2="18"></line>
                 <line x1="18" y1="6" x2="6" y2="18"></line>
@@ -93,22 +94,24 @@
           <button class="settings-tab" type="button" data-settings-target="network" data-i18n="settingsNetwork" aria-selected="false">Network</button>
         </nav>
 
-        <section class="card" aria-label="Connection controls" data-settings-page="connection">
+        <section class="card" data-i18n-aria="connectionControls" aria-label="Connection controls" data-settings-page="connection">
           <div class="card-title">
             <span class="dot"></span><span data-i18n="connection">Connection</span>
           </div>
-          <div class="transport-switch" role="group" aria-label="Transport">
-            <button id="bleModeBtn" class="ts-btn active" type="button" data-i18n="bleMode">BLE</button>
-            <button id="lanModeBtn" class="ts-btn" type="button" data-i18n="lanMode">LAN</button>
+          <div class="transport-switch" role="group" data-i18n-aria="transport" aria-label="Transport">
+            <button id="bleModeBtn" class="ts-btn active" type="button" data-i18n="bleMode" aria-pressed="true">BLE</button>
+            <button id="lanModeBtn" class="ts-btn" type="button" data-i18n="lanMode" aria-pressed="false">LAN</button>
           </div>
           <label class="field ws-host-field" id="wsHostField" hidden>
             <span class="field-label" data-i18n="wsHost">Device address</span>
-            <input id="wsHostInput" type="text" data-i18n-ph="placeholderWsHost" placeholder="192.168.1.50" spellcheck="false" autocomplete="off">
+            <input id="wsHostInput" type="text" data-i18n-ph="placeholderWsHost" placeholder="192.168.1.50" spellcheck="false" autocomplete="off" aria-invalid="false" aria-describedby="wsHostError" aria-errormessage="wsHostError">
+            <span id="wsHostError" class="field-error" role="alert" hidden></span>
           </label>
           <div class="btn-grid">
             <button id="connectButton" class="btn btn-primary" type="button">
               <span class="spinner" aria-hidden="true"></span>
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7l10 10-4 4V3l4 4L7 17"></path></svg>
+              <svg class="connect-icon connect-icon-ble" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 7l10 10-4 4V3l4 4L7 17"></path></svg>
+              <svg class="connect-icon connect-icon-lan" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" hidden><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg>
               <span class="btn-label" data-i18n="connect">Connect</span>
             </button>
             <button id="disconnectButton" class="btn" type="button" disabled="">
@@ -174,7 +177,7 @@
           </div>
         </details>
 
-        <section class="card" aria-label="Terminal settings" data-settings-page="terminal">
+        <section class="card" data-i18n-aria="terminalSettingsAria" aria-label="Terminal settings" data-settings-page="terminal">
           <div class="card-title"><span class="dot"></span><span data-i18n="terminalSettings">Terminal Settings</span></div>
           <label class="field">
             <span class="field-label" data-i18n="uart">UART</span>
@@ -226,7 +229,7 @@
           </div>
         </section>
 
-        <section class="card" aria-label="WiFi and WebDAV" data-settings-page="network">
+        <section class="card" data-i18n-aria="wifiWebdavAria" aria-label="WiFi and WebDAV" data-settings-page="network">
           <div class="card-title"><span class="dot"></span><span data-i18n="wifiWebdav">WiFi &amp; WebDAV</span></div>
           <div id="wifiConnectedSummary" class="wifi-connected-summary" hidden>
             <div class="wifi-connected-network">
@@ -301,7 +304,7 @@
           </div>
         </section>
 
-        <section class="card" aria-label="Cheat sheet" data-settings-page="terminal">
+        <section class="card" data-i18n-aria="cheatsheetAria" aria-label="Cheat sheet" data-settings-page="terminal">
           <div class="card-title">
             <span class="dot"></span><span data-i18n="cheatsheet">Cheat Sheet</span>
           </div>
@@ -324,8 +327,8 @@
               <span class="term-led"></span><span data-i18n="serialOutput">Serial Terminal</span>
             </span>
             <div class="term-tools">
-              <button id="zoomOutBtn" class="term-tool" type="button" data-i18n-title="zoomOut" aria-label="Decrease font">A−</button>
-              <button id="zoomInBtn" class="term-tool" type="button" data-i18n-title="zoomIn" aria-label="Increase font">A+</button>
+              <button id="zoomOutBtn" class="term-tool" type="button" data-i18n-title="zoomOut" data-i18n-aria="zoomOut" aria-label="Decrease font">A−</button>
+              <button id="zoomInBtn" class="term-tool" type="button" data-i18n-title="zoomIn" data-i18n-aria="zoomIn" aria-label="Increase font">A+</button>
               <button id="fullscreenBtn" class="term-tool" type="button" data-i18n-title="fullscreen" data-i18n-aria="fullscreen" aria-label="Fullscreen terminal" aria-pressed="false">
                 <svg class="fullscreen-icon icon-expand" viewBox="0 0 24 24" aria-hidden="true">
                   <path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"></path>
@@ -334,8 +337,8 @@
                   <path d="M3 8h5V3M21 8h-5V3M3 16h5v5M21 16h-5v5"></path>
                 </svg>
               </button>
-              <button id="autoscrollBtn" class="term-tool" type="button" data-i18n-title="autoScroll" aria-label="Auto-scroll" aria-pressed="true">⤓</button>
-              <button id="copyBtn" class="term-tool" type="button" data-i18n-title="copy" aria-label="Copy selection">⧉</button>
+              <button id="autoscrollBtn" class="term-tool" type="button" data-i18n-title="autoScroll" data-i18n-aria="autoScroll" aria-label="Auto-scroll" aria-pressed="true">⤓</button>
+              <button id="copyBtn" class="term-tool" type="button" data-i18n-title="copy" data-i18n-aria="copy" aria-label="Copy selection">⧉</button>
               <span class="term-hint" data-i18n="xterm">xterm.js</span>
             </div>
           </div>
@@ -352,7 +355,7 @@
               Connect a device to enable terminal input
             </span>
             <div class="terminal-input-actions">
-              <button id="focusTerminalButton" class="btn terminal-keyboard" type="button" disabled="" data-i18n-title="keyboard" aria-label="Open keyboard">
+              <button id="focusTerminalButton" class="btn terminal-keyboard" type="button" disabled="" data-i18n-title="keyboard" data-i18n-aria="keyboard" aria-label="Open keyboard">
                 <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                   <rect x="3" y="5" width="18" height="14" rx="2"></rect>
                   <path d="M7 9h.01M11 9h.01M15 9h.01M19 9h.01M7 13h.01M11 13h.01M15 13h.01M19 13h.01M8 16h8"></path>
@@ -366,15 +369,15 @@
           </div>
         </section>
 
-        <div class="presets" id="presetChips" aria-label="Quick send">
+        <div class="presets" id="presetChips" data-i18n-aria="quickSend" aria-label="Quick send">
           <button class="preset-chip" type="button" data-cmd="help" disabled="">help</button>
           <button class="preset-chip" type="button" data-cmd="version" disabled="">version</button>
           <button class="preset-chip" type="button" data-cmd="uname -a" disabled="">uname -a</button>
           <button class="preset-chip" type="button" data-cmd="df -h" disabled="">df -h</button>
-          <button class="preset-chip" type="button" data-cmd="reboot" disabled="">reboot</button>
+          <button class="preset-chip" type="button" data-cmd="reboot" data-confirm="confirmReboot" data-danger="true" disabled="">reboot</button>
         </div>
 
-        <div class="statusbar" aria-label="Status">
+        <div class="statusbar" data-i18n-aria="statusAria" aria-label="Status">
           <span class="sb-item"><b id="rxCount">0</b> <span data-i18n="rx">RX</span></span>
           <span class="sb-item"><b id="txCount">0</b> <span data-i18n="tx">TX</span></span>
           <span class="sb-item"><span data-i18n="baud">Baud</span> <b id="baudLabel">115200</b></span>
@@ -391,6 +394,6 @@
     <script src="./vendor/xterm/xterm.js"></script>
     <script src="./vendor/addon-fit/addon-fit.js"></script>
     <script type="module" src="./ble_transport.js?v=20260901-mobile1"></script>
-    <script type="module" src="./app.js?v=20260902-terminal2"></script>
+    <script type="module" src="./app.js?v=20260905-hardening1"></script>
   </body>
 </html>

@@ -15,6 +15,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdatomic.h>
@@ -53,16 +54,6 @@ struct options {
     const char *address;
     bool scan;
     double timeout;
-    bool query_info;
-    bool query_uart;
-    const char *uart;
-    const char *wifi;
-    bool wifi_off;
-    bool query_wifi;
-    bool wifi_scan;
-    const char *webdav;
-    bool webdav_off;
-    bool query_webdav;
     bool pair;
     const char *loopback_test;
     double loopback_timeout;
@@ -140,23 +131,33 @@ static void fatal(const char *fmt, ...)
 static void hex_uuid_to_dbus(const char *uuid128, char *out, size_t out_len)
 {
     /* BlueZ uses dashed lowercase 128-bit UUIDs in managed objects. */
-    size_t i, o;
+    size_t hex = 0;
+    size_t o = 0;
 
-    if (out_len < 38) {
+    if (out_len < 37) {
         *out = '\0';
         return;
     }
 
-    o = 0;
-    for (i = 0; uuid128[i] && o < 36; i++) {
+    for (size_t i = 0; uuid128[i]; i++) {
         char c = uuid128[i];
+
         if (c == '-') {
             continue;
         }
-        out[o++] = (char)tolower((unsigned char)c);
-        if (o == 8 || o == 12 || o == 16 || o == 20) {
+        if (!isxdigit((unsigned char)c) || hex >= 32) {
+            out[0] = '\0';
+            return;
+        }
+        if (hex == 8 || hex == 12 || hex == 16 || hex == 20) {
             out[o++] = '-';
         }
+        out[o++] = (char)tolower((unsigned char)c);
+        hex++;
+    }
+    if (hex != 32) {
+        out[0] = '\0';
+        return;
     }
     out[o] = '\0';
 }
@@ -192,17 +193,23 @@ static void normalize_enter(const uint8_t *in, size_t in_len,
         return;
     }
 
-    /* First normalize all CR/LF/CRLF to a single placeholder LF. */
-    for (i = 0; i < in_len && o + repl_len < out_cap; i++) {
+    /* Normalize CR/LF/CRLF without emitting half of a replacement sequence. */
+    for (i = 0; i < in_len && o < out_cap; i++) {
         if (in[i] == '\r') {
             if (i + 1 < in_len && in[i + 1] == '\n') {
                 i++;
             }
-            for (size_t r = 0; r < repl_len && o < out_cap; r++) {
+            if (out_cap - o < repl_len) {
+                break;
+            }
+            for (size_t r = 0; r < repl_len; r++) {
                 out[o++] = repl[r];
             }
         } else if (in[i] == '\n') {
-            for (size_t r = 0; r < repl_len && o < out_cap; r++) {
+            if (out_cap - o < repl_len) {
+                break;
+            }
+            for (size_t r = 0; r < repl_len; r++) {
                 out[o++] = repl[r];
             }
         } else {
@@ -210,45 +217,6 @@ static void normalize_enter(const uint8_t *in, size_t in_len,
         }
     }
     *out_len = o;
-}
-
-static const char *normalize_uart_spec(const char *spec)
-{
-    static char buf[64];
-    char tmp[64];
-    char *fields[5];
-    int n = 0;
-
-    strncpy(tmp, spec, sizeof(tmp) - 1);
-    tmp[sizeof(tmp) - 1] = '\0';
-
-    char *save = NULL;
-    for (char *p = strtok_r(tmp, ",", &save); p && n < 5; p = strtok_r(NULL, ",", &save)) {
-        fields[n++] = p;
-    }
-    if (n != 5) {
-        fatal("UART spec must be baud,data,parity,stop,flow");
-    }
-
-    const char *parity = fields[2];
-    if (strcasecmp(parity, "none") == 0 || strcasecmp(parity, "n") == 0) {
-        parity = "n";
-    } else if (strcasecmp(parity, "odd") == 0 || strcasecmp(parity, "o") == 0) {
-        parity = "o";
-    } else if (strcasecmp(parity, "even") == 0 || strcasecmp(parity, "e") == 0) {
-        parity = "e";
-    }
-
-    const char *flow = fields[4];
-    if (strcasecmp(flow, "none") == 0 || strcasecmp(flow, "off") == 0 || strcasecmp(flow, "n") == 0) {
-        flow = "n";
-    } else if (strcasecmp(flow, "rtscts") == 0 || strcasecmp(flow, "hw") == 0) {
-        flow = "rtscts";
-    }
-
-    snprintf(buf, sizeof(buf), "%s,%s,%s,%s,%s",
-             fields[0], fields[1], parity, fields[3], flow);
-    return buf;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -890,66 +858,14 @@ static bool discover_characteristics(DBusConnection *conn)
     return true;
 }
 
-static int read_device_mtu(DBusConnection *conn)
-{
-    DBusMessage *msg, *reply;
-    DBusMessageIter args, variant;
-    DBusError err;
-    const char *iface = DEVICE_IFACE;
-    const char *prop = "MTU";
-    dbus_uint16_t v = 0;
-
-    dbus_error_init(&err);
-    msg = dbus_message_new_method_call(BLUEZ_BUS, g_state.device_path,
-                                       DBUS_PROP_IFACE, "Get");
-    if (!msg) {
-        return 0;
-    }
-
-    dbus_message_iter_init_append(msg, &args);
-    dbus_message_iter_append_basic(&args, DBUS_TYPE_STRING, &iface);
-    dbus_message_iter_append_basic(&args, DBUS_TYPE_STRING, &prop);
-
-    reply = dbus_connection_send_with_reply_and_block(conn, msg, 3000, &err);
-    dbus_message_unref(msg);
-
-    if (dbus_error_is_set(&err)) {
-        dbus_error_free(&err);
-        return 0;
-    }
-    if (!reply) {
-        return 0;
-    }
-
-    if (dbus_message_iter_init(reply, &args) &&
-        dbus_message_iter_get_arg_type(&args) == DBUS_TYPE_VARIANT) {
-        dbus_message_iter_recurse(&args, &variant);
-        if (dbus_message_iter_get_arg_type(&variant) == DBUS_TYPE_UINT16) {
-            dbus_message_iter_get_basic(&variant, &v);
-        }
-    }
-    dbus_message_unref(reply);
-    return (int)v;
-}
-
 static void configure_write_chunk(void)
 {
-    int mtu = read_device_mtu(g_state.conn);
-
-    if (mtu >= 23) {
-        g_state.mtu_write_size = mtu - 3;
-        if (g_state.mtu_write_size > BLE_MAX_NUS_PAYLOAD) {
-            g_state.mtu_write_size = BLE_MAX_NUS_PAYLOAD;
-        }
-        if (g_state.mtu_write_size < 20) {
-            g_state.mtu_write_size = 20;
-        }
-        msg("Negotiated ATT MTU %d -> write chunk %d bytes",
-            mtu, g_state.mtu_write_size);
-    } else {
-        g_state.mtu_write_size = 20;
-        msg("ATT MTU unknown; using write chunk 20 bytes");
-    }
+    /* Device1 has no portable MTU property. The BlueZ AcquireWrite API can
+     * return an MTU with a dedicated file descriptor, but this small
+     * WriteValue-based reference client deliberately uses the baseline ATT
+     * payload unless the user supplies --ble-write-size. */
+    g_state.mtu_write_size = 20;
+    msg("using safe BLE write chunk 20 bytes (override with --ble-write-size)");
 }
 
 /* ------------------------------------------------------------------------ */
@@ -1288,6 +1204,16 @@ static size_t tx_dequeue(uint8_t *out, size_t max, long timeout_ms)
     return n;
 }
 
+static bool tx_finished(void)
+{
+    bool finished;
+
+    pthread_mutex_lock(&g_state.tx_lock);
+    finished = g_state.tx_done && g_state.tx_count == 0;
+    pthread_mutex_unlock(&g_state.tx_lock);
+    return finished;
+}
+
 /* ------------------------------------------------------------------------ */
 /* Output / notification handling                                           */
 /* ------------------------------------------------------------------------ */
@@ -1393,57 +1319,23 @@ static void process_queued_rx(struct options *opt)
 }
 
 /* ------------------------------------------------------------------------ */
-/* Control commands & loopback test                                         */
+/* Loopback test                                                            */
 /* ------------------------------------------------------------------------ */
-
-static bool send_control(DBusConnection *conn, struct options *opt,
-                         const char *cmd)
-{
-    size_t cmd_len = strlen(cmd);
-    int header_len;
-    char *frame;
-    bool ok;
-
-    if (strncmp(cmd, "@w=", 3) == 0 || strncmp(cmd, "@d=", 3) == 0) {
-        msg("control -> %.2s=<redacted>", cmd);
-    } else {
-        msg("control -> %s", cmd);
-    }
-
-    header_len = snprintf(NULL, 0, "@!%zu:", cmd_len);
-    if (header_len < 0) {
-        return false;
-    }
-    frame = malloc((size_t)header_len + cmd_len + 1U);
-    if (!frame) {
-        msg("out of memory while framing control command");
-        return false;
-    }
-    snprintf(frame, (size_t)header_len + 1U, "@!%zu:", cmd_len);
-    memcpy(frame + header_len, cmd, cmd_len + 1U);
-
-    ok = write_with_mtu(conn, (const uint8_t *)frame,
-                        (size_t)header_len + cmd_len, opt);
-    free(frame);
-    if (!ok) {
-        return false;
-    }
-    for (int i = 0; i < 12; i++) {
-        dbus_connection_read_write_dispatch(conn, 50);
-        process_queued_rx(opt);
-    }
-    return true;
-}
 
 static bool do_loopback_test(DBusConnection *conn, struct options *opt)
 {
     const char *payload = opt->loopback_test;
     size_t payload_len = strlen(payload);
     struct timespec start, now;
-    size_t acc_cap = payload_len * 4;
+    size_t acc_cap;
     uint8_t *acc;
     size_t acc_len = 0;
 
+    if (payload_len == 0 || payload_len > SIZE_MAX - BLE_MAX_NUS_PAYLOAD) {
+        msg("loopback payload must not be empty or oversized");
+        return false;
+    }
+    acc_cap = payload_len + BLE_MAX_NUS_PAYLOAD;
     if (acc_cap < 512) {
         acc_cap = 512;
     }
@@ -1462,7 +1354,7 @@ static bool do_loopback_test(DBusConnection *conn, struct options *opt)
     }
 
     clock_gettime(CLOCK_MONOTONIC, &start);
-    while (acc_len < payload_len) {
+    for (;;) {
         uint8_t buf[BLE_MAX_NUS_PAYLOAD];
         size_t len;
         double elapsed;
@@ -1479,8 +1371,15 @@ static bool do_loopback_test(DBusConnection *conn, struct options *opt)
             continue;
         }
 
-        if (acc_len + len > acc_cap) {
-            len = acc_cap - acc_len;
+        if (len > acc_cap - acc_len) {
+            size_t discard = len - (acc_cap - acc_len);
+
+            if (discard >= acc_len) {
+                acc_len = 0;
+            } else {
+                memmove(acc, acc + discard, acc_len - discard);
+                acc_len -= discard;
+            }
         }
         memcpy(acc + acc_len, buf, len);
         acc_len += len;
@@ -1504,12 +1403,17 @@ static bool do_loopback_test(DBusConnection *conn, struct options *opt)
 static void run_terminal(DBusConnection *conn, struct options *opt)
 {
     pthread_t tid;
+    int err;
 
     msg("Terminal open. Press Ctrl-] to exit.");
 
-    pthread_create(&tid, NULL, stdin_thread, opt);
+    err = pthread_create(&tid, NULL, stdin_thread, opt);
+    if (err) {
+        msg("could not start stdin thread: %s", strerror(err));
+        return;
+    }
 
-    while (!g_state.tx_done) {
+    for (;;) {
         uint8_t buf[TX_BUF_SIZE / 2];
         size_t n;
 
@@ -1525,6 +1429,9 @@ static void run_terminal(DBusConnection *conn, struct options *opt)
         }
 
         process_queued_rx(opt);
+        if (tx_finished()) {
+            break;
+        }
     }
 
     pthread_join(tid, NULL);
@@ -1545,12 +1452,18 @@ static const char *parse_escape(const char *s)
         return out;
     }
     if (strncmp(s, "0x", 2) == 0) {
-        unsigned int v;
-        if (sscanf(s + 2, "%x", &v) == 1) {
+        char *end = NULL;
+        unsigned long v;
+
+        errno = 0;
+        v = strtoul(s + 2, &end, 16);
+        if (errno == 0 && end != s + 2 && *end == '\0' &&
+            v > 0 && v <= 0xff) {
             out[0] = (char)v;
             out[1] = '\0';
             return out;
         }
+        fatal("hex escape must be between 0x01 and 0xff");
     }
     if (strlen(s) == 1) {
         out[0] = s[0];
@@ -1559,6 +1472,35 @@ static const char *parse_escape(const char *s)
     }
     fatal("escape must be one byte, like ^] or 0x1d");
     return NULL;
+}
+
+static double parse_positive_double(const char *option, const char *value)
+{
+    char *end = NULL;
+    double parsed;
+
+    errno = 0;
+    parsed = strtod(value, &end);
+    if (errno != 0 || end == value || *end != '\0' ||
+        !isfinite(parsed) || parsed <= 0.0) {
+        fatal("%s must be a number greater than zero", option);
+    }
+    return parsed;
+}
+
+static int parse_ble_write_size(const char *value)
+{
+    char *end = NULL;
+    long parsed;
+
+    errno = 0;
+    parsed = strtol(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0' ||
+        parsed < 0 || parsed > BLE_MAX_NUS_PAYLOAD) {
+        fatal("--ble-write-size must be between 0 and %d",
+              BLE_MAX_NUS_PAYLOAD);
+    }
+    return (int)parsed;
 }
 
 static void usage(const char *prog)
@@ -1571,21 +1513,11 @@ static void usage(const char *prog)
             "  --address ADDR        BLE address; skip name scan\n"
             "  --scan                list nearby BLE devices and exit\n"
             "  --timeout SEC         scan timeout (default: 8.0)\n"
-            "  --query-info          send @i? diagnostics before terminal\n"
-            "  --query-uart          send @u? before terminal\n"
-            "  --uart SPEC           set UART as baud,data,parity,stop,flow\n"
-            "  --wifi SSID,PASS      connect ESP32 to WiFi\n"
-            "  --wifi-off            forget saved WiFi\n"
-            "  --query-wifi          send @w? before terminal\n"
-            "  --wifi-scan           scan nearby 2.4 GHz WiFi networks\n"
-            "  --webdav URL         set anonymous HTTP WebDAV upload URL\n"
-            "  --webdav-off          disable WebDAV upload\n"
-            "  --query-webdav        send @d? before terminal\n"
             "  --pair                deprecated no-op; pairing is disabled\n"
             "  --loopback-test PAYLOAD  send payload and require echo\n"
             "  --loopback-timeout SEC   loopback timeout (default: 3.0)\n"
             "  --no-terminal         connect, run commands, exit\n"
-            "  --ble-write-size N    max bytes per BLE write (0=auto)\n"
+            "  --ble-write-size N    max bytes per BLE write (0=20-byte safe default)\n"
             "  --write-response      use GATT write-with-response (default: without)\n"
             "  --enter MODE          raw|cr|lf|crlf (default: raw)\n"
             "  --local-echo          echo typed bytes locally\n"
@@ -1620,37 +1552,17 @@ static void parse_args(int argc, char **argv, struct options *opt)
         } else if (strcmp(a, "--scan") == 0) {
             opt->scan = true;
         } else if (strcmp(a, "--timeout") == 0 && i + 1 < argc) {
-            opt->timeout = atof(argv[++i]);
-        } else if (strcmp(a, "--query-info") == 0) {
-            opt->query_info = true;
-        } else if (strcmp(a, "--query-uart") == 0) {
-            opt->query_uart = true;
-        } else if (strcmp(a, "--uart") == 0 && i + 1 < argc) {
-            opt->uart = argv[++i];
-        } else if (strcmp(a, "--wifi") == 0 && i + 1 < argc) {
-            opt->wifi = argv[++i];
-        } else if (strcmp(a, "--wifi-off") == 0) {
-            opt->wifi_off = true;
-        } else if (strcmp(a, "--query-wifi") == 0) {
-            opt->query_wifi = true;
-        } else if (strcmp(a, "--wifi-scan") == 0) {
-            opt->wifi_scan = true;
-        } else if (strcmp(a, "--webdav") == 0 && i + 1 < argc) {
-            opt->webdav = argv[++i];
-        } else if (strcmp(a, "--webdav-off") == 0) {
-            opt->webdav_off = true;
-        } else if (strcmp(a, "--query-webdav") == 0) {
-            opt->query_webdav = true;
+            opt->timeout = parse_positive_double(a, argv[++i]);
         } else if (strcmp(a, "--pair") == 0) {
             opt->pair = true;
         } else if (strcmp(a, "--loopback-test") == 0 && i + 1 < argc) {
             opt->loopback_test = argv[++i];
         } else if (strcmp(a, "--loopback-timeout") == 0 && i + 1 < argc) {
-            opt->loopback_timeout = atof(argv[++i]);
+            opt->loopback_timeout = parse_positive_double(a, argv[++i]);
         } else if (strcmp(a, "--no-terminal") == 0) {
             opt->no_terminal = true;
         } else if (strcmp(a, "--ble-write-size") == 0 && i + 1 < argc) {
-            opt->ble_write_size = atoi(argv[++i]);
+            opt->ble_write_size = parse_ble_write_size(argv[++i]);
         } else if (strcmp(a, "--write-response") == 0) {
             opt->write_response = true;
         } else if (strcmp(a, "--enter") == 0 && i + 1 < argc) {
@@ -1670,6 +1582,10 @@ static void parse_args(int argc, char **argv, struct options *opt)
         }
     }
 
+    if (strcmp(opt->enter, "raw") != 0 && strcmp(opt->enter, "cr") != 0 &&
+        strcmp(opt->enter, "lf") != 0 && strcmp(opt->enter, "crlf") != 0) {
+        fatal("--enter must be raw, cr, lf, or crlf");
+    }
     opt->escape = parse_escape(opt->escape);
 }
 
@@ -1694,12 +1610,6 @@ int main(int argc, char **argv)
 
     parse_args(argc, argv, &opt);
 
-    if (opt.query_info || opt.query_uart || opt.uart || opt.wifi ||
-        opt.wifi_off || opt.query_wifi || opt.wifi_scan || opt.webdav ||
-        opt.webdav_off || opt.query_webdav) {
-        fatal("management flags require API v1; use linkr_ble_terminal.py");
-    }
-
     dbus_error_init(&err);
     g_state.conn = dbus_bus_get(DBUS_BUS_SYSTEM, &err);
     if (!g_state.conn) {
@@ -1714,10 +1624,7 @@ int main(int argc, char **argv)
 
     if (opt.scan) {
         scan_and_list_devices(g_state.conn, opt.timeout);
-        if (!opt.query_info && !opt.query_uart && !opt.uart &&
-            !opt.wifi && !opt.wifi_off && !opt.query_wifi &&
-            !opt.wifi_scan && !opt.webdav && !opt.webdav_off &&
-            !opt.query_webdav && !opt.loopback_test && !opt.pair) {
+        if (!opt.loopback_test && !opt.pair) {
             return 0;
         }
     }
@@ -1739,17 +1646,11 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    /* Start notifications first so MTU exchange can complete, then read the
-     * negotiated ATT MTU from BlueZ to size BLE write chunks. Falls back to
-     * 20 bytes if the MTU property is unavailable. */
     if (!start_notifications(g_state.conn)) {
         disconnect_device(g_state.conn);
         return 1;
     }
 
-    /* Give BlueZ a moment to finish the LE Data Length / MTU exchange, then
-     * size write chunks from the negotiated ATT MTU. */
-    usleep(200000);
     configure_write_chunk();
 
     if (opt.log_file) {
@@ -1757,51 +1658,6 @@ int main(int argc, char **argv)
         if (!g_state.log_file) {
             msg("cannot open log file %s: %s", opt.log_file, strerror(errno));
         }
-    }
-
-    if (opt.query_info) {
-        send_control(g_state.conn, &opt, "@i?");
-    }
-
-    if (opt.uart) {
-        char cmd[80];
-        snprintf(cmd, sizeof(cmd), "@u=%s", normalize_uart_spec(opt.uart));
-        send_control(g_state.conn, &opt, cmd);
-    }
-
-    if (opt.query_uart) {
-        send_control(g_state.conn, &opt, "@u?");
-    }
-
-    if (opt.wifi) {
-        char cmd[160];
-        snprintf(cmd, sizeof(cmd), "@w=%s", opt.wifi);
-        send_control(g_state.conn, &opt, cmd);
-    }
-    if (opt.wifi_off) {
-        send_control(g_state.conn, &opt, "@w off");
-    }
-    if (opt.query_wifi) {
-        send_control(g_state.conn, &opt, "@w?");
-    }
-    if (opt.wifi_scan) {
-        send_control(g_state.conn, &opt, "@w scan");
-        for (int i = 0; i < 50; i++) {
-            dbus_connection_read_write_dispatch(g_state.conn, 100);
-            process_queued_rx(&opt);
-        }
-    }
-
-    if (opt.webdav) {
-        char cmd[400];
-        snprintf(cmd, sizeof(cmd), "@d=%s", opt.webdav);
-        send_control(g_state.conn, &opt, cmd);
-    }
-    if (opt.webdav_off) {
-        send_control(g_state.conn, &opt, "@d off");
-    }
-    if (opt.query_webdav) {
-        send_control(g_state.conn, &opt, "@d?");
     }
 
     if (opt.loopback_test) {
