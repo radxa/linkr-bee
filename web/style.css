@@ -221,6 +221,9 @@ button {
   grid-template-rows: auto 1fr;
   gap: var(--layout-gap);
   width: 100%;
+  /* vh fallback: Android WebViews before Chrome 108 reject dvh, which would
+   * leave the shell heightless and let terminal rows stretch the whole page. */
+  height: 100vh;
   height: 100dvh;
   margin: 0 auto;
   padding:
@@ -923,6 +926,7 @@ button:focus-visible {
   inset: 0;
   z-index: 1000;
   width: 100vw;
+  height: 100vh;
   height: 100dvh;
 }
 
@@ -1051,6 +1055,7 @@ body.terminal-fullscreen-fallback {
   .app-shell {
     grid-template-columns: 1fr;
     grid-template-rows: auto minmax(0, 1fr);
+    height: 100vh;
     height: 100dvh;
     min-height: 0;
     overflow: hidden;
@@ -2269,6 +2274,7 @@ html.soft-keyboard-open .app-shell {
   grid-template-columns: minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
   gap: 0;
+  height: var(--terminal-viewport-height, 100vh);
   height: var(--terminal-viewport-height, 100dvh);
   min-height: 0;
   padding:
@@ -2307,12 +2313,14 @@ html.soft-keyboard-open .terminal-card {
 /* Fullscreen cards are outside the workspace's sizing context. WebViews can
  * shrink visualViewport without changing the fixed/fullscreen layout height. */
 html.soft-keyboard-open .terminal-card.terminal-fullscreen-fallback {
+  height: var(--terminal-viewport-height, 100vh);
   height: var(--terminal-viewport-height, 100dvh);
 }
 
 html.soft-keyboard-open .terminal-card:fullscreen {
   /* Browsers force native fullscreen height to 100% with a UA !important
    * rule. Reserve the keyboard-covered area inside that fixed outer box. */
+  padding-bottom: max(0px, calc(100vh - var(--terminal-viewport-height, 100vh)));
   padding-bottom: max(0px, calc(100dvh - var(--terminal-viewport-height, 100dvh)));
 }
 
@@ -2464,6 +2472,7 @@ html.agent-mode.settings-drawer-layout .app-shell {
   top: var(--agent-viewport-top, 0px);
   left: 0;
   width: 100%;
+  height: var(--terminal-viewport-height, 100vh);
   height: var(--terminal-viewport-height, 100dvh);
   grid-template-columns: minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
@@ -2516,11 +2525,13 @@ html.settings-drawer-layout .app-shell.sidebar-open .controls {
   display: flex;
   top: calc(var(--settings-viewport-top, 0px) + max(12px, env(safe-area-inset-top, 0px)));
   bottom: auto;
+  height: calc(var(--terminal-viewport-height, 100vh) - max(12px, env(safe-area-inset-top, 0px)) - max(12px, env(safe-area-inset-bottom, 0px)));
   height: calc(var(--terminal-viewport-height, 100dvh) - max(12px, env(safe-area-inset-top, 0px)) - max(12px, env(safe-area-inset-bottom, 0px)));
 }
 @media (max-width: 600px) {
   html.settings-drawer-layout .app-shell.sidebar-open .controls {
     top: var(--settings-viewport-top, 0px);
+    height: var(--terminal-viewport-height, 100vh);
     height: var(--terminal-viewport-height, 100dvh);
   }
 }
