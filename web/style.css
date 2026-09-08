@@ -2321,7 +2321,14 @@ html.soft-keyboard-open .terminal-card:fullscreen {
   /* Browsers force native fullscreen height to 100% with a UA !important
    * rule. Reserve the keyboard-covered area inside that fixed outer box. */
   padding-bottom: max(0px, calc(100vh - var(--terminal-viewport-height, 100vh)));
-  padding-bottom: max(0px, calc(100dvh - var(--terminal-viewport-height, 100dvh)));
+}
+
+/* A declaration containing var() can fail at computed-value time, after the
+ * preceding fallback has been discarded. Gate the unsupported unit instead. */
+@supports (height: 100dvh) {
+  html.soft-keyboard-open .terminal-card:fullscreen {
+    padding-bottom: max(0px, calc(100dvh - var(--terminal-viewport-height, 100dvh)));
+  }
 }
 
 html.soft-keyboard-open .terminal-head {
