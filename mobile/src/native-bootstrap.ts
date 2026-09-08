@@ -184,8 +184,11 @@ function createNativeBleBackend(): NativeBleBackend {
   };
 }
 
-window.LinkrNativeBleReady = Promise.resolve().then(() => {
-  if (Capacitor.isNativePlatform()) {
-    window.LinkrNativeBle = createNativeBleBackend();
-  }
-});
+// Install the native backend synchronously. app.js reads window.LinkrNativeBle
+// while its module body runs (platform detection, support text), and that runs
+// before any microtask. Deferring the assignment to a promise callback made
+// those reads fall back to the web backend and misreport the platform.
+if (Capacitor.isNativePlatform()) {
+  window.LinkrNativeBle = createNativeBleBackend();
+}
+window.LinkrNativeBleReady = Promise.resolve();
