@@ -436,9 +436,9 @@ static int save_wifi_settings(const char *ssid, const char *psk)
     };
 
     if (settings.enabled) {
-        strncpy(settings.ssid, ssid, sizeof(settings.ssid) - 1);
+        snprintf(settings.ssid, sizeof(settings.ssid), "%s", ssid);
         if (psk) {
-            strncpy(settings.psk, psk, sizeof(settings.psk) - 1);
+            snprintf(settings.psk, sizeof(settings.psk), "%s", psk);
         }
     }
     return settings_save_one("linkr/wifi", &settings, sizeof(settings));
