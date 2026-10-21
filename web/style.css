@@ -669,6 +669,12 @@ input[aria-invalid="true"] {
   margin-bottom: 12px;
 }
 
+/* An author display setting beats the user agent's rule for [hidden]; the
+ * custom baud field is the first .field that toggles visibility. */
+.field[hidden] {
+  display: none;
+}
+
 .field:last-child {
   margin-bottom: 0;
 }
