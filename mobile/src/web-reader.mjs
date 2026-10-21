@@ -49,6 +49,9 @@ export async function readWebPage({ url, offset = 0, limit = 16000, find, signal
     if (!/^(text\/|application\/(json|xhtml\+xml))/.test(contentType)) {
       throw new Error("This URL is not a text page. Use the download tool for the destination chosen by the user.");
     }
+    if (!response.body) {
+      throw new Error("The page response has no body.");
+    }
     reader = response.body.getReader();
     const decoder = new TextDecoder();
     let source = "", bytes = 0;
