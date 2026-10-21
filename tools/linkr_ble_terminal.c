@@ -397,19 +397,26 @@ static bool find_adapter(DBusConnection *conn, char *path_out, size_t path_out_l
     dbus_message_iter_recurse(&iter, &arr);
     while (dbus_message_iter_get_arg_type(&arr) == DBUS_TYPE_DICT_ENTRY) {
         DBusMessageIter entry, ifaces;
-        const char *path;
+        const char *path = NULL;
 
         dbus_message_iter_recurse(&arr, &entry);
-        iter_get_basic(&entry, DBUS_TYPE_OBJECT_PATH, &path);
+        if (iter_get_basic(&entry, DBUS_TYPE_OBJECT_PATH, &path) != 0 || !path) {
+            dbus_message_iter_next(&arr);
+            continue;
+        }
         dbus_message_iter_next(&entry);
         dbus_message_iter_recurse(&entry, &ifaces);
 
         while (dbus_message_iter_get_arg_type(&ifaces) == DBUS_TYPE_DICT_ENTRY) {
             DBusMessageIter iface_entry;
-            const char *iface;
+            const char *iface = NULL;
 
             dbus_message_iter_recurse(&ifaces, &iface_entry);
-            iter_get_basic(&iface_entry, DBUS_TYPE_STRING, &iface);
+            if (iter_get_basic(&iface_entry, DBUS_TYPE_STRING, &iface) != 0 ||
+                !iface) {
+                dbus_message_iter_next(&ifaces);
+                continue;
+            }
             if (strcmp(iface, ADAPTER_IFACE) == 0) {
                 /* snprintf over strncpy: always NUL-terminated, and gcc's
                  * -Wstringop-truncation stays quiet. */
@@ -560,10 +567,13 @@ static bool uuid_matches(DBusMessageIter *props, const char *uuid)
     dbus_message_iter_recurse(props, &prop_entry);
     while (dbus_message_iter_get_arg_type(&prop_entry) == DBUS_TYPE_DICT_ENTRY) {
         DBusMessageIter kv;
-        const char *key;
+        const char *key = NULL;
 
         dbus_message_iter_recurse(&prop_entry, &kv);
-        iter_get_basic(&kv, DBUS_TYPE_STRING, &key);
+        if (iter_get_basic(&kv, DBUS_TYPE_STRING, &key) != 0 || !key) {
+            dbus_message_iter_next(&prop_entry);
+            continue;
+        }
         dbus_message_iter_next(&kv);
 
         if (strcmp(key, "UUIDs") == 0 && iter_uuid_array_contains(&kv, uuid)) {
@@ -588,19 +598,26 @@ static void scan_managed_objects(DBusConnection *conn, struct device_match *matc
     dbus_message_iter_recurse(&iter, &arr);
     while (dbus_message_iter_get_arg_type(&arr) == DBUS_TYPE_DICT_ENTRY) {
         DBusMessageIter entry, ifaces;
-        const char *path;
+        const char *path = NULL;
 
         dbus_message_iter_recurse(&arr, &entry);
-        iter_get_basic(&entry, DBUS_TYPE_OBJECT_PATH, &path);
+        if (iter_get_basic(&entry, DBUS_TYPE_OBJECT_PATH, &path) != 0 || !path) {
+            dbus_message_iter_next(&arr);
+            continue;
+        }
         dbus_message_iter_next(&entry);
         dbus_message_iter_recurse(&entry, &ifaces);
 
         while (dbus_message_iter_get_arg_type(&ifaces) == DBUS_TYPE_DICT_ENTRY) {
             DBusMessageIter iface_entry, props;
-            const char *iface;
+            const char *iface = NULL;
 
             dbus_message_iter_recurse(&ifaces, &iface_entry);
-            iter_get_basic(&iface_entry, DBUS_TYPE_STRING, &iface);
+            if (iter_get_basic(&iface_entry, DBUS_TYPE_STRING, &iface) != 0 ||
+                !iface) {
+                dbus_message_iter_next(&ifaces);
+                continue;
+            }
             dbus_message_iter_next(&iface_entry);
             dbus_message_iter_recurse(&iface_entry, &props);
 
@@ -614,10 +631,14 @@ static void scan_managed_objects(DBusConnection *conn, struct device_match *matc
                 dbus_message_iter_recurse(&props, &prop_entry);
                 while (dbus_message_iter_get_arg_type(&prop_entry) == DBUS_TYPE_DICT_ENTRY) {
                     DBusMessageIter kv;
-                    const char *key;
+                    const char *key = NULL;
 
                     dbus_message_iter_recurse(&prop_entry, &kv);
-                    iter_get_basic(&kv, DBUS_TYPE_STRING, &key);
+                    if (iter_get_basic(&kv, DBUS_TYPE_STRING, &key) != 0 ||
+                        !key) {
+                        dbus_message_iter_next(&prop_entry);
+                        continue;
+                    }
                     dbus_message_iter_next(&kv);
 
                     if (strcmp(key, "Name") == 0) {
@@ -753,19 +774,26 @@ static void list_devices(DBusConnection *conn)
     dbus_message_iter_recurse(&iter, &arr);
     while (dbus_message_iter_get_arg_type(&arr) == DBUS_TYPE_DICT_ENTRY) {
         DBusMessageIter entry, ifaces;
-        const char *path;
+        const char *path = NULL;
 
         dbus_message_iter_recurse(&arr, &entry);
-        iter_get_basic(&entry, DBUS_TYPE_OBJECT_PATH, &path);
+        if (iter_get_basic(&entry, DBUS_TYPE_OBJECT_PATH, &path) != 0 || !path) {
+            dbus_message_iter_next(&arr);
+            continue;
+        }
         dbus_message_iter_next(&entry);
         dbus_message_iter_recurse(&entry, &ifaces);
 
         while (dbus_message_iter_get_arg_type(&ifaces) == DBUS_TYPE_DICT_ENTRY) {
             DBusMessageIter iface_entry, props;
-            const char *iface;
+            const char *iface = NULL;
 
             dbus_message_iter_recurse(&ifaces, &iface_entry);
-            iter_get_basic(&iface_entry, DBUS_TYPE_STRING, &iface);
+            if (iter_get_basic(&iface_entry, DBUS_TYPE_STRING, &iface) != 0 ||
+                !iface) {
+                dbus_message_iter_next(&ifaces);
+                continue;
+            }
             dbus_message_iter_next(&iface_entry);
             dbus_message_iter_recurse(&iface_entry, &props);
 
@@ -777,10 +805,14 @@ static void list_devices(DBusConnection *conn)
                 dbus_message_iter_recurse(&props, &prop_entry);
                 while (dbus_message_iter_get_arg_type(&prop_entry) == DBUS_TYPE_DICT_ENTRY) {
                     DBusMessageIter kv;
-                    const char *key;
+                    const char *key = NULL;
 
                     dbus_message_iter_recurse(&prop_entry, &kv);
-                    iter_get_basic(&kv, DBUS_TYPE_STRING, &key);
+                    if (iter_get_basic(&kv, DBUS_TYPE_STRING, &key) != 0 ||
+                        !key) {
+                        dbus_message_iter_next(&prop_entry);
+                        continue;
+                    }
                     dbus_message_iter_next(&kv);
 
                     if (strcmp(key, "Name") == 0) {
@@ -924,10 +956,14 @@ static bool discover_characteristics(DBusConnection *conn)
                 dbus_message_iter_recurse(&iter, &arr);
                 while (dbus_message_iter_get_arg_type(&arr) == DBUS_TYPE_DICT_ENTRY) {
                     DBusMessageIter entry, ifaces;
-                    const char *path;
+                    const char *path = NULL;
 
                     dbus_message_iter_recurse(&arr, &entry);
-                    iter_get_basic(&entry, DBUS_TYPE_OBJECT_PATH, &path);
+                    if (iter_get_basic(&entry, DBUS_TYPE_OBJECT_PATH, &path) != 0 ||
+                        !path) {
+                        dbus_message_iter_next(&arr);
+                        continue;
+                    }
                     dbus_message_iter_next(&entry);
                     if (strncmp(path, g_state.device_path, strlen(g_state.device_path)) != 0 ||
                         (path[strlen(g_state.device_path)] != '/' &&
@@ -939,10 +975,14 @@ static bool discover_characteristics(DBusConnection *conn)
 
                     while (dbus_message_iter_get_arg_type(&ifaces) == DBUS_TYPE_DICT_ENTRY) {
                         DBusMessageIter iface_entry, props;
-                        const char *iface;
+                        const char *iface = NULL;
 
                         dbus_message_iter_recurse(&ifaces, &iface_entry);
-                        iter_get_basic(&iface_entry, DBUS_TYPE_STRING, &iface);
+                        if (iter_get_basic(&iface_entry, DBUS_TYPE_STRING, &iface) != 0 ||
+                            !iface) {
+                            dbus_message_iter_next(&ifaces);
+                            continue;
+                        }
                         dbus_message_iter_next(&iface_entry);
                         dbus_message_iter_recurse(&iface_entry, &props);
 
@@ -953,10 +993,14 @@ static bool discover_characteristics(DBusConnection *conn)
                             dbus_message_iter_recurse(&props, &prop_entry);
                             while (dbus_message_iter_get_arg_type(&prop_entry) == DBUS_TYPE_DICT_ENTRY) {
                                 DBusMessageIter kv;
-                                const char *key;
+                                const char *key = NULL;
 
                                 dbus_message_iter_recurse(&prop_entry, &kv);
-                                iter_get_basic(&kv, DBUS_TYPE_STRING, &key);
+                                if (iter_get_basic(&kv, DBUS_TYPE_STRING, &key) != 0 ||
+                                    !key) {
+                                    dbus_message_iter_next(&prop_entry);
+                                    continue;
+                                }
                                 dbus_message_iter_next(&kv);
 
                                 if (strcmp(key, "UUID") == 0) {
@@ -1097,10 +1141,13 @@ static DBusHandlerResult filter_signals(DBusConnection *conn,
     dbus_message_iter_recurse(&iter, &changed);
     while (dbus_message_iter_get_arg_type(&changed) == DBUS_TYPE_DICT_ENTRY) {
         DBusMessageIter kv;
-        const char *key;
+        const char *key = NULL;
 
         dbus_message_iter_recurse(&changed, &kv);
-        iter_get_basic(&kv, DBUS_TYPE_STRING, &key);
+        if (iter_get_basic(&kv, DBUS_TYPE_STRING, &key) != 0 || !key) {
+            dbus_message_iter_next(&changed);
+            continue;
+        }
         dbus_message_iter_next(&kv);
 
         if (strcmp(key, "Value") == 0) {

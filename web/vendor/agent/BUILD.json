@@ -31,10 +31,10 @@
     "web/target_files.js": "cc6085e526f699e91672a9bf5036ef74a3fac27f8289e3cf234b9012bcfbde16",
     "web/target_verify.js": "8293c4f3f6fac047b77ddeee98730d5837b88884a730512b6326d6ba3dd5b540",
     "web/serial_watch.js": "e24f5d6c50e1dd5596557f3d7a79166fb5f87f81afcb43b7d76361d9c43caafa",
-    "mobile/src/web-reader.mjs": "32f268c712337e4d2c1af4b34902082e4eab081133f616e80bdaf891e0c0828d",
+    "mobile/src/web-reader.mjs": "566822a0dac1f39dd73db7f75a0f9548588a15b7bc206997f3ca4f50ecfdebf9",
     "mobile/src/agent-context.mjs": "15174a79939ccef79d55ff92c14ff9e285339d7af755be4af2af393cd5244992",
     "mobile/src/pi-agent.mjs": "5d8a18c3361917a6e4dbc9ea0f5e3821839998bbee8b4c4826ce3fb35d7abfd9",
     "mobile/src/agent-runtime.mjs": "485643cb60ba92dae424f123ab2b0a39e711b9786cbbe520556cf21ec83f3676"
   },
-  "sha256": "80cb666b0168584ed4213bff17cb9da215bc488b533d70b02f91ff23000de254"
+  "sha256": "d5f46aeb010ca4876e354982dc12f6edc198416b271d33d02a2f300d8d00773b"
 }

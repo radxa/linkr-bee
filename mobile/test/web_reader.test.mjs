@@ -27,6 +27,7 @@ test("web reader reports CORS failures and rejects binaries and oversized pages"
   await assert.rejects(run(async () => new Response("binary", { headers: { "Content-Type": "application/octet-stream" } })), /not a text page/);
   await assert.rejects(run(async () => new Response("x".repeat(524289))), /512 KiB/);
   await assert.rejects(run(async () => new Response("missing", { status: 404 })), /HTTP 404/);
+  await assert.rejects(run(async () => new Response(null, { headers: { "Content-Type": "text/plain" } })), /no body/);
 });
 
 test("web reader propagates cancellation without starting a request", async () => {
