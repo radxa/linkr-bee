@@ -316,7 +316,9 @@ jobs:
           # Web and the APK go out together, so a bump must not need a second
           # edit in this file (a stale hard-coded number turns a version bump
           # into a red CI run).
-          project_version="$(grep -m1 -oE '"version": *"[0-9]+\.[0-9]+\.[0-9]+"' mobile/package.json \
+          # The firmware job checks the repository out at app/, not at the
+          # workspace root, so the version file is app/mobile/package.json.
+          project_version="$(grep -m1 -oE '"version": *"[0-9]+\.[0-9]+\.[0-9]+"' "${GITHUB_WORKSPACE}/app/mobile/package.json" \
             | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
           test -n "${project_version}"
           grep -qx "CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION=\"${project_version}\"" "${config}"
