@@ -276,6 +276,25 @@ int main(int argc, char **argv)
 		return 0;
 	}
 
+	if (!strcmp(scenario, "parse")) {
+		static const char *const bodies[] = {
+			"n", "name", "n?", "name?", "n default", "name default",
+			"n=default", "name=default", "n  default", "name  default",
+			"n ", "n=", "name=", "n=x", "name=x", "n foo bar", "nope",
+		};
+		size_t count = sizeof(bodies) / sizeof(bodies[0]);
+
+		for (size_t i = 0; i < count; i++) {
+			const char *value = NULL;
+			enum ble_name_request request =
+				ble_name_request_parse(bodies[i], &value);
+
+			printf("parse_%zu=%d\n", i, (int)request);
+			printf("value_%zu=%s\n", i, value ? value : "");
+		}
+		return 0;
+	}
+
 	if (!strcmp(scenario, "save_ok") || !strcmp(scenario, "save_fail") ||
 	    !strcmp(scenario, "install_fail")) {
 		enum ble_name_persist_result result;

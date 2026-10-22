@@ -645,6 +645,41 @@ ble_name_reset_and_delete(int *err)
 	return BLE_NAME_PERSIST_OK;
 }
 
+/* What a control-command body asks of the advertised name. A set's value
+ * points into body; the caller trims and validates it. Kept as a pure function
+ * so the host harness can exercise the command table the documentation states:
+ * `name default` resets, while `name=default` and `name  default` (two spaces)
+ * set the literal name. */
+enum ble_name_request {
+	BLE_NAME_REQUEST_NONE,
+	BLE_NAME_REQUEST_QUERY,
+	BLE_NAME_REQUEST_RESET,
+	BLE_NAME_REQUEST_SET,
+};
+
+static enum ble_name_request ble_name_request_parse(const char *body,
+						     const char **value)
+{
+	*value = NULL;
+	if (!strcmp(body, "name?") || !strcmp(body, "n?") ||
+	    !strcmp(body, "name") || !strcmp(body, "n")) {
+		return BLE_NAME_REQUEST_QUERY;
+	}
+	if (!strcmp(body, "name default") || !strcmp(body, "n default")) {
+		return BLE_NAME_REQUEST_RESET;
+	}
+	if (!strncmp(body, "name=", 5)) {
+		*value = body + 5;
+	} else if (!strncmp(body, "n=", 2)) {
+		*value = body + 2;
+	} else if (!strncmp(body, "name ", 5)) {
+		*value = body + 5;
+	} else if (!strncmp(body, "n ", 2)) {
+		*value = body + 2;
+	}
+	return *value ? BLE_NAME_REQUEST_SET : BLE_NAME_REQUEST_NONE;
+}
+
 SETTINGS_STATIC_HANDLER_DEFINE(linkr_ble, "linkr/ble", NULL,
 			       ble_name_settings_set, NULL, NULL);
 #else
@@ -1602,44 +1637,35 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_NAME_FROM_MAC)
 	/* ---- BLE advertised name (@n / @linkr name) ---- */
-	if (!strcmp(body, "name?") || !strcmp(body, "n?") ||
-	    !strcmp(body, "name") || !strcmp(body, "n")) {
-		(void)send_control_response(conn, "OK name=%s custom=%s\r\n",
-					    ble_name,
-					    ble_name_custom ? "yes" : "no");
-		return true;
-	}
-	if (!strcmp(body, "name default") || !strcmp(body, "n default")) {
-		enum ble_name_persist_result result;
-
-		result = ble_name_reset_and_delete(&err);
-		if (result != BLE_NAME_PERSIST_OK) {
-			(void)send_control_response(
-				conn,
-				result == BLE_NAME_PERSIST_SAVE_FAILED ?
-					"ERR name save=%d\r\n" :
-					"ERR name=%d\r\n",
-				err);
-			return true;
-		}
-		ble_name_advertise_refresh();
-		(void)send_control_response(conn, "OK name=%s\r\n", ble_name);
-		return true;
-	}
-
 	{
 		const char *value = NULL;
+		enum ble_name_request request = ble_name_request_parse(body, &value);
 
-		if (!strncmp(body, "name=", 5)) {
-			value = body + 5;
-		} else if (!strncmp(body, "n=", 2)) {
-			value = body + 2;
-		} else if (!strncmp(body, "name ", 5)) {
-			value = body + 5;
-		} else if (!strncmp(body, "n ", 2)) {
-			value = body + 2;
+		if (request == BLE_NAME_REQUEST_QUERY) {
+			(void)send_control_response(
+				conn, "OK name=%s custom=%s\r\n", ble_name,
+				ble_name_custom ? "yes" : "no");
+			return true;
 		}
-		if (value) {
+		if (request == BLE_NAME_REQUEST_RESET) {
+			enum ble_name_persist_result result;
+
+			result = ble_name_reset_and_delete(&err);
+			if (result != BLE_NAME_PERSIST_OK) {
+				(void)send_control_response(
+					conn,
+					result == BLE_NAME_PERSIST_SAVE_FAILED ?
+						"ERR name save=%d\r\n" :
+						"ERR name=%d\r\n",
+					err);
+				return true;
+			}
+			ble_name_advertise_refresh();
+			(void)send_control_response(conn, "OK name=%s\r\n",
+						    ble_name);
+			return true;
+		}
+		if (request == BLE_NAME_REQUEST_SET) {
 			enum ble_name_persist_result result;
 			size_t len;
 

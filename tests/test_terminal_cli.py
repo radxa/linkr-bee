@@ -952,5 +952,43 @@ class BleWriteSizeTests(unittest.TestCase):
         self.assertEqual(self.configure(client), 20)
 
 
+class VerifyBleNameTests(unittest.TestCase):
+    """The read that follows a write, without a radio.
+
+    `verify_ble_name` is what turns the board's own `@n?` answer into the
+    success or failure of a rename; a CLI that skipped it would report a write
+    the board never applied.
+    """
+
+    class Management:
+        def __init__(self, answer):
+            self.sent = []
+            self.answer = answer
+
+        async def send(self, payload):
+            self.sent.append(payload)
+            return self.answer
+
+    def test_verify_reads_back_and_compares(self):
+        management = self.Management(b"OK name=Bench Bee custom=yes\r\n")
+        asyncio.run(terminal.verify_ble_name(management, "Bench Bee"))
+        self.assertEqual(management.sent, [b"@n?"])
+
+    def test_verify_rejects_a_different_name(self):
+        management = self.Management(b"OK name=Other custom=yes\r\n")
+        with self.assertRaises(RuntimeError):
+            asyncio.run(terminal.verify_ble_name(management, "Bench Bee"))
+
+    def test_verify_a_reset_only_needs_a_readable_name(self):
+        management = self.Management(b"OK name=Linkr Bee 078C custom=no\r\n")
+        asyncio.run(terminal.verify_ble_name(management, None))
+        self.assertEqual(management.sent, [b"@n?"])
+
+    def test_verify_rejects_an_answer_without_a_name(self):
+        management = self.Management(b"ERR name expected 1-29 UTF-8 bytes\r\n")
+        with self.assertRaises(RuntimeError):
+            asyncio.run(terminal.verify_ble_name(management, "Bench Bee"))
+
+
 if __name__ == "__main__":
     unittest.main()

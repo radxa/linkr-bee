@@ -41,6 +41,12 @@ bee-cli --query-uart                   # @u?
 bee-cli --query-wifi                   # @w?
 bee-cli --query-webdav                 # @d?
 bee-cli --query-ble-name               # @n?
+
+A rename (`--rename-ble`) or a restore (`--reset-ble-name`) is confirmed by
+reading `@n?` back: the board's own answer is printed after the write reply,
+and the command exits non-zero when the board reports a different name. A
+restore only has to report a readable name, because the MAC-derived suffix is
+not predictable from the host.
 bee-cli --query-lan                    # @s?
 bee-cli --wifi "MySSID,MyPassword"     # join a network
 bee-cli --wifi "MySSID" --wifi-key-file pw.txt

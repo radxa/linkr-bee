@@ -53,9 +53,12 @@ class BleNameTests(unittest.TestCase):
                             "static int ble_name_settings_set(",
                             ["ble_name_apply"])
             + slice_between(main, "enum ble_name_persist_result {",
-                            "SETTINGS_STATIC_HANDLER_DEFINE(",
+                            "enum ble_name_request {",
                             ["ble_name_install_and_save",
                              "ble_name_reset_and_delete"])
+            + slice_between(main, "enum ble_name_request {",
+                            "SETTINGS_STATIC_HANDLER_DEFINE(",
+                            ["ble_name_request_parse"])
         )
         (directory / "ble_name_production.inc").write_text(block)
         # Compile the harness with the firmware's own limit. The harness no
@@ -227,6 +230,29 @@ class BleNameTests(unittest.TestCase):
         self.assertEqual(fields["reset_delete_fail_delete_calls"], "1")
         self.assertEqual(fields["reset_delete_fail_bt_last"], "Old Name")
 
+
+    def test_the_command_parser_matches_the_documented_table(self):
+        """`name default` resets; `name=default` and `name  default` set names.
+
+        The documentation states this table, so a parser that silently widens
+        the keyword would not be caught by any firmware build.
+        """
+        fields = self.scenario("parse")
+        # Query forms: n, name, n?, name?
+        for index in range(4):
+            self.assertEqual(fields[f"parse_{index}"], "1", index)
+        # Reset forms: exactly one space after the keyword.
+        self.assertEqual(fields["parse_4"], "2")
+        self.assertEqual(fields["parse_5"], "2")
+        # The rest are literal names (or empty sets), not a reset.
+        for index in range(6, 15):
+            self.assertEqual(fields[f"parse_{index}"], "3", index)
+        self.assertEqual(fields["value_6"], "default")
+        self.assertEqual(fields["value_8"], " default",
+                         "two spaces are kept as the literal name")
+        self.assertEqual(fields["value_15"], "foo bar")
+        # A body that names nothing at all is not a name command.
+        self.assertEqual(fields["parse_16"], "0")
 
 if __name__ == "__main__":
     unittest.main()

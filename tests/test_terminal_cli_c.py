@@ -336,7 +336,7 @@ class CHarnessTests(unittest.TestCase):
         escape_helpers = extract(source, "static void describe_escape(", "\n/* ---",
                                  ["describe_escape"])
         sanitizer = extract(source, "static void printable_ble_name(",
-                            "static void timespec_add_ms(",
+                            "static bool ble_name_from_reply(",
                             ["printable_ble_name"])
         validators = extract(source, "static const char *parse_escape(",
                              "static void usage(", [
@@ -385,6 +385,34 @@ class CManagementFramingTests(unittest.TestCase):
             compiled = subprocess.run([
                 CC, "-std=c11", "-D_GNU_SOURCE", "-Wall", "-Wextra", "-Werror",
                 "-I", str(path), str(ROOT / "tests/mgmt_client_harness.c"),
+                "-o", str(binary),
+            ], capture_output=True, text=True)
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_ble_name_replies_and_printable_names_are_pure_functions(self):
+        """The reply parser and the terminal sanitizer, exercised off the radio.
+
+        Both used to be reachable only through the DBus path, whose tests are
+        skipped without libdbus. Slicing them out keeps their behaviour (a
+        write reply without custom=, a name ending in " custom=yes", ESC and
+        C1 in an advertisement) under a test that always runs.
+        """
+        source = SOURCE_PATH.read_text()
+        block = (
+            extract(source, "static void printable_ble_name(",
+                    "static bool ble_name_from_reply(", ["printable_ble_name"])
+            + extract(source, "static bool ble_name_from_reply(",
+                      "static void timespec_add_ms(", ["ble_name_from_reply"])
+        )
+        with tempfile.TemporaryDirectory(prefix="linkr-c-name-") as directory:
+            path = Path(directory)
+            (path / "production_name.inc").write_text(block)
+            binary = path / "name-reply-test"
+            compiled = subprocess.run([
+                CC, "-std=c11", "-D_GNU_SOURCE", "-Wall", "-Wextra", "-Werror",
+                "-I", str(path), str(ROOT / "tests/ble_name_reply_harness.c"),
                 "-o", str(binary),
             ], capture_output=True, text=True)
             self.assertEqual(compiled.returncode, 0, compiled.stderr)
@@ -739,6 +767,8 @@ class CParityTests(unittest.TestCase):
         self.assertLess(write, read)
         self.assertLess(reset, read)
         self.assertIn("changed || opt->query_ble_name", body)
+        self.assertIn("ble_name_from_reply(reply, true", body)
+        self.assertIn("strcmp(reported, expected)", body)
 
     def test_c_refuses_a_legacy_nus_only_board_for_name_actions(self):
         """A board without the Management quartet is still a terminal, but a

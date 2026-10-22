@@ -789,6 +789,67 @@ static void printable_ble_name(const char *name, char *out, size_t out_len)
     out[used] = '\0';
 }
 
+/* The name out of an `OK name=<name>` reply.
+ *
+ * A query reply appends ` custom=yes|no`; a write reply does not, and a name
+ * that itself ends in that text must survive a write parse. Returns false when
+ * the reply carries no name at all. */
+static bool ble_name_from_reply(const char *reply, bool query, char *out,
+                                size_t out_len)
+{
+    static const char prefix[] = "OK name=";
+    const size_t prefix_len = sizeof(prefix) - 1;
+    const char *line = reply;
+
+    if (!reply || !out || out_len == 0) {
+        return false;
+    }
+    while (*line) {
+        const char *end = strchr(line, '\n');
+        size_t line_len = end ? (size_t)(end - line) : strlen(line);
+
+        while (line_len > 0 && line[line_len - 1] == '\r') {
+            line_len--;
+        }
+        if (line_len > prefix_len && strncmp(line, prefix, prefix_len) == 0) {
+            const char *value = line + prefix_len;
+            size_t value_len = line_len - prefix_len;
+
+            if (query) {
+                const char *last = NULL;
+                const char *at = value;
+
+                while ((at = strstr(at, " custom=")) != NULL) {
+                    last = at++;
+                }
+                if (last) {
+                    const char *flag = last + sizeof(" custom=") - 1;
+                    size_t flag_len =
+                        line_len - (size_t)(flag - line);
+
+                    if ((flag_len == 3 &&
+                         strncasecmp(flag, "yes", 3) == 0) ||
+                        (flag_len == 2 &&
+                         strncasecmp(flag, "no", 2) == 0)) {
+                        value_len = (size_t)(last - value);
+                    }
+                }
+            }
+            if (value_len >= out_len) {
+                value_len = out_len - 1;
+            }
+            memcpy(out, value, value_len);
+            out[value_len] = '\0';
+            return out[0] != '\0';
+        }
+        if (!end) {
+            break;
+        }
+        line = end + 1;
+    }
+    return false;
+}
+
 static void timespec_add_ms(struct timespec *ts, long ms)
 {
     ts->tv_sec += ms / 1000;
@@ -2009,6 +2070,7 @@ static bool run_ble_name_actions(DBusConnection *conn, struct options *opt)
 {
     char reply[MGMT_MAX_PAYLOAD + 1];
     char command[BLE_NAME_MAX + 8];
+    const char *expected = NULL;
     bool changed = false;
 
     if (!start_mgmt_notifications(conn)) {
@@ -2027,6 +2089,7 @@ static bool run_ble_name_actions(DBusConnection *conn, struct options *opt)
             return false;
         }
         printf("%s\n", reply);
+        expected = opt->rename_ble;
         changed = true;
     }
     if (opt->reset_ble_name) {
@@ -2040,12 +2103,28 @@ static bool run_ble_name_actions(DBusConnection *conn, struct options *opt)
     if (changed || opt->query_ble_name) {
         /* A write's reply echoes the request, not the state the board will
          * advertise; `@n?` is the authority, so read it back after a
-         * change. */
+         * change and hold the rename to the name that was asked for. */
         if (!mgmt_send(conn, "@n?", opt, reply, sizeof(reply))) {
             stop_mgmt_notifications(conn);
             return false;
         }
         printf("%s\n", reply);
+        if (changed) {
+            char reported[MAX_NAME_LEN];
+
+            if (!ble_name_from_reply(reply, true, reported,
+                                     sizeof(reported))) {
+                err_msg("the board did not report a name after the change");
+                stop_mgmt_notifications(conn);
+                return false;
+            }
+            if (expected && strcmp(reported, expected) != 0) {
+                err_msg("the board reports \"%s\" after writing \"%s\"",
+                        reported, expected);
+                stop_mgmt_notifications(conn);
+                return false;
+            }
+        }
     }
 
     fflush(stdout);
