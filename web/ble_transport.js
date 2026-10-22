@@ -75,12 +75,15 @@
       return describeBrowserDevice(device);
     },
 
-    async getDevices() {
+    async getDevices(deviceIds = []) {
       if (!root.navigator?.bluetooth?.getDevices) {
         return [];
       }
+      const wanted = new Set(deviceIds);
       const devices = await root.navigator.bluetooth.getDevices();
-      return devices.map(describeBrowserDevice);
+      return devices
+        .map(describeBrowserDevice)
+        .filter((device) => wanted.size === 0 || wanted.has(device.id));
     },
 
     async connect(deviceId, onDisconnect) {

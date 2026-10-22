@@ -4,9 +4,15 @@
  * Pin assignments for ESP32-WROOM-32 with CH340 USB-UART:
  *   Bridge UART:  UART2 — GPIO16 (RX), GPIO17 (TX) — via CH340
  *   Console:      UART0 — GPIO1 (TX), GPIO3 (RX) — via Type-C CH340
- *   LED:          GPIO2 (active-low on most DevKitC boards)
+ *   Activity LED: GPIO2 (blue, active-low)
+ *   Autobaud key: GPIO13 (active-low)
  *   Pairing key:  GPIO4
  *   Factory reset: GPIO27 (external jumper to GND)
+ *
+ * GPIO2 is a boot strapping pin. The LED driver holds it high through reset
+ * as required. GPIO2 is now an LED output: never wire a key or jumper from
+ * GPIO2 to GND, because that would short the LED output. GPIO13 has no boot
+ * strapping function; an external button or jumper to GND starts one pass.
  */
 
 / {
@@ -16,6 +22,7 @@
 
 	aliases {
 		led0 = &led0;
+		linkr-autobaud = &linkr_autobaud;
 		linkr-pairing = &linkr_pairing;
 		linkr-factory-reset = &linkr_factory_reset;
 	};
@@ -26,6 +33,15 @@
 		led0: led_0 {
 			gpios = <&gpio0 2 GPIO_ACTIVE_LOW>;
 			label = "Activity LED";
+		};
+	};
+
+	linkr_autobaud_keys {
+		compatible = "gpio-keys";
+
+		linkr_autobaud: autobaud {
+			label = "Linkr autobaud trigger";
+			gpios = <&gpio0 13 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
 		};
 	};
 

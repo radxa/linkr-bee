@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createAssistantMessageEventStream, getCurrentSystemPrompt, getCurrentTools } from "@earendil-works/pi-ai";
 import { createSerialAgent, validateAgentConfig } from "../src/pi-agent.mjs";
+import { toolContextChars } from "../src/agent-context.mjs";
 import { AGENT_FIXED_CONTEXT_TOKENS } from "../../web/agent_config.js";
 import { SerialJournal } from "../../web/serial_journal.js";
 import { createDeviceExecutor } from "../../web/device_executor.js";
@@ -498,6 +499,27 @@ test("a small configured context window shrinks the history that is sent", async
   assert.ok(sent[0] > sent[1], `the smaller window must carry less history (${sent[0]} vs ${sent[1]} characters)`);
 });
 
+test("tool parameter schemas leave less history in a constrained window", async () => {
+  const restoredMessages = Array.from({ length: 20 }, (_, index) => ([
+    { role: "user", content: `question-${index}:` + "x".repeat(600), timestamp: 1 },
+    { role: "assistant", api: "openai-completions", provider: "test", model: "test", stopReason: "stop",
+      content: [{ type: "text", text: `answer-${index}:` + "y".repeat(1600) }], timestamp: 1 },
+  ])).flat();
+  const agent = makeAgent({ config: { ...config, contextWindow: 16000, maxTokens: 512 },
+    accessory: {}, notes: {}, restoredMessages, getStatus: () => status,
+    stream: fakeStream(context => {
+      // Prompt + optional tool schemas consume about 9600 estimated tokens;
+      // after output/framing reserve, fewer than 12000 history chars fit. The
+      // old description-only estimate sent considerably more than that.
+      const history = JSON.stringify(context.messages.filter(m => m.role !== "system"));
+      assert.ok(history.length < 12000, `${history.length} history characters left no room for schemas`);
+      assert.ok(history.includes("CURRENT_GOAL"));
+      return [{ type: "text", text: "ok" }];
+    }),
+  });
+  await agent.prompt("CURRENT_GOAL");
+});
+
 /* pi-agent-core 0.87 replays system messages: every message's text merges into
  * the prompt and the tool declarations replay in order. A restored snapshot
  * carries its own baseline system message, so without deduplication each
@@ -552,13 +574,15 @@ test("a restored conversation carries exactly one baseline system prompt", async
  * number is only honest while it still describes the real prompt and tools, so
  * this re-measures them at the same pessimistic ratio the runtime budgets with
  * and fails when a new tool description pushes the truth past the constant. */
-test("the fixed-context estimate still covers the real prompt and tool descriptions", async () => {
+test("the fixed-context estimate covers parameter schemas and optional tools", async () => {
   let fixedChars = 0;
-  const agent = makeAgent({ config, getStatus: () => status, readLog: () => ({ text: "", cursor: 0 }),
+  const agent = makeAgent({ config, accessory: {}, notes: {}, getStatus: () => status, readLog: () => ({ text: "", cursor: 0 }),
     sendInput: () => assert.fail("read-only turn must not write"),
     stream: fakeStream((context) => {
-      fixedChars = getCurrentSystemPrompt(context.messages).length + getCurrentTools(context.messages)
-        .reduce((total, tool) => total + tool.name.length + tool.description.length, 0);
+      const tools = getCurrentTools(context.messages);
+      assert.ok(tools.some(tool => tool.name === "remember_target_note"));
+      assert.ok(tools.some(tool => tool.name === "set_uart_config"));
+      fixedChars = getCurrentSystemPrompt(context.messages).length + toolContextChars(tools);
       return [{ type: "text", text: "ok" }];
     }) });
   await agent.prompt("hello");

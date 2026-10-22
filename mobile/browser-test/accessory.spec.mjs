@@ -60,7 +60,7 @@ test("diagnostics are read without an approval card", async ({ page }) => {
   await page.evaluate(() => window.__test.setControl(async (command) => {
     window.commands.push(command);
     if (command === "@i?") {
-      window.__test.feedManagementText("@info fw version=0.2.0 zephyr=4.4.1\r\n");
+      window.__test.feedManagementText("@info fw version=0.1.2 zephyr=4.4.1\r\n");
       window.__test.feedManagementText("@info uart dropped=0 dropped_no_conn=0 buffer=12/4096\r\n");
       window.__test.feedManagementText("@info done\r\n");
       return "OK";
@@ -71,13 +71,13 @@ test("diagnostics are read without an approval card", async ({ page }) => {
   await mockModel(page, (body) => {
     if (++turns === 1) return { tool: { name: "get_accessory_diagnostics", args: {} } };
     replies.push(body.messages.at(-1).content);
-    return { text: "The bridge runs firmware 0.2.0." };
+    return { text: "The bridge runs firmware 0.1.2." };
   });
   await ask(page, "Which firmware is the bridge running?");
-  await expect(page.locator("#agentMessages")).toContainText("firmware 0.2.0");
+  await expect(page.locator("#agentMessages")).toContainText("firmware 0.1.2");
   expect(await page.evaluate(() => window.commands)).toEqual(["@i?"]);
   const evidence = JSON.parse(replies[0]);
-  expect(evidence.groups.fw.version).toBe("0.2.0");
+  expect(evidence.groups.fw.version).toBe("0.1.2");
   expect(evidence.settled).toBe(true);
   await expect(page.getByRole("button", { name: /Allow change|允许修改/ })).toHaveCount(0);
 });

@@ -231,25 +231,23 @@ export const AGENT_DEFAULT_MAX_TOKENS = 4096;
 
 /* What the assistant costs before any conversation is sent.
  *
- * Measured 2026-09-18 by summing the system prompt and every tool description
- * the agent is created with: 13.7 KB + 9.4 KB. The prompt is English, so it is
- * converted at a pessimistic 3 characters per token. `mobile/test/agent_config.test.mjs`
- * re-measures the real value and fails if it grows past this number, so adding
- * a large tool description cannot silently make the warning below wrong.
+ * Includes the system prompt, tool descriptions and JSON parameter schemas,
+ * including optional accessory/note tools. Converted at a pessimistic 3 chars
+ * per token; serial_agent.test.mjs re-measures this estimate as tools change.
  *
  * This matters because the setting accepts a window as small as 1000 tokens: a
  * window below the fixed part cannot hold a request at all, and the failure
  * arrives as an opaque provider error. Naming the floor is the difference
  * between "the model refused" and "this field is too small".
  */
-export const AGENT_FIXED_CONTEXT_TOKENS = 8000;
+export const AGENT_FIXED_CONTEXT_TOKENS = 12000;
 
-/* A window this small cannot carry the fixed part plus the requested output.
- * The reserve is framing and a little history; a user who lowers maxTokens
- * deliberately lowers this floor with it. */
+/* Reserve framing (256 tokens) and at least 2000 history chars at 2 chars/token,
+ * rounded up. Keep the settings warning consistent with contextBudgetChars's
+ * minimum retained history; lowering maxTokens still lowers this floor. */
 export function minimumUsefulContextWindow(maxTokens = 0) {
   const output = Number.isInteger(maxTokens) && maxTokens > 0 ? maxTokens : AGENT_DEFAULT_MAX_TOKENS;
-  return AGENT_FIXED_CONTEXT_TOKENS + output + 512;
+  return AGENT_FIXED_CONTEXT_TOKENS + output + 1280;
 }
 
 /* 0 means "use the built-in default", which is large enough, so it is never

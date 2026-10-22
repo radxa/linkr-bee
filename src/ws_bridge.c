@@ -776,7 +776,12 @@ int linkr_ws_set_token(const char *token)
 
 	err = ws_settings_save(atomic_get(&ws_enabled) != 0);
 	if (err) {
-		LOG_WRN("persisting WebSocket token failed: %d", err);
+		/* The credential is already live in RAM, so the change has taken
+		 * effect; only its survival across a reboot is at risk. Reporting
+		 * the failure would tell the caller to retry, and a retry replaces
+		 * the token again — invalidating the one just handed out. */
+		LOG_WRN("WebSocket token not persisted: %d (applies now, not after reboot)",
+			err);
 	}
 
 	/* The token is the LAN credential, so a session that authenticated with the
@@ -792,7 +797,7 @@ int linkr_ws_set_token(const char *token)
 	}
 
 	LOG_INF("WebSocket LAN auth %s", (token && token[0]) ? "token set" : "disabled");
-	return err;
+	return 0;
 }
 
 int linkr_ws_rotate_token(void)
@@ -811,7 +816,11 @@ int linkr_ws_rotate_token(void)
 
 	err = ws_settings_save(atomic_get(&ws_enabled) != 0);
 	if (err) {
-		LOG_WRN("persisting WebSocket token failed: %d", err);
+		/* Same as linkr_ws_set_token(): the rotation is already live, so
+		 * only persistence is at risk. A retry would generate yet another
+		 * token and invalidate the one the caller was just given. */
+		LOG_WRN("WebSocket token not persisted: %d (applies now, not after reboot)",
+			err);
 	}
 
 	/* Revoke sessions that authenticated with the replaced token; see
@@ -824,7 +833,7 @@ int linkr_ws_rotate_token(void)
 		(void)ws_server_start();
 	}
 	LOG_INF("WebSocket LAN auth token generated");
-	return err;
+	return 0;
 }
 
 int linkr_ws_set_enabled(bool enabled)

@@ -65,18 +65,18 @@ test("diagnostics are read without approval and reach the next model turn", asyn
     stream: fakeStream((context) => {
       if (++turns === 1) return [toolCall("get_accessory_diagnostics", {})];
       const evidence = JSON.parse(toolResultText(context.messages.at(-1)));
-      assert.equal(evidence.groups.fw.version, "0.2.0");
+      assert.equal(evidence.groups.fw.version, "0.1.2");
       assert.equal(evidence.settled, true);
       assert.equal(evidence.source, "accessory-management-channel");
-      return [{ type: "text", text: "Firmware 0.2.0 is running." }];
+      return [{ type: "text", text: "Firmware 0.1.2 is running." }];
     }),
     accessory: {
       capability: () => ({ available: true }),
       diagnostics: async ({ signal }) => {
         assert.equal(signal?.aborted, false);
         readings += 1;
-        return { settled: true, lines: ["@info fw version=0.2.0 zephyr=4.4.1"],
-          groups: { fw: { version: "0.2.0", zephyr: "4.4.1" } } };
+        return { settled: true, lines: ["@info fw version=0.1.2 zephyr=4.4.1"],
+          groups: { fw: { version: "0.1.2", zephyr: "4.4.1" } } };
       },
     },
   });

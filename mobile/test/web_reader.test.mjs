@@ -55,3 +55,10 @@ test('web reader rejects invalid paging without issuing requests', async () => {
   await assert.rejects(readWebPage({url:'https://docs.example.org',...args,fetchImpl:()=>assert.fail('must not fetch')}),/Invalid/);
  }
 });
+
+test("raw Markdown and config examples retain indentation and blank lines", async () => {
+  const source = "  Indented first line\n\n```yaml\nnetwork:\n  ethernets:\n    eth0: {}\n```\n\n\nEnd\n";
+  const page = await readWebPage({ url: "https://raw.githubusercontent.com/radxa-docs/docs/main/example.md",
+    fetchImpl: async () => new Response(source, { headers: { "Content-Type": "text/plain" } }) });
+  assert.equal(page.text, source);
+});

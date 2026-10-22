@@ -52,4 +52,13 @@ void linkr_uart_reliable_nus_selected(void);
 int linkr_uart_reliable_send(struct bt_conn *conn, const uint8_t *data,
 			     uint16_t len);
 
+/* Instrumentation for the confirmed-indication handoff, reported through the
+ * `@i?` diagnostics path. Any pointer may be NULL. `slept_ms` is the wall time
+ * this module spent in the -EBUSY/-ENOMEM retry backoff; `wait_max_ms` is the
+ * longest single submit-to-confirmation wait observed. They answer whether the
+ * measured 40-92 ms handoff stalls come from the backoff or from elsewhere. */
+void linkr_uart_reliable_diag(uint32_t *total, uint32_t *retry, uint32_t *busy,
+			      uint32_t *nomem, uint32_t *slept_ms,
+			      uint32_t *timeout, uint32_t *wait_max_ms);
+
 #endif /* LINKR_BLE_UART_RELIABLE_H */

@@ -12,6 +12,7 @@ import { createCommandPolicyStore, formatPolicyList, parsePolicyList } from "./c
 import { clearSession, loadSession, saveSession } from "./agent_session.js";
 import { addUsage, emptyUsage, estimateCost, formatCost, formatTokens, loadPricing } from "./agent_usage.js";
 import { buildTaskReport } from "./agent_report.js";
+import { checkpointForTask } from "./agent_task_state.js";
 
 /* Smallest usable picker height. The list scrolls, so staying clear of the
  * composer matters more than showing every mode at once. */
@@ -26,7 +27,8 @@ const labels = {
   probe_device_profile: ["探测设备档案", "Probe device profile"],
   probe_tools: ["检查所需工具", "Check required tools"],
   update_task_plan: ["任务计划与验证记录", "Task plan and verification"],
-  planAssessment: ["AI 记录的进度，请结合执行日志核实", "Progress recorded by AI; verify against execution logs"],
+  planAssessment: ["进度与证据记录；校验仅覆盖列出的预期", "Progress and evidence; verification covers only the listed expectations"],
+  get_task_checkpoint: ["检查任务恢复点", "Inspect task checkpoint"],
   steer: ["补充本轮", "Add to current task"], followUp: ["排队下一步", "Queue next step"],
   queueHelp: ["补充在当前工具结束后生效；排队在本轮结束后处理。停止会清空待处理消息。", "Add after the current tool finishes, or queue after this task. Stop clears pending messages."],
   clearQueue: ["清空待处理", "Clear pending"],
@@ -52,6 +54,8 @@ const labels = {
   question: ["描述你遇到的问题", "Describe the problem"],
   empty: ["例如：根据当前串口日志，分析系统为什么启动失败。", "For example: why did boot fail, based on the current serial log?"],
   thinking: ["正在分析…", "Analyzing…"], user: ["你", "You"], assistant: ["助手", "Assistant"],
+  modelRetryWait: ["模型请求暂时失败，{seconds} 秒后重试（{attempt}/{max}）。可随时停止。", "Model request temporarily failed. Retrying in {seconds}s ({attempt}/{max}). You can stop at any time."],
+  modelRetrying: ["正在重试模型请求（{attempt}/{max}）…", "Retrying model request ({attempt}/{max})…"],
   approve: ["发送", "Send"], reject: ["拒绝", "Reject"], approval: ["确认发送到当前被控机（控制字符已转义）：", "Send to the current target? (Control characters are escaped.)"],
   stopped: ["已停止。已发送的串口输入无法撤回；如需中断被控机上的程序，请在终端发送 Ctrl-C。", "Stopped. Already sent input cannot be recalled; use Ctrl-C in the terminal to interrupt the target program."],
   changed: ["设备连接已改变，助手已停止。新连接将使用独立的日志和对话。", "Connection changed; assistant stopped. A new connection uses separate logs and conversation."],
@@ -111,6 +115,16 @@ const labels = {
   monitor_serial_execution: ["持续观察执行", "Monitor execution"],
   read_serial_log: ["读取串口日志", "Read serial log"],
   read_web_page: ["读取网页", "Read web page"],
+  load_skill: ["加载内置技能", "Load built-in skill"],
+  search_radxa_docs: ["查询 Radxa 官方文档", "Find official Radxa docs"],
+  "skill-radxa-docs": ["Radxa 官方文档查询", "Official Radxa documentation"],
+  "skill-boot-diagnosis": ["启动故障诊断", "Boot diagnosis"],
+  "skill-network-diagnosis": ["网络故障排查", "Network diagnosis"],
+  "skill-download-verification": ["下载与校验", "Download and verification"],
+  skillLoaded: ["已加载处理流程，后续操作遵循当前执行档位。", "Workflow loaded. Actions still follow the current execution mode."],
+  "docs-published": ["Radxa 文档站", "Published Radxa documentation"],
+  "docs-repository": ["Radxa 官方文档源码", "Official Radxa documentation source"],
+  docsNavigation: ["已查找文档入口，需读取正文确认适用条件。", "Found documentation links; read the pages to check applicable conditions."],
   search_serial_log: ["查找串口日志", "Find serial evidence"],
   noMatches: ["当前范围内没有匹配内容", "No matches in this window"],
   readRange: ["读取范围", "Read range"],
@@ -291,6 +305,8 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
    * has to read the device before it acts. */
   function renderSession(key) {
     const session = key ? loadSession(sessionStorage, key) : null;
+    const lastTask = taskStore.list(key)[0];
+    if (lastTask?.checkpoint?.pendingExecutions?.length) recovery = {goal:lastTask.goal,summary:lastTask.summary,checkpoint:lastTask.checkpoint};
     displayTranscript = session?.display || [];
     restoredMessages = session?.messages?.length ? session.messages : null;
     messages.replaceChildren();
@@ -361,6 +377,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
 
   function persistTask() {
     if (!currentTask) return;
+    currentTask.checkpoint = checkpointForTask(currentTask, device.getStatus());
     try { taskStore.save(currentTask); } catch { $("agentStorageError").textContent = text("storageError"); }
   }
   function scheduleTaskSave() {
@@ -411,7 +428,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
       description.textContent = [task.summary, formatPlan(task.plan)].filter(Boolean).join('\n');
       restore.type = "button"; restore.className = "btn"; restore.textContent = text("recover"); restore.disabled = busy;
       restore.addEventListener("click", () => {
-        recovery = {goal:task.goal,summary:task.summary,status:task.status,executions:task.executions,plan:task.plan};
+        recovery = {goal:task.goal,summary:task.summary,status:task.status,executions:task.executions,plan:task.plan,checkpoint:task.checkpoint};
         $("agentQuestion").value = `${text("recover")}: ${task.goal}`;
         $("agentQuestion").focus();
       });
@@ -485,7 +502,16 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     if (!Array.isArray(steps)) return '';
     const labels = getLang().startsWith('zh') ? {pending:'待执行',in_progress:'进行中',completed:'已完成',blocked:'受阻'} :
       {pending:'Pending',in_progress:'In progress',completed:'Completed',blocked:'Blocked'};
-    return text('planAssessment')+'\n'+steps.map((step,index)=>`${index+1}. [${labels[step.status] || step.status}] ${step.title}\n${step.verification || ''}${step.nextAction ? '\n→ '+step.nextAction : ''}`).join('\n');
+    const zh = getLang().startsWith('zh');
+    return text('planAssessment')+'\n'+steps.map((step,index)=>[
+      `${index+1}. [${labels[step.status] || step.status}] ${step.title}`,
+      step.expectedResult && `${zh?'预期':'Expected'}: ${step.expectedResult}`,
+      step.completion && (step.completion === 'verified' ? (zh?'应用校验匹配':'Application verification matched') : (zh?'观察已记录，未证明修复成功':'Observation recorded; repair not verified')),
+      step.verification,
+      ...(step.evidence || []).map(e=>`${e.id} · ${e.tool} · ${e.subject || ''} · ${e.status}`+
+        (e.kind === 'verification' ? '\n'+JSON.stringify(e.expected || {}) : '')),
+      step.nextAction && '→ '+step.nextAction,
+    ].filter(Boolean).join('\n')).join('\n');
   }
   function setBusy(value) {
     busy = value;
@@ -517,7 +543,10 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
   function renderExecution(record) {
     if (currentTask) {
       currentTask.executions = [...currentTask.executions.filter(e => e.id !== record.id), record];
-      scheduleTaskSave();
+      // This callback precedes the first transport byte. Persist the uncertain
+      // request now, so a backgrounded/killed page cannot lose it to debounce.
+      if (record.delivery === 'unknown') persistTask();
+      else scheduleTaskSave();
     }
     let body = executionRows.get(record.id);
     if (!body) {
@@ -629,6 +658,19 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
   }
   function onEvent(event, expectedVersion) {
     if (version !== expectedVersion) return;
+    if (event.type === 'task_checkpoint' && currentTask) {
+      currentTask.checkpoint = event.checkpoint;
+      scheduleTaskSave();
+    }
+    if (event.type === "model_retry_scheduled") {
+      // Failed requests can carry billable usage even without visible output.
+      if (event.usage) { conversationUsage = addUsage(conversationUsage, event.usage); renderUsage(); }
+      $("agentStatus").textContent = text("modelRetryWait")
+        .replace("{attempt}", event.attempt).replace("{max}", event.maxAttempts).replace("{seconds}", Math.ceil(event.delayMs / 1000));
+    }
+    if (event.type === "model_retry_start") $("agentStatus").textContent = text("modelRetrying")
+      .replace("{attempt}", event.attempt).replace("{max}", event.maxAttempts);
+    if (event.type === "model_retry_end" && event.success) $("agentStatus").textContent = text("thinking");
     if(event.type==='agent_start') $("agentSteer").disabled = $("agentFollowUp").disabled = false;
     if(event.type==='input_queue_changed') {
       $("agentQueue").textContent=event.items.map(item=>`${text(item.kind)}: ${item.text}`).join('\n');
@@ -667,6 +709,15 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
             preview = formatPlan(value.steps);
             if (currentTask) { currentTask.plan = value.steps; persistTask(); refreshHistory(); }
           }
+          if (event.toolName === 'get_task_checkpoint') preview = (value.observations || []).map(ref =>
+            `${ref.id} · ${ref.availability} · ${ref.outcome}${ref.waitingFor ? ' · '+ref.waitingFor : ''}`).join('\n') ||
+            (getLang().startsWith('zh') ? '没有待恢复的执行记录' : 'No pending execution references');
+          if (event.toolName === "load_skill") preview = `${text(`skill-${value.name}`)}\n${text("skillLoaded")}`;
+          if (event.toolName === "search_radxa_docs") preview = [
+            text(`docs-${value.source}`),
+            value.results?.length ? value.results.map(item => `${item.title}\n${item.url}`).join("\n\n") : text("noMatches"),
+            ...(value.warnings || []), text("docsNavigation"),
+          ].filter(Boolean).join("\n");
           if (event.toolName === "read_web_page") preview = [value.title, value.url, value.text?.slice(0, 1600),
             Number.isInteger(value.offset) && `${text('readRange')}: ${value.offset}–${value.nextOffset} / ${value.totalCharacters}`,
             value.matchFound === false && text('noMatches'),
@@ -768,9 +819,9 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
       openSettings();
       return;
     }
-    currentTask = {id:crypto.randomUUID(),deviceKey:deviceIdentity(device.getStatus()),goal:question,summary:"",status:"running",executions:[]};
-    persistTask();
     const restored = recovery; recovery = null;
+    currentTask = {id:crypto.randomUUID(),deviceKey:deviceIdentity(device.getStatus()),goal:question,summary:"",status:"running",executions:[],checkpoint:restored?.checkpoint};
+    persistTask();
     setBusy(true);
     $("agentQuestion").value = "";
     const runVersion = version;
@@ -820,16 +871,17 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
       displayTranscript.push({ role: "user", text: question });
       scheduleSessionSave();
       const outcome = await runner.prompt(question, {recovery:restored});
-      if (currentTask?.status === "running") currentTask.status = outcome.limitReached || currentTask.plan?.some(s=>s.status!=='completed') ? "interrupted" : "answered";
+      if (currentTask?.status === "running") currentTask.status = outcome.limitReached || outcome.unresolvedExecutions || currentTask.plan?.some(s=>s.status!=='completed') ? "interrupted" : "answered";
       if (outcome.limitReached && version === runVersion) addMessage("assistant", text("limit"));
     } catch (error) {
-      if (currentTask) currentTask.status = "failed";
+      if (currentTask?.status === "running") currentTask.status = "failed";
       if (version === runVersion) {
         addMessage("assistant", `${text("error")}${error.message}`);
         // A browser-side failure has a different fix from a model-side error.
         if (isEndpointUnreachable(error)) addMessage("assistant", text("endpointUnreachable"));
       }
     } finally {
+      if (currentTask && runner?.checkpoint) currentTask.checkpoint = runner.checkpoint();
       persistTask();
       clearTimeout(timer);
       setBusy(false);

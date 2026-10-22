@@ -24,16 +24,21 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
 
 #include <dbus/dbus.h>
 
-#define DEFAULT_NAME    "Linkr BLE UART"
 #define NUS_SERVICE     "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
 #define NUS_RX_UUID     "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
 #define NUS_TX_UUID     "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
+#define MGMT_SERVICE    "4c4b0001-9a7e-4f4e-8b8a-3d6f12a0c001"
+#define MGMT_PROTOCOL_UUID "4c4b0002-9a7e-4f4e-8b8a-3d6f12a0c001"
+#define MGMT_DEVICE_ID_UUID "4c4b0003-9a7e-4f4e-8b8a-3d6f12a0c001"
+#define MGMT_COMMAND_UUID "4c4b0004-9a7e-4f4e-8b8a-3d6f12a0c001"
+#define MGMT_RESPONSE_UUID "4c4b0005-9a7e-4f4e-8b8a-3d6f12a0c001"
 #define BLUEZ_PATH      "/org/bluez"
 #define BLUEZ_BUS       "org.bluez"
 #define DBUS_OM_IFACE   "org.freedesktop.DBus.ObjectManager"
@@ -46,13 +51,21 @@
 #define MAX_PATH_LEN    256
 #define MAX_UUID_LEN    40
 #define MAX_NAME_LEN    128
+/* How many nearby boards a failure message can name. */
+#define NEARBY_MAX      6
 /* ATT MTU 247 leaves up to 244 bytes for a GATT value. */
 #define BLE_MAX_NUS_PAYLOAD 244
+/* Management v1 frames, and the firmware's advertised-name limit in bytes. */
+#define MGMT_HEADER_SIZE 12
+#define MGMT_MAX_PAYLOAD 512
+#define MGMT_FLAG_ERROR  0x0002
+#define MGMT_MSG_RESPONSE 2
+#define BLE_NAME_MAX     29
 
 /* Keep in sync with __version__ in linkr_ble_terminal.py: both clients speak to
  * the same device and are released together. tests/test_terminal_cli_c.py
  * asserts the two strings match. */
-#define CLI_VERSION     "1.0.0"
+#define CLI_VERSION     "0.1.2"
 
 /* Exit codes mirror the Python client so scripts can treat them alike. */
 enum {
@@ -79,6 +92,10 @@ struct options {
     bool debug_io;
     const char *log_file;
     const char *escape;
+    bool query_ble_name;
+    const char *rename_ble;
+    char ble_name[BLE_NAME_MAX + 1];
+    bool reset_ble_name;
 };
 
 struct app_state {
@@ -87,6 +104,23 @@ struct app_state {
     char device_path[MAX_PATH_LEN];
     char rx_path[MAX_PATH_LEN];
     char tx_path[MAX_PATH_LEN];
+    char mgmt_protocol_path[MAX_PATH_LEN];
+    char mgmt_device_id_path[MAX_PATH_LEN];
+    char mgmt_command_path[MAX_PATH_LEN];
+    char mgmt_response_path[MAX_PATH_LEN];
+    bool mgmt_notifications_started;
+
+    /* One synchronous Management v1 request at a time. The response
+     * reassembler is fed by the D-Bus signal filter while the main thread
+     * waits in mgmt_wait_response(). */
+    uint8_t mgmt_rx[MGMT_MAX_PAYLOAD];
+    size_t mgmt_expected;
+    size_t mgmt_received;
+    uint32_t mgmt_request_id;
+    uint32_t mgmt_response_id;
+    uint16_t mgmt_flags;
+    bool mgmt_ready;
+
     int mtu_write_size;
     bool connected;
     bool notifications_started;
@@ -435,21 +469,89 @@ static bool find_adapter(DBusConnection *conn, char *path_out, size_t path_out_l
 
 struct device_match {
     char name_prefix[MAX_NAME_LEN];
+    bool automatic;
     const char *address;
     char path[MAX_PATH_LEN];
     char found_name[MAX_NAME_LEN];
+    char found_address[MAX_NAME_LEN];
     bool found;
     bool found_has_nus;
     /* Best rank seen so far; -1 means "nothing matched yet". */
     int best_rank;
+    /* The boards that were heard, so a failure can say what was there and
+     * how to reach one of them. */
+    char nearby_name[NEARBY_MAX][MAX_NAME_LEN];
+    char nearby_address[NEARBY_MAX][32];
+    size_t nearby_count;
+    /* How many candidates matched the name that was asked for, so a bench
+     * with two boards of the same name is not a silent coin toss. */
+    size_t name_matches;
 };
 
-/* Pick between candidate devices: an exact name beats a prefix match, and
- * either beats a device that does not advertise the NUS service, which the
- * legacy NUS client cannot use. */
-static int device_rank(bool exact_name, bool has_nus)
+/* Pick between candidate devices.
+ *
+ * A board that speaks the Management Service is the one this project talks
+ * to, and it outranks a legacy NUS-only board; a board whose name was
+ * changed still speaks that service, which is why the name is a filter the
+ * caller asked for and not an identity. An exact name beats a prefix match
+ * when a name was asked for at all. */
+static int device_rank(bool exact_name, bool has_mgmt, bool has_nus)
 {
-    return (exact_name ? 2 : 0) + (has_nus ? 1 : 0);
+    return (exact_name ? 4 : 0) + (has_mgmt ? 2 : 0) + (has_nus ? 1 : 0);
+}
+
+/* A name compared the way a person writes one: case does not matter. */
+static bool name_starts_with_ci(const char *name, const char *prefix)
+{
+    size_t len;
+
+    if (!name || !prefix || !prefix[0]) {
+        return false;
+    }
+    len = strlen(prefix);
+    return strncasecmp(name, prefix, len) == 0;
+}
+
+static bool name_equals_ci(const char *name, const char *other)
+{
+    if (!name || !other) {
+        return false;
+    }
+    return strcasecmp(name, other) == 0;
+}
+
+/* An address reduced to the twelve hexadecimal digits that name it, so a
+ * value copied in any spelling - with dashes, without, in any case - finds
+ * the same board. */
+static void normalize_address(const char *address, char *out, size_t out_len)
+{
+    size_t o = 0;
+    size_t digits = 0;
+    char hex[17];
+
+    if (out_len == 0) {
+        return;
+    }
+    out[0] = '\0';
+    if (!address) {
+        return;
+    }
+    for (size_t i = 0; address[i] && digits < sizeof(hex) - 1; i++) {
+        if (isxdigit((unsigned char)address[i])) {
+            hex[digits++] = (char)tolower((unsigned char)address[i]);
+        }
+    }
+    hex[digits] = '\0';
+    /* The last twelve digits are the address: BlueZ names a device by a path
+     * that carries four digits of its own before the address. */
+    if (digits > 12) {
+        memmove(hex, hex + (digits - 12), 12);
+        hex[12] = '\0';
+    }
+    for (size_t i = 0; hex[i] && o + 1 < out_len; i++) {
+        out[o++] = hex[i];
+    }
+    out[o] = '\0';
 }
 
 static void strip_dashes(const char *in, char *out, size_t out_len)
@@ -550,6 +652,216 @@ static size_t iter_copy_byte_array(DBusMessageIter *iter, uint8_t *out,
     return len;
 }
 
+static uint16_t get_le16(const uint8_t *p)
+{
+    return (uint16_t)(p[0] | ((uint16_t)p[1] << 8));
+}
+
+static void put_le16(uint8_t *p, uint16_t value)
+{
+    p[0] = (uint8_t)(value & 0xff);
+    p[1] = (uint8_t)((value >> 8) & 0xff);
+}
+
+static void put_le32(uint8_t *p, uint32_t value)
+{
+    p[0] = (uint8_t)(value & 0xff);
+    p[1] = (uint8_t)((value >> 8) & 0xff);
+    p[2] = (uint8_t)((value >> 16) & 0xff);
+    p[3] = (uint8_t)((value >> 24) & 0xff);
+}
+
+/* The same shape the firmware accepts: valid UTF-8, 1..29 bytes, and no C0,
+ * C1, DEL, or embedded NUL characters. The name arrives as argv bytes; this
+ * walks it rather than trusting the locale. */
+static bool ble_name_valid(const char *name)
+{
+    size_t len = strlen(name);
+    size_t i = 0;
+
+    if (len == 0 || len > BLE_NAME_MAX) {
+        return false;
+    }
+
+    while (i < len) {
+        uint8_t c = (uint8_t)name[i];
+        uint32_t cp;
+        size_t extra;
+
+        if (c < 0x20 || c == 0x7f) {
+            return false;
+        }
+        if (c < 0x80) {
+            i++;
+            continue;
+        }
+        if ((c & 0xe0) == 0xc0) {
+            extra = 1;
+            cp = c & 0x1f;
+        } else if ((c & 0xf0) == 0xe0) {
+            extra = 2;
+            cp = c & 0x0f;
+        } else if ((c & 0xf8) == 0xf0) {
+            extra = 3;
+            cp = c & 0x07;
+        } else {
+            return false;
+        }
+        if (i + extra >= len) {
+            return false;
+        }
+        for (size_t j = 1; j <= extra; j++) {
+            uint8_t continuation = (uint8_t)name[i + j];
+
+            if ((continuation & 0xc0) != 0x80) {
+                return false;
+            }
+            cp = (cp << 6) | (continuation & 0x3f);
+        }
+        if ((extra == 1 && cp < 0x80) ||
+            (extra == 2 && cp < 0x800) ||
+            (extra == 3 && (cp < 0x10000 || cp > 0x10ffff)) ||
+            (cp >= 0xd800 && cp <= 0xdfff) ||
+            (cp >= 0x80 && cp <= 0x9f) ||
+            cp == 0x2028 || cp == 0x2029) {
+            return false;
+        }
+        i += extra + 1;
+    }
+    return true;
+}
+
+/* Trim argv's invisible edges, then validate in the firmware's units. */
+static bool normalize_ble_name(const char *value, char *out, size_t out_len)
+{
+    const char *start = value;
+    size_t len;
+
+    while (*start == ' ' || *start == '\t' || *start == '\r' || *start == '\n') {
+        start++;
+    }
+    len = strlen(start);
+    while (len > 0 && (start[len - 1] == ' ' || start[len - 1] == '\t' ||
+                       start[len - 1] == '\r' || start[len - 1] == '\n')) {
+        len--;
+    }
+    if (len == 0 || len > BLE_NAME_MAX || len + 1 > out_len) {
+        return false;
+    }
+    memcpy(out, start, len);
+    out[len] = '\0';
+    return ble_name_valid(out);
+}
+
+/* A name heard over the air is chosen by anyone nearby. Drop C0, DEL and the
+ * C1 pair (ESC included) before it reaches stderr, so an advertisement cannot
+ * drive the terminal. */
+static void printable_ble_name(const char *name, char *out, size_t out_len)
+{
+    size_t used = 0;
+
+    if (!out || out_len == 0) {
+        return;
+    }
+    /* An unnamed peripheral is a normal scan result, not an error: fall
+     * through to the same "(unknown)" a name of only controls gets. Returning
+     * early here left the caller's buffer uninitialized and then printed it
+     * with %s. */
+    if (!name) {
+        name = "";
+    }
+    for (size_t i = 0; name[i] != '\0' && used + 1 < out_len; i++) {
+        unsigned char c = (unsigned char)name[i];
+
+        if (c < 0x20 || c == 0x7f) {
+            continue;
+        }
+        if (c == 0xc2 && (unsigned char)name[i + 1] >= 0x80 &&
+            (unsigned char)name[i + 1] <= 0x9f) {
+            i++;
+            continue;
+        }
+        out[used++] = (char)c;
+    }
+    if (used == 0 && out_len > 1) {
+        const char *fallback = "(unknown)";
+        size_t fallback_len = strlen(fallback);
+
+        if (fallback_len > out_len - 1) {
+            fallback_len = out_len - 1;
+        }
+        memcpy(out, fallback, fallback_len);
+        used = fallback_len;
+    }
+    out[used] = '\0';
+}
+
+/* Parse the name out of a `@n?` reply: "OK name=<name> custom=yes|no".  A
+ * name may itself end in text that looks like the suffix, so only the final
+ * well-formed field is peeled.  Nothing is trimmed: the firmware stores
+ * trailing spaces verbatim, and a host that strips them would report a name
+ * the board never had. */
+static bool ble_name_query_value(const char *reply, char *out, size_t out_len)
+{
+    const char *line = reply;
+
+    if (!reply || !out || out_len == 0) {
+        return false;
+    }
+    while (line && *line) {
+        const char *newline = strchr(line, '\n');
+        size_t len = newline ? (size_t)(newline - line) : strlen(line);
+
+        if (len > 0 && line[len - 1] == '\r') {
+            len--;
+        }
+        if (len >= 8 && strncasecmp(line, "ok name=", 8) == 0) {
+            const char *name = line + 8;
+            size_t name_len = len - 8;
+
+            for (size_t i = name_len; i >= 8; i--) {
+                if (strncasecmp(name + i - 8, " custom=", 8) == 0) {
+                    const char *suffix = name + i;
+                    size_t suffix_len = name_len - i;
+
+                    if ((suffix_len == 3 &&
+                         strncasecmp(suffix, "yes", 3) == 0) ||
+                        (suffix_len == 2 &&
+                         strncasecmp(suffix, "no", 2) == 0)) {
+                        name_len = i - 8;
+                    }
+                    break;
+                }
+            }
+            /* The firmware never advertises an empty name, and a reset's
+             * "readable is enough" check must not accept one. */
+            if (name_len == 0 || name_len >= out_len) {
+                return false;
+            }
+            memcpy(out, name, name_len);
+            out[name_len] = '\0';
+            return true;
+        }
+        if (!newline) {
+            break;
+        }
+        line = newline + 1;
+    }
+    return false;
+}
+
+/* True when a readback is usable and, for a rename, matches the request.  A
+ * reset's default name carries a MAC suffix the host cannot predict, so
+ * expected == NULL only requires that the board answered. */
+static bool ble_name_readback_matches(const char *reply, const char *expected,
+                                      char *reported, size_t reported_len)
+{
+    if (!ble_name_query_value(reply, reported, reported_len)) {
+        return false;
+    }
+    return expected == NULL || strcmp(reported, expected) == 0;
+}
+
 static void timespec_add_ms(struct timespec *ts, long ms)
 {
     ts->tv_sec += ms / 1000;
@@ -580,6 +892,132 @@ static bool uuid_matches(DBusMessageIter *props, const char *uuid)
             return true;
         }
         dbus_message_iter_next(&prop_entry);
+    }
+    return false;
+}
+
+/* The fixed names of the oldest NUS-only firmware. They have no Management
+ * Service to be found by, so the name is the only thing that recognises
+ * them - and a current board may carry one too, which is why this is a
+ * narrow exception and not a rule. */
+static bool is_legacy_name(const char *name)
+{
+    static const char legacy[] = "Linkr BLE UART";
+    size_t len = sizeof(legacy) - 1;
+
+    if (!name || !name[0]) {
+        return false;
+    }
+    return strncasecmp(name, legacy, len) == 0 &&
+           (name[len] == '\0' || name[len] == '-' || name[len] == ' ');
+}
+
+/* Whether a device is a board this client may talk to.
+ *
+ * With a name the caller asked for, the name decides. Without one, the
+ * Management Service decides - a board whose name was changed still speaks
+ * it - and the fixed legacy name is the fallback for the oldest NUS-only
+ * firmware, which has no service to be found by. */
+static bool device_matches(const char *name, const char *prefix, bool has_mgmt)
+{
+    if (prefix) {
+        return name_starts_with_ci(name, prefix);
+    }
+    if (has_mgmt) {
+        return true;
+    }
+    return is_legacy_name(name);
+}
+
+/* One candidate, considered on its own.
+ *
+ * A board is a board by the service it speaks: the Management Service for
+ * current firmware, and the fixed legacy name for the oldest NUS-only
+ * boards, which have no service to be found by. The name is a filter the
+ * caller asked for, never an identity, because the owner can change that
+ * label at any time.
+ *
+ * Returns true when the search is over: an address match is the answer, and
+ * nothing else can beat it. */
+static bool consider_device(struct device_match *match, const char *path,
+                            const char *name, const char *addr, bool has_nus,
+                            bool has_mgmt)
+{
+    char printable[MAX_NAME_LEN];
+
+    printable_ble_name(name, printable, sizeof(printable));
+
+    /* Every device that got this far was heard, whether or not it matched
+     * the requested name. Record it before any early return, otherwise the
+     * "not found" message has nothing to offer the user. */
+    if (match->nearby_count < NEARBY_MAX) {
+        size_t at = match->nearby_count++;
+
+        snprintf(match->nearby_name[at], sizeof(match->nearby_name[at]), "%s",
+                 printable);
+        snprintf(match->nearby_address[at], sizeof(match->nearby_address[at]),
+                 "%s", addr ? addr : "");
+    }
+
+    if (match->address) {
+        char wanted[16];
+        char found[16];
+
+        normalize_address(match->address, wanted, sizeof(wanted));
+        normalize_address(addr, found, sizeof(found));
+        if (wanted[0] && strcmp(wanted, found) == 0) {
+            /* snprintf, not strncpy: a shorter name after a longer one
+             * would otherwise keep the previous tail. */
+            snprintf(match->path, sizeof(match->path), "%s", path);
+            snprintf(match->found_name, sizeof(match->found_name), "%s",
+                     printable);
+            snprintf(match->found_address, sizeof(match->found_address), "%s",
+                     addr ? addr : "");
+            match->found = true;
+            match->found_has_nus = has_nus;
+            return true;
+        }
+    }
+
+    /* An explicit address must never fall through to another nearby board
+     * while the requested device is still absent. */
+    if (match->address) {
+        return false;
+    }
+
+    if (match->automatic) {
+        if (!device_matches(name, NULL, has_mgmt)) {
+            return false;
+        }
+        {
+            int rank = device_rank(false, has_mgmt, has_nus);
+
+            if (rank > match->best_rank) {
+                match->best_rank = rank;
+                snprintf(match->path, sizeof(match->path), "%s", path);
+                snprintf(match->found_name, sizeof(match->found_name), "%s",
+                         printable);
+                snprintf(match->found_address, sizeof(match->found_address),
+                         "%s", addr ? addr : "");
+                match->found = true;
+                match->found_has_nus = has_nus;
+            }
+        }
+    } else if (device_matches(name, match->name_prefix, has_mgmt)) {
+        int rank = device_rank(name_equals_ci(name, match->name_prefix),
+                               has_mgmt, has_nus);
+
+        match->name_matches++;
+        if (rank > match->best_rank) {
+            match->best_rank = rank;
+            snprintf(match->path, sizeof(match->path), "%s", path);
+            snprintf(match->found_name, sizeof(match->found_name), "%s",
+                     printable);
+            snprintf(match->found_address, sizeof(match->found_address), "%s",
+                     addr ? addr : "");
+            match->found = true;
+            match->found_has_nus = has_nus;
+        }
     }
     return false;
 }
@@ -626,7 +1064,7 @@ static void scan_managed_objects(DBusConnection *conn, struct device_match *matc
                 const char *name = "";
                 const char *addr = "";
                 bool has_nus;
-                bool name_match;
+                bool has_mgmt;
 
                 dbus_message_iter_recurse(&props, &prop_entry);
                 while (dbus_message_iter_get_arg_type(&prop_entry) == DBUS_TYPE_DICT_ENTRY) {
@@ -650,33 +1088,12 @@ static void scan_managed_objects(DBusConnection *conn, struct device_match *matc
                 }
 
                 has_nus = uuid_matches(&props, NUS_SERVICE);
-                if (match->address && strcasecmp(match->address, addr) == 0) {
-                    /* snprintf, not strncpy: a shorter name after a longer one
-                     * would otherwise keep the previous tail. */
-                    snprintf(match->path, sizeof(match->path), "%s", path);
-                    snprintf(match->found_name, sizeof(match->found_name), "%s",
-                             name ? name : "");
-                    match->found = true;
-                    match->found_has_nus = has_nus;
+                has_mgmt = uuid_matches(&props, MGMT_SERVICE);
+
+                if (consider_device(match, path, name, addr, has_nus,
+                                    has_mgmt)) {
                     dbus_message_unref(reply);
                     return;
-                }
-
-                name_match = name && name[0] &&
-                             strncmp(name, match->name_prefix,
-                                     strlen(match->name_prefix)) == 0;
-                if (name_match) {
-                    int rank = device_rank(strcmp(name, match->name_prefix) == 0,
-                                           has_nus);
-
-                    if (rank > match->best_rank) {
-                        match->best_rank = rank;
-                        snprintf(match->path, sizeof(match->path), "%s", path);
-                        snprintf(match->found_name, sizeof(match->found_name),
-                                 "%s", name);
-                        match->found = true;
-                        match->found_has_nus = has_nus;
-                    }
                 }
             }
             dbus_message_iter_next(&ifaces);
@@ -694,17 +1111,17 @@ static bool find_device(DBusConnection *conn, struct options *opt,
     bool started = false;
     double elapsed;
 
+    memset(match, 0, sizeof(*match));
+    match->automatic = opt->name == NULL;
     normalize_name_prefix(opt->name, match->name_prefix,
                           sizeof(match->name_prefix));
     match->address = opt->address;
-    match->found = false;
-    match->found_has_nus = false;
     match->best_rank = -1;
-    match->path[0] = '\0';
-    match->found_name[0] = '\0';
 
     if (opt->address) {
         msg("Looking for BLE device at %s ...", opt->address);
+    } else if (match->automatic) {
+        msg("Scanning for Linkr Management Service or legacy Linkr BLE UART name ...");
     } else {
         msg("Scanning for BLE device matching %s* ...", match->name_prefix);
     }
@@ -747,16 +1164,35 @@ static bool find_device(DBusConnection *conn, struct options *opt,
 
     if (!match->found) {
         /* Name the criterion that actually failed: an address search reported
-         * as "matching Linkr BLE UART*" sent people looking for the wrong fix. */
+         * as "matching Linkr Bee*" sent people looking for the wrong fix. */
         if (opt->address) {
             err_msg("no BLE device found at address %s", opt->address);
+        } else if (match->automatic) {
+            err_msg("no Linkr Management Service or legacy Linkr BLE UART device found");
         } else {
             err_msg("device not found matching: %s*", match->name_prefix);
         }
+        /* The advertised name is a label the owner can change, so a board
+         * that was renamed is found by its address instead. Say which
+         * addresses were heard: the answer is in hand already. */
+        if (match->nearby_count > 0) {
+            err_msg("nearby devices (name, address):");
+            for (size_t i = 0; i < match->nearby_count; i++) {
+                err_msg("  %s (%s)", match->nearby_name[i],
+                        match->nearby_address[i]);
+            }
+        }
+        err_msg("connect with --address <address> to reach one of them");
         return false;
     }
 
-    msg("Found %s (%s)", match->found_name, match->path);
+    if (match->name_matches > 1) {
+        err_msg("multiple devices match %s*; using %s (%s)",
+                match->name_prefix, match->found_name,
+                match->found_address);
+    }
+
+    msg("Found %s (%s)", match->found_name, match->found_address);
     return true;
 }
 
@@ -823,10 +1259,13 @@ static void list_devices(DBusConnection *conn)
                     dbus_message_iter_next(&prop_entry);
                 }
                 if (addr) {
+                    char printable[MAX_NAME_LEN];
+
                     /* Unnamed peripherals used to be dropped here, which made an
                      * empty list look like "nothing is nearby". They are exactly
                      * the devices a user cannot identify by looking at names. */
-                    printf("%s\t%s\n", addr, (name && name[0]) ? name : "(unknown)");
+                    printable_ble_name(name, printable, sizeof(printable));
+                    printf("%s\t%s\n", addr, printable);
                 }
             }
             dbus_message_iter_next(&ifaces);
@@ -897,7 +1336,8 @@ static bool pair_device(DBusConnection *conn, const char *device_path)
     DBusMessage *request, *reply;
     bool success;
 
-    msg("Hold Bee GPIO1 to GND; accept pairing in the system Bluetooth agent.");
+    msg("Hold the Bee pairing GPIO to GND (GPIO1 C3/C5, GPIO4 WROOM); "
+        "accept pairing in the system Bluetooth agent.");
     dbus_error_init(&err);
     request = dbus_message_new_method_call(BLUEZ_BUS, device_path, DEVICE_IFACE, "Pair");
     if (!request) return false;
@@ -926,29 +1366,64 @@ static void disconnect_device(DBusConnection *conn)
     g_state.connected = false;
 }
 
-static bool discover_characteristics(DBusConnection *conn)
+/* A rename needs all four Management characteristics, while a terminal-only
+ * session needs only the NUS pair. Keep the decision in one place so the
+ * discovery loop and the final refusal cannot disagree about what "ready"
+ * means for a legacy NUS-only board. */
+static bool management_paths_complete(bool protocol, bool device_id,
+                                      bool command, bool response)
+{
+    return protocol && device_id && command && response;
+}
+
+static bool discover_characteristics(DBusConnection *conn, bool need_mgmt)
 {
     DBusMessage *reply;
     DBusMessageIter iter, arr;
-    char nus_dbus_uuid[MAX_UUID_LEN];
     char rx_dbus_uuid[MAX_UUID_LEN];
     char tx_dbus_uuid[MAX_UUID_LEN];
+    char mgmt_protocol_dbus_uuid[MAX_UUID_LEN];
+    char mgmt_device_id_dbus_uuid[MAX_UUID_LEN];
+    char mgmt_command_dbus_uuid[MAX_UUID_LEN];
+    char mgmt_response_dbus_uuid[MAX_UUID_LEN];
 
-    hex_uuid_to_dbus(NUS_SERVICE, nus_dbus_uuid, sizeof(nus_dbus_uuid));
     hex_uuid_to_dbus(NUS_RX_UUID, rx_dbus_uuid, sizeof(rx_dbus_uuid));
     hex_uuid_to_dbus(NUS_TX_UUID, tx_dbus_uuid, sizeof(tx_dbus_uuid));
+    hex_uuid_to_dbus(MGMT_PROTOCOL_UUID, mgmt_protocol_dbus_uuid,
+                     sizeof(mgmt_protocol_dbus_uuid));
+    hex_uuid_to_dbus(MGMT_DEVICE_ID_UUID, mgmt_device_id_dbus_uuid,
+                     sizeof(mgmt_device_id_dbus_uuid));
+    hex_uuid_to_dbus(MGMT_COMMAND_UUID, mgmt_command_dbus_uuid,
+                     sizeof(mgmt_command_dbus_uuid));
+    hex_uuid_to_dbus(MGMT_RESPONSE_UUID, mgmt_response_dbus_uuid,
+                     sizeof(mgmt_response_dbus_uuid));
 
     g_state.rx_path[0] = '\0';
     g_state.tx_path[0] = '\0';
+    g_state.mgmt_protocol_path[0] = '\0';
+    g_state.mgmt_device_id_path[0] = '\0';
+    g_state.mgmt_command_path[0] = '\0';
+    g_state.mgmt_response_path[0] = '\0';
 
     /* BlueZ discovers GATT services asynchronously after Connect; retry until
-     * the NUS characteristics appear or we time out (5s). */
+     * the characteristics appear or we time out (5s). Rename operations need
+     * the Management Service quartet as well as the NUS terminal pair. */
     {
         struct timespec dstart, dnow;
         double delapsed = 0;
 
         clock_gettime(CLOCK_MONOTONIC, &dstart);
-        while (!(g_state.rx_path[0] && g_state.tx_path[0]) && delapsed < 5.0) {
+        while (delapsed < 5.0) {
+            bool nus_ready = g_state.rx_path[0] && g_state.tx_path[0];
+            bool mgmt_ready = management_paths_complete(
+                g_state.mgmt_protocol_path[0],
+                g_state.mgmt_device_id_path[0],
+                g_state.mgmt_command_path[0],
+                g_state.mgmt_response_path[0]);
+
+            if (nus_ready && (!need_mgmt || mgmt_ready)) {
+                break;
+            }
             reply = call_sync(conn, BLUEZ_BUS, "/", DBUS_OM_IFACE,
                               "GetManagedObjects", NULL);
             if (reply) {
@@ -1018,6 +1493,22 @@ static bool discover_characteristics(DBusConnection *conn)
                                     snprintf(g_state.tx_path,
                                              sizeof(g_state.tx_path), "%s",
                                              path);
+                                } else if (strcasecmp(uuid, mgmt_protocol_dbus_uuid) == 0) {
+                                    snprintf(g_state.mgmt_protocol_path,
+                                             sizeof(g_state.mgmt_protocol_path),
+                                             "%s", path);
+                                } else if (strcasecmp(uuid, mgmt_device_id_dbus_uuid) == 0) {
+                                    snprintf(g_state.mgmt_device_id_path,
+                                             sizeof(g_state.mgmt_device_id_path),
+                                             "%s", path);
+                                } else if (strcasecmp(uuid, mgmt_command_dbus_uuid) == 0) {
+                                    snprintf(g_state.mgmt_command_path,
+                                             sizeof(g_state.mgmt_command_path),
+                                             "%s", path);
+                                } else if (strcasecmp(uuid, mgmt_response_dbus_uuid) == 0) {
+                                    snprintf(g_state.mgmt_response_path,
+                                             sizeof(g_state.mgmt_response_path),
+                                             "%s", path);
                                 }
                             }
                         }
@@ -1029,8 +1520,17 @@ static bool discover_characteristics(DBusConnection *conn)
                 dbus_message_unref(reply);
             }
 
-            if (g_state.rx_path[0] && g_state.tx_path[0]) {
-                break;
+            {
+                bool nus_ready = g_state.rx_path[0] && g_state.tx_path[0];
+                bool mgmt_ready = management_paths_complete(
+                    g_state.mgmt_protocol_path[0],
+                    g_state.mgmt_device_id_path[0],
+                    g_state.mgmt_command_path[0],
+                    g_state.mgmt_response_path[0]);
+
+                if (nus_ready && (!need_mgmt || mgmt_ready)) {
+                    break;
+                }
             }
 
             usleep(300000);
@@ -1044,9 +1544,22 @@ static bool discover_characteristics(DBusConnection *conn)
         msg("NUS RX/TX characteristics not found");
         return false;
     }
+    if (need_mgmt && !management_paths_complete(
+            g_state.mgmt_protocol_path[0],
+            g_state.mgmt_device_id_path[0],
+            g_state.mgmt_command_path[0],
+            g_state.mgmt_response_path[0])) {
+        msg("Management Service characteristics not found; legacy NUS-only "
+            "firmware cannot read or change the BLE name");
+        return false;
+    }
 
     msg("NUS RX: %s", g_state.rx_path);
     msg("NUS TX: %s", g_state.tx_path);
+    if (need_mgmt) {
+        msg("Management command: %s", g_state.mgmt_command_path);
+        msg("Management response: %s", g_state.mgmt_response_path);
+    }
     return true;
 }
 
@@ -1099,6 +1612,45 @@ static void handle_device_properties(DBusMessage *msg, DBusMessageIter *iter)
     }
 }
 
+/* Reassemble one Management v1 response. The first indication carries the
+ * header; continuation indications carry payload bytes only. */
+static void mgmt_feed_response(const uint8_t *data, size_t len)
+{
+    if (g_state.mgmt_ready) {
+        return;
+    }
+    if (g_state.mgmt_expected == 0) {
+        if (len < MGMT_HEADER_SIZE || data[0] != 'L' || data[1] != 'K' ||
+            data[2] != 1 || data[3] != MGMT_MSG_RESPONSE) {
+            return;
+        }
+        g_state.mgmt_response_id =
+            (uint32_t)data[4] | ((uint32_t)data[5] << 8) |
+            ((uint32_t)data[6] << 16) | ((uint32_t)data[7] << 24);
+        g_state.mgmt_expected = get_le16(data + 8);
+        g_state.mgmt_flags = get_le16(data + 10);
+        if (g_state.mgmt_expected == 0 ||
+            g_state.mgmt_expected > MGMT_MAX_PAYLOAD) {
+            msg("Management response has an invalid length");
+            g_state.mgmt_expected = 0;
+            return;
+        }
+        data += MGMT_HEADER_SIZE;
+        len -= MGMT_HEADER_SIZE;
+    }
+    if (g_state.mgmt_received + len > g_state.mgmt_expected) {
+        msg("Management response exceeds its declared length");
+        g_state.mgmt_expected = 0;
+        g_state.mgmt_received = 0;
+        return;
+    }
+    memcpy(g_state.mgmt_rx + g_state.mgmt_received, data, len);
+    g_state.mgmt_received += len;
+    if (g_state.mgmt_received == g_state.mgmt_expected) {
+        g_state.mgmt_ready = true;
+    }
+}
+
 static DBusHandlerResult filter_signals(DBusConnection *conn,
                                         DBusMessage *msg, void *user_data)
 {
@@ -1130,7 +1682,38 @@ static DBusHandlerResult filter_signals(DBusConnection *conn,
     }
 
     const char *path = dbus_message_get_path(msg);
-    if (!path || strcmp(path, g_state.tx_path) != 0) {
+    if (!path) {
+        return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+    }
+
+    if (g_state.mgmt_response_path[0] &&
+        strcmp(path, g_state.mgmt_response_path) == 0) {
+        dbus_message_iter_next(&iter);
+        if (dbus_message_iter_get_arg_type(&iter) != DBUS_TYPE_ARRAY) {
+            return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+        }
+        dbus_message_iter_recurse(&iter, &changed);
+        while (dbus_message_iter_get_arg_type(&changed) == DBUS_TYPE_DICT_ENTRY) {
+            DBusMessageIter kv;
+            const char *key;
+
+            dbus_message_iter_recurse(&changed, &kv);
+            iter_get_basic(&kv, DBUS_TYPE_STRING, &key);
+            dbus_message_iter_next(&kv);
+            if (strcmp(key, "Value") == 0) {
+                uint8_t data[MGMT_MAX_PAYLOAD + MGMT_HEADER_SIZE];
+                size_t len = iter_copy_byte_array(&kv, data, sizeof(data));
+
+                if (len > 0) {
+                    mgmt_feed_response(data, len);
+                }
+            }
+            dbus_message_iter_next(&changed);
+        }
+        return DBUS_HANDLER_RESULT_HANDLED;
+    }
+
+    if (strcmp(path, g_state.tx_path) != 0) {
         return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
     }
 
@@ -1213,17 +1796,84 @@ static void stop_notifications(DBusConnection *conn)
     g_state.notifications_started = false;
 }
 
+static bool start_mgmt_notifications(DBusConnection *conn)
+{
+    DBusMessage *reply;
+
+    reply = call_sync(conn, BLUEZ_BUS, g_state.mgmt_response_path, CHAR_IFACE,
+                      "StartNotify", NULL);
+    if (!reply) {
+        return false;
+    }
+    dbus_message_unref(reply);
+    g_state.mgmt_notifications_started = true;
+    return true;
+}
+
+static void stop_mgmt_notifications(DBusConnection *conn)
+{
+    DBusMessage *reply;
+
+    if (!g_state.mgmt_notifications_started) {
+        return;
+    }
+    reply = call_sync(conn, BLUEZ_BUS, g_state.mgmt_response_path, CHAR_IFACE,
+                      "StopNotify", NULL);
+    if (reply) {
+        dbus_message_unref(reply);
+    }
+    g_state.mgmt_notifications_started = false;
+}
+
+/* Read a GATT characteristic. ReadValue takes an options dict even when it is
+ * empty; the reply is the raw value array. */
+static bool read_char_value(DBusConnection *conn, const char *path,
+                            uint8_t *out, size_t out_cap, size_t *out_len)
+{
+    DBusMessage *call, *reply;
+    DBusMessageIter iter, dict;
+    DBusError err;
+
+    call = dbus_message_new_method_call(BLUEZ_BUS, path, CHAR_IFACE,
+                                        "ReadValue");
+    if (!call) {
+        return false;
+    }
+    dbus_message_iter_init_append(call, &iter);
+    dbus_message_iter_open_container(&iter, DBUS_TYPE_ARRAY, "{sv}", &dict);
+    dbus_message_iter_close_container(&iter, &dict);
+
+    dbus_error_init(&err);
+    reply = dbus_connection_send_with_reply_and_block(conn, call, 15000, &err);
+    dbus_message_unref(call);
+    if (!reply) {
+        if (dbus_error_is_set(&err)) {
+            msg("D-Bus error reading %s: %s", path, err.message);
+            dbus_error_free(&err);
+        }
+        return false;
+    }
+
+    if (!dbus_message_iter_init(reply, &iter)) {
+        dbus_message_unref(reply);
+        return false;
+    }
+    *out_len = iter_copy_byte_array(&iter, out, out_cap);
+    dbus_message_unref(reply);
+    return true;
+}
+
 /* ------------------------------------------------------------------------ */
 /* Write helpers                                                            */
 /* ------------------------------------------------------------------------ */
 
-static bool write_chunk(DBusConnection *conn, const uint8_t *data, size_t len,
-                        bool with_response)
+static bool write_char(DBusConnection *conn, const char *path,
+                       const uint8_t *data, size_t len, bool with_response)
 {
     DBusMessage *msg_call, *reply;
     DBusMessageIter iter, arr;
 
-    msg_call = dbus_message_new_method_call(BLUEZ_BUS, g_state.rx_path,
+    msg_call = dbus_message_new_method_call(BLUEZ_BUS, path,
                                             CHAR_IFACE, "WriteValue");
     if (!msg_call) {
         return false;
@@ -1260,6 +1910,12 @@ static bool write_chunk(DBusConnection *conn, const uint8_t *data, size_t len,
     return true;
 }
 
+static bool write_chunk(DBusConnection *conn, const uint8_t *data, size_t len,
+                        bool with_response)
+{
+    return write_char(conn, g_state.rx_path, data, len, with_response);
+}
+
 static bool write_with_mtu(DBusConnection *conn, const uint8_t *data, size_t len,
                            struct options *opt)
 {
@@ -1288,6 +1944,234 @@ static bool write_with_mtu(DBusConnection *conn, const uint8_t *data, size_t len
             usleep(5000);
         }
     }
+    return true;
+}
+
+/* ------------------------------------------------------------------------ */
+/* Management v1                                                            */
+/* ------------------------------------------------------------------------ */
+
+/* Whether a Device ID belongs to Linkr Bee.
+ *
+ * The first ten bytes are the fixed Linkr namespace (`LINKRBLE`, version 1)
+ * and the last six are the chip's hardware id. Checking the namespace is
+ * what makes the Management Service a filter rather than a promise: any
+ * device can advertise the same UUID. */
+static bool is_linkr_device_id(const uint8_t *id, size_t len)
+{
+    static const uint8_t prefix[10] = {
+        'L', 'I', 'N', 'K', 'R', 'B', 'L', 'E', 0x01, 0x00
+    };
+
+    return len == 16 && memcmp(id, prefix, sizeof(prefix)) == 0;
+}
+
+/* One request at a time, as the firmware expects: a second command is only
+ * sent after the first response has arrived. */
+static bool mgmt_send(DBusConnection *conn, const char *command,
+                      struct options *opt, char *reply, size_t reply_cap)
+{
+    uint8_t frame[MGMT_HEADER_SIZE + MGMT_MAX_PAYLOAD];
+    size_t command_len = strlen(command);
+    size_t total;
+    int chunk;
+
+    if (command_len == 0 || command_len > MGMT_MAX_PAYLOAD) {
+        msg("Management command is outside the advertised limit");
+        return false;
+    }
+
+    g_state.mgmt_expected = 0;
+    g_state.mgmt_received = 0;
+    g_state.mgmt_ready = false;
+    g_state.mgmt_request_id++;
+    if (g_state.mgmt_request_id == 0) {
+        g_state.mgmt_request_id = 1;
+    }
+
+    frame[0] = 'L';
+    frame[1] = 'K';
+    frame[2] = 1;
+    frame[3] = 1; /* request */
+    put_le32(frame + 4, g_state.mgmt_request_id);
+    put_le16(frame + 8, (uint16_t)command_len);
+    put_le16(frame + 10, 0);
+    memcpy(frame + MGMT_HEADER_SIZE, command, command_len);
+    total = MGMT_HEADER_SIZE + command_len;
+
+    chunk = opt->ble_write_size > 0 ? opt->ble_write_size : g_state.mtu_write_size;
+    /* Management's first write must contain its full 12-byte header. The
+     * terminal's smaller pacing chunks must not split that header. */
+    if (chunk < 20) {
+        chunk = 20;
+    }
+    if (chunk > BLE_MAX_NUS_PAYLOAD) {
+        chunk = BLE_MAX_NUS_PAYLOAD;
+    }
+
+    for (size_t offset = 0; offset < total; offset += (size_t)chunk) {
+        size_t n = total - offset;
+
+        if (n > (size_t)chunk) {
+            n = (size_t)chunk;
+        }
+        if (opt->debug_io) {
+            msg("MGMT TX %zu bytes", n);
+        }
+        /* The command characteristic is write-with-response: the firmware
+         * only reassembles a request that was acknowledged. */
+        if (!write_char(conn, g_state.mgmt_command_path, frame + offset, n,
+                        true)) {
+            msg("Management write failed at offset %zu", offset);
+            return false;
+        }
+        if (offset + n < total) {
+            usleep(5000);
+        }
+    }
+
+    {
+        struct timespec start, now;
+        double elapsed = 0;
+
+        clock_gettime(CLOCK_MONOTONIC, &start);
+        while (!g_state.mgmt_ready && elapsed < 5.0) {
+            if (!dbus_connection_read_write_dispatch(conn, 100)) {
+                break;
+            }
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            elapsed = (now.tv_sec - start.tv_sec) +
+                      (now.tv_nsec - start.tv_nsec) / 1e9;
+        }
+    }
+
+    if (!g_state.mgmt_ready) {
+        msg("Management response timed out");
+        return false;
+    }
+    if (g_state.mgmt_response_id != g_state.mgmt_request_id) {
+        msg("Management response was for another request");
+        return false;
+    }
+
+    {
+        size_t len = g_state.mgmt_received;
+
+        while (len > 0 && (g_state.mgmt_rx[len - 1] == '\r' ||
+                           g_state.mgmt_rx[len - 1] == '\n')) {
+            len--;
+        }
+        if (len + 1 > reply_cap) {
+            len = reply_cap - 1;
+        }
+        memcpy(reply, g_state.mgmt_rx, len);
+        reply[len] = '\0';
+    }
+
+    if (g_state.mgmt_flags & MGMT_FLAG_ERROR) {
+        err_msg("%s", reply);
+        return false;
+    }
+    return true;
+}
+
+/* Read the Protocol Info characteristic and the Device ID: the firmware
+ * requires both, and a name change is a persisted write like any other. */
+static bool mgmt_check_device(DBusConnection *conn)
+{
+    uint8_t protocol[16];
+    uint8_t device_id[32];
+    size_t protocol_len = 0;
+    size_t device_id_len = 0;
+    uint32_t capabilities;
+
+    if (!read_char_value(conn, g_state.mgmt_protocol_path, protocol,
+                         sizeof(protocol), &protocol_len)) {
+        err_msg("cannot read the Management Protocol Info characteristic "
+                "(pair with --pair if the board requires bonding)");
+        return false;
+    }
+    if (protocol_len < 10 || protocol[0] != 1) {
+        err_msg("unsupported Linkr Management API version");
+        return false;
+    }
+    capabilities = (uint32_t)protocol[4] | ((uint32_t)protocol[5] << 8) |
+                   ((uint32_t)protocol[6] << 16) | ((uint32_t)protocol[7] << 24);
+    if (!(capabilities & (1u << 3))) {
+        err_msg("device does not advertise Device ID support");
+        return false;
+    }
+    if (!read_char_value(conn, g_state.mgmt_device_id_path, device_id,
+                         sizeof(device_id), &device_id_len)) {
+        err_msg("cannot read the Linkr Device ID (pair with --pair if the "
+                "board requires bonding)");
+        return false;
+    }
+    if (!is_linkr_device_id(device_id, device_id_len)) {
+        err_msg("invalid Linkr Device ID");
+        return false;
+    }
+    msg("management API v%u.%u, device ID %u bytes", protocol[0], protocol[1],
+        (unsigned)device_id_len);
+    return true;
+}
+
+/* Run the requested Management operations. The answers go to stdout so a
+ * script can read them; progress and errors stay on stderr. */
+static bool run_ble_name_actions(DBusConnection *conn, struct options *opt)
+{
+    char reply[MGMT_MAX_PAYLOAD + 1];
+    char command[BLE_NAME_MAX + 8];
+    char reported[BLE_NAME_MAX + 1];
+    const char *expected = NULL;
+    bool changed = false;
+
+    if (!start_mgmt_notifications(conn)) {
+        err_msg("cannot subscribe to Management responses");
+        return false;
+    }
+    if (!mgmt_check_device(conn)) {
+        stop_mgmt_notifications(conn);
+        return false;
+    }
+
+    if (opt->rename_ble) {
+        snprintf(command, sizeof(command), "@n=%s", opt->rename_ble);
+        if (!mgmt_send(conn, command, opt, reply, sizeof(reply))) {
+            stop_mgmt_notifications(conn);
+            return false;
+        }
+        expected = opt->rename_ble;
+        changed = true;
+    }
+    if (opt->reset_ble_name) {
+        if (!mgmt_send(conn, "@n default", opt, reply, sizeof(reply))) {
+            stop_mgmt_notifications(conn);
+            return false;
+        }
+        expected = NULL; /* the board decides the MAC suffix */
+        changed = true;
+    }
+    if (changed || opt->query_ble_name) {
+        /* A write's reply echoes the request, not the state the board will
+         * advertise; `@n?` is the authority, so read it back after a
+         * change and compare it with what was asked for. */
+        if (!mgmt_send(conn, "@n?", opt, reply, sizeof(reply))) {
+            stop_mgmt_notifications(conn);
+            return false;
+        }
+        if (changed &&
+            !ble_name_readback_matches(reply, expected, reported,
+                                       sizeof(reported))) {
+            err_msg("the board did not keep the requested BLE name");
+            stop_mgmt_notifications(conn);
+            return false;
+        }
+        printf("%s\n", reply);
+    }
+
+    fflush(stdout);
+    stop_mgmt_notifications(conn);
     return true;
 }
 
@@ -1776,16 +2660,23 @@ static void usage(FILE *out, const char *prog)
             "Usage: %s [options]\n"
             "\n"
             "Options:\n"
-            "  --name NAME           BLE device name or prefix (default: '%s')\n"
+            "  --name NAME           explicit BLE name or prefix filter; by\n"
+            "                        default the board is found by the Linkr\n"
+            "                        Management Service, because the advertised\n"
+            "                        name is a label the owner can change\n"
             "  --address ADDR        BLE address; skip name scan\n"
             "  --scan                list nearby BLE devices; exits unless another\n"
             "                        action or --address is also given\n"
             "  --timeout SEC         scan timeout (default: 8.0)\n"
-            "  --pair                request OS bonding; hold Bee GPIO1 low\n"
+            "  --pair                request OS bonding; hold pairing GPIO low\n"
+            "                        (GPIO1 C3/C5, GPIO4 WROOM)\n"
             "  --loopback-test PAYLOAD  send payload and require echo\n"
             "  --loopback-timeout SEC   loopback timeout (default: 3.0)\n"
             "  --no-terminal         connect, run commands, exit\n"
-            "  --ble-write-size N    max bytes per BLE write (0=20-byte safe default)\n"
+            "  --query-ble-name      read the advertised BLE name (@n?)\n"
+            "  --rename-ble NAME     set the advertised BLE name (@n=NAME)\n"
+            "  --reset-ble-name      restore the MAC-derived BLE name (@n default)\n"
+            "  --ble-write-size N    NUS write size (0=20); management uses at least 20\n"
             "  --write-response      use GATT write-with-response (default: without)\n"
             "  --enter MODE          raw|cr|lf|crlf (default: raw)\n"
             "  --local-echo          echo typed bytes locally\n"
@@ -1801,10 +2692,13 @@ static void usage(FILE *out, const char *prog)
             "Long options also accept the --option=value form.\n"
             "Exit codes: 0 ok, 1 error, 2 bad arguments, 3 device disconnected.\n"
             "\n"
-            "This is the Linux/BlueZ reference client and it speaks legacy NUS\n"
-            "only. Use linkr_ble_terminal.py for Management v1, Reliable UART,\n"
-            "WiFi and WebDAV control.\n",
-            prog, DEFAULT_NAME);
+            "This is the Linux/BlueZ reference client. It speaks legacy NUS for\n"
+            "the terminal, and Management Service v1 for the BLE name: reading\n"
+            "and renaming need the Management Service and a valid Device ID, so\n"
+            "they are refused on legacy NUS-only firmware. Use\n"
+            "linkr_ble_terminal.py for the other Management v1 controls\n"
+            "(WiFi, WebDAV, UART).\n",
+            prog);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -1831,10 +2725,13 @@ static const struct completion_option k_completion_options[] = {
     { "--address", true, false, "", "BLE address; skip name scan" },
     { "--scan", false, false, "", "list nearby BLE devices" },
     { "--timeout", true, false, "", "scan timeout seconds" },
-    { "--pair", false, false, "", "request OS bonding; hold Bee GPIO1 low" },
+    { "--pair", false, false, "", "request OS bonding; hold pairing GPIO low" },
     { "--loopback-test", true, false, "", "send payload and require echo" },
     { "--loopback-timeout", true, false, "", "loopback timeout seconds" },
     { "--no-terminal", false, false, "", "connect, run commands, exit" },
+    { "--query-ble-name", false, false, "", "read the advertised BLE name" },
+    { "--rename-ble", true, false, "", "set the advertised BLE name" },
+    { "--reset-ble-name", false, false, "", "restore the default BLE name" },
     { "--ble-write-size", true, false, "", "max bytes per BLE write" },
     { "--write-response", false, false, "", "use GATT write-with-response" },
     { "--enter", true, false, "raw cr lf crlf", "translate Enter key bytes" },
@@ -2045,7 +2942,7 @@ static void flag_takes_none(const char *flag, const char *inline_value)
 static void parse_args(int argc, char **argv, struct options *opt)
 {
     *opt = (struct options){
-        .name = DEFAULT_NAME,
+        .name = NULL,
         .timeout = 8.0,
         .loopback_timeout = 3.0,
         .enter = "raw",
@@ -2119,6 +3016,22 @@ static void parse_args(int argc, char **argv, struct options *opt)
         } else if (strcmp(flag, "--no-terminal") == 0) {
             flag_takes_none(flag, inline_value);
             opt->no_terminal = true;
+        } else if (strcmp(flag, "--query-ble-name") == 0) {
+            flag_takes_none(flag, inline_value);
+            opt->query_ble_name = true;
+        } else if (strcmp(flag, "--rename-ble") == 0) {
+            const char *value = flag_takes_value(argc, argv, &i, flag,
+                                                 inline_value);
+
+            if (!normalize_ble_name(value, opt->ble_name,
+                                    sizeof(opt->ble_name))) {
+                usage_fatal("--rename-ble must be 1-%d UTF-8 bytes without "
+                            "control characters", BLE_NAME_MAX);
+            }
+            opt->rename_ble = opt->ble_name;
+        } else if (strcmp(flag, "--reset-ble-name") == 0) {
+            flag_takes_none(flag, inline_value);
+            opt->reset_ble_name = true;
         } else if (strcmp(flag, "--ble-write-size") == 0) {
             opt->ble_write_size = parse_ble_write_size(
                 flag_takes_value(argc, argv, &i, flag, inline_value));
@@ -2148,6 +3061,9 @@ static void parse_args(int argc, char **argv, struct options *opt)
     if (strcmp(opt->enter, "raw") != 0 && strcmp(opt->enter, "cr") != 0 &&
         strcmp(opt->enter, "lf") != 0 && strcmp(opt->enter, "crlf") != 0) {
         usage_fatal("--enter must be raw, cr, lf, or crlf");
+    }
+    if (opt->rename_ble && opt->reset_ble_name) {
+        usage_fatal("choose either --rename-ble or --reset-ble-name");
     }
     opt->escape = parse_escape(opt->escape);
 }
@@ -2199,7 +3115,8 @@ int main(int argc, char **argv)
         scan_and_list_devices(g_state.conn, opt.timeout);
         /* Listing is the whole job unless another action was requested. The
          * Python client follows the same rule. */
-        if (!opt.loopback_test && !opt.pair && !opt.address) {
+        if (!opt.loopback_test && !opt.pair && !opt.address &&
+            !opt.query_ble_name && !opt.rename_ble && !opt.reset_ble_name) {
             return EXIT_OK;
         }
     }
@@ -2208,7 +3125,8 @@ int main(int argc, char **argv)
         return EXIT_ERROR;
     }
 
-    msg("New host: hold Bee GPIO1 to GND before pairing. Bonded hosts reconnect without GPIO1.");
+    msg("New host: hold the Bee pairing GPIO to GND before pairing (GPIO1 C3/C5, "
+        "GPIO4 WROOM). Bonded hosts reconnect without it.");
     if (!connect_device(g_state.conn, match.path)) {
         return EXIT_ERROR;
     }
@@ -2218,7 +3136,9 @@ int main(int argc, char **argv)
         return EXIT_ERROR;
     }
 
-    if (!discover_characteristics(g_state.conn)) {
+    if (!discover_characteristics(g_state.conn,
+                                 opt.query_ble_name || opt.rename_ble ||
+                                 opt.reset_ble_name)) {
         disconnect_device(g_state.conn);
         return EXIT_ERROR;
     }
@@ -2229,6 +3149,18 @@ int main(int argc, char **argv)
     }
 
     configure_write_chunk();
+
+    if (opt.query_ble_name || opt.rename_ble || opt.reset_ble_name) {
+        if (!run_ble_name_actions(g_state.conn, &opt)) {
+            stop_notifications(g_state.conn);
+            disconnect_device(g_state.conn);
+            restore_terminal();
+            if (g_state.log_file) {
+                fclose(g_state.log_file);
+            }
+            return EXIT_ERROR;
+        }
+    }
 
     if (opt.loopback_test) {
         bool ok = do_loopback_test(g_state.conn, &opt);

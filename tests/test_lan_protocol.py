@@ -61,11 +61,15 @@ class LanHandshakeTests(unittest.TestCase):
             f"[0-9a-f]{{{length}}}" in APP,
             f"web/app.js does not validate a {length}-character hex token",
         )
-        # The docs tell users how many characters to type.
+        # The docs tell users how many characters to type. Match the number as a
+        # whole token: a bare substring test would also pass on "132" or a port.
         for doc in ["docs/DEVELOPMENT.md", "docs/DEVELOPMENT.zh-CN.md",
                     "docs/LINKR_BLE_API.zh-CN.md"]:
-            self.assertTrue(str(length) in (ROOT / doc).read_text(),
-                            f"{doc} never mentions the {length}-character token")
+            self.assertRegex(
+                (ROOT / doc).read_text(),
+                rf"\b{length}\b",
+                f"{doc} never mentions the {length}-character token",
+            )
 
     def test_uart_fanout_waits_for_authentication(self):
         # The slot must stay CLAIMED until ws_client_auth() succeeds: an
@@ -107,7 +111,8 @@ class DocumentedCommandTests(unittest.TestCase):
     def documented_long_forms(path):
         rows = re.findall(r"^\|\s*`@[^`]+`\s*\|\s*`@linkr ([^`]+)`",
                           path.read_text(), re.MULTILINE)
-        return [row.strip() for row in rows if row.strip().endswith(("",)) or row]
+        # Drop blank cells; the earlier `endswith(("",)) or row` was always true.
+        return [row.strip() for row in rows if row.strip()]
 
     def matched(self, body):
         for literal in self.literals:

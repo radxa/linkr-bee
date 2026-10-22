@@ -41,7 +41,7 @@ function sse({ text, tool }) {
   return `data: ${chunk(delta, null)}\n\ndata: ${chunk({}, tool ? "tool_calls" : "stop")}\n\ndata: [DONE]\n\n`;
 }
 
-async function mockModel(page, respond) {
+async function mockModelResponse(page, respond) {
   let calls = 0;
   await page.route("https://agent.test/v1/chat/completions", async (route) => {
     const headers = { "access-control-allow-origin": "*", "access-control-allow-headers": "*" };
@@ -50,8 +50,13 @@ async function mockModel(page, respond) {
       return;
     }
     const response = await respond(route.request().postDataJSON(), ++calls);
-    await route.fulfill({ status: 200, headers, contentType: "text/event-stream", body: sse(response) });
+    await route.fulfill({ status: 200, headers, ...response });
   });
+}
+async function mockModel(page, respond) {
+  await mockModelResponse(page, async (request, round) => ({
+    contentType: "text/event-stream", body: sse(await respond(request, round)),
+  }));
 }
 async function chooseMode(page, mode) {
   await page.locator("#agentModeButton").tap();
@@ -62,6 +67,170 @@ async function ask(page, question = "Why did the target fail to boot?") {
   await page.locator("#agentQuestion").fill(question);
   await page.locator("#agentAsk").click();
 }
+
+test("a built-in Radxa skill discovers and reads the correct board's official document", async ({ page }, testInfo) => {
+  const base = "https://docs.radxa.com";
+  const url = `${base}/dragon/q8b/system-config/uart-debug`;
+  const publicHeaders = { "access-control-allow-origin": "*" };
+  await page.route(`${base}/agent/products.json`, route => {
+    expect(route.request().headers().authorization).toBeUndefined();
+    return route.fulfill({ headers: publicHeaders, contentType: "application/json", body: JSON.stringify({ products: [
+      { name: "Dragon Q8B", id: "dragon-q8b", public_urls: { zh: `${base}/dragon/q8b` } },
+      { name: "Dragon Q6A", id: "dragon-q6a", public_urls: { zh: `${base}/dragon/q6a` } },
+    ] }) });
+  });
+  await page.route(`${base}/sitemap.xml`, route => route.fulfill({ headers: publicHeaders, contentType: "application/xml",
+    body: `<urlset><url><loc>${url}</loc></url><url><loc>${base}/dragon/q6a/system-config/uart-debug</loc></url></urlset>` }));
+  await page.route(url, route => route.fulfill({ headers: publicHeaders, contentType: "text/html",
+    body: "<title>Q8B UART guide</title><nav>" + Array.from({ length: 50 }, (_, i) => `<a href='/navigation-${i}'>Menu</a>`).join("") +
+      "</nav><main><h1>Q8B UART</h1><p>Mock official UART instructions.</p><a href='/dragon/q8b/getting-started'>Related board guide</a></main>" }));
+  await mockModel(page, (request, round) => {
+    if (round === 1) {
+      expect(JSON.stringify(request.messages)).toContain("radxa-docs");
+      expect(JSON.stringify(request.messages)).not.toContain("# Radxa documentation workflow");
+      return { tool: { name: "load_skill", args: { name: "radxa-docs" } } };
+    }
+    if (round === 2) {
+      expect(JSON.stringify(request.messages.at(-1))).toContain("imports_resolve_to");
+      return { tool: { name: "search_radxa_docs", args: { query: "串口调试", board: "Q8B" } } };
+    }
+    if (round === 3) {
+      const value = JSON.parse(request.messages.at(-1).content);
+      expect(value.results.map(item => item.url)).toEqual([url]);
+      return { tool: { name: "read_web_page", args: { url } } };
+    }
+    expect(JSON.stringify(request.messages.at(-1))).toContain("Mock official UART instructions.");
+    expect(JSON.parse(request.messages.at(-1).content).links).toContainEqual({ text: "Related board guide", url: `${base}/dragon/q8b/getting-started` });
+    return { text: `Read [Q8B UART documentation](${url}). Check the guide before changing UART settings.` };
+  });
+  await ask(page, "查一下 Q8B 的串口调试文档");
+  await expect(page.locator(".agent-assistant a").last()).toHaveAttribute("href", url);
+  await expect(page.locator("#agentAsk")).toBeEnabled();
+  await expect(page.locator("#agentMessages")).toContainText("Load built-in skill");
+  await expect(page.locator("#agentMessages")).toContainText("Find official Radxa docs");
+  for (const viewport of [{ width: 390, height: 844 }, { width: 1552, height: 1221 }]) {
+    await page.setViewportSize(viewport);
+    expect(await page.locator("#agentMessages").evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath(`radxa-skills-${viewport.width}.png`) });
+  }
+  expect(await page.evaluate(() => window.sent)).toEqual([]);
+});
+
+test("blocked Radxa discovery reads official MDX source and follows its documented content reference", async ({ page }) => {
+  const site = "https://docs.radxa.com";
+  const sha = "b".repeat(40);
+  const raw = `https://raw.githubusercontent.com/radxa-docs/docs/${sha}/`;
+  const path = "docs/dragon/q8b/system-config/uart-debug.mdx";
+  const contentPath = "docs/common/uart-body.md";
+  const headers = { "access-control-allow-origin": "*" };
+  await page.route(`${site}/agent/products.json`, route => route.fulfill({ headers, contentType: "application/json",
+    body: JSON.stringify({ products: [{ name: "Dragon Q8B", id: "dragon-q8b", public_urls: { zh: `${site}/dragon/q8b` } }] }) }));
+  await page.route(`${site}/sitemap.xml`, route => route.abort("failed"));
+  await page.route("https://api.github.com/repos/radxa-docs/docs/git/trees/main?recursive=1", route => route.fulfill({ headers,
+    contentType: "application/json", body: JSON.stringify({ sha, truncated: false, tree: [{ type: "blob", path }] }) }));
+  await page.route(raw + path, route => route.fulfill({ headers, contentType: "text/plain",
+    body: `---\ndoc_kind: wrapper\nimports_resolve_to:\n  - ${contentPath}\n---\nimport Body from '@site/${contentPath}';\n<Body />` }));
+  await page.route(raw + contentPath, route => route.fulfill({ headers, contentType: "text/plain",
+    body: "# Shared UART procedure\n\nOnly apply after checking the exact board wiring.\n\n```yaml\nserial:\n  example: true\n```" }));
+  await mockModel(page, (request, round) => {
+    if (round === 1) return { tool: { name: "load_skill", args: { name: "radxa-docs" } } };
+    if (round === 2) return { tool: { name: "search_radxa_docs", args: { query: "串口", board: "Q8B" } } };
+    if (round === 3) {
+      const found = JSON.parse(request.messages.at(-1).content);
+      expect(found.source).toBe("repository");
+      expect(found.warnings.join(" ")).toContain("Published sitemap unavailable");
+      expect(found.results[0].url).toBe(raw + path);
+      return { tool: { name: "read_web_page", args: { url: found.results[0].url } } };
+    }
+    if (round === 4) {
+      expect(JSON.stringify(request.messages.at(-1))).toContain("imports_resolve_to");
+      return { tool: { name: "read_web_page", args: { url: raw + contentPath } } };
+    }
+    const read = JSON.parse(request.messages.at(-1).content);
+    expect(read.text).toContain("serial:\n  example: true");
+    return { text: `Published site unavailable; read the [official source](${raw + path}) and its referenced content. Board prerequisites still need verification.` };
+  });
+  await ask(page, "查一下 Q8B 的串口文档");
+  await expect(page.locator(".agent-assistant").last()).toContainText("Published site unavailable");
+  await expect(page.locator("#agentAsk")).toBeEnabled();
+  expect(await page.evaluate(() => window.sent)).toEqual([]);
+});
+
+test("a transient model error recovers with visible status and no serial input", async ({ page }, testInfo) => {
+  let calls = 0, release;
+  const held = new Promise(resolve => { release = resolve; });
+  await mockModelResponse(page, async (_request, round) => {
+    calls = round;
+    if (round === 1) {
+      return { status: 503, contentType: "application/json",
+        body: JSON.stringify({ error: { message: "Service temporarily unavailable" } }) };
+    }
+    await held;
+    return { contentType: "text/event-stream", body: sse({ text: "Recovered without repeating any command." }) };
+  });
+  try {
+    await ask(page);
+    await expect(page.locator("#agentStatus")).toContainText("Retrying model request (1/2)");
+    await expect(page.locator("#agentStop")).toBeEnabled();
+    for (const viewport of [{ width: 1552, height: 1221 }, { width: 390, height: 844 }]) {
+      await page.setViewportSize(viewport);
+      expect(await page.locator("#agentStatus").evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true);
+      await page.screenshot({ path: testInfo.outputPath(`model-retry-${viewport.width}.png`) });
+    }
+  } finally { release(); }
+  await expect(page.locator(".agent-assistant").last()).toContainText("Recovered without repeating any command.");
+  await expect(page.locator("#agentAsk")).toBeEnabled();
+  await expect(page.locator("#agentStatus")).toBeEmpty();
+  expect(calls).toBe(2);
+  expect(await page.evaluate(() => window.sent)).toEqual([]);
+});
+
+test("stopping retry backoff unlocks the composer and cancels the old request", async ({ page }) => {
+  const requests = [];
+  await mockModelResponse(page, async request => {
+    requests.push(request);
+    return requests.length === 1
+      ? { status: 503, contentType: "application/json", body: '{"error":{"message":"Service temporarily unavailable"}}' }
+      : { contentType: "text/event-stream", body: sse({ text: "New question answered." }) };
+  });
+  await ask(page, "First question");
+  await expect(page.locator("#agentStatus")).toContainText("Retrying in 1s (1/2)");
+  await page.locator("#agentStop").click();
+  await expect(page.locator("#agentAsk")).toBeEnabled();
+  await ask(page, "New question");
+  await expect(page.locator(".agent-assistant").last()).toContainText("New question answered.");
+  expect(requests).toHaveLength(2);
+  expect(requests[1].messages.at(-1).content).toEqual([{ type: "text", text: "New question" }]);
+  expect(await page.evaluate(() => window.sent)).toEqual([]);
+});
+
+test("persistent transient errors stop after the question's two retries", async ({ page }) => {
+  let calls = 0;
+  await mockModelResponse(page, async (_request, round) => {
+    calls = round;
+    return { status: 503, contentType: "application/json", body: '{"error":{"message":"Service temporarily unavailable"}}' };
+  });
+  await ask(page);
+  await expect(page.locator(".agent-assistant").last()).toContainText("Service temporarily unavailable");
+  await expect(page.locator("#agentAsk")).toBeEnabled();
+  expect(calls).toBe(3);
+  expect(await page.evaluate(() => window.sent)).toEqual([]);
+});
+
+test("an interrupted partial assistant response is reported without replay", async ({ page }) => {
+  let calls = 0;
+  await mockModelResponse(page, async (_request, round) => {
+    calls = round;
+    const body = sse({ text: "Partial report" }).replace('"finish_reason":"stop"', '"finish_reason":"network_error"');
+    return { contentType: "text/event-stream", body };
+  });
+  await ask(page);
+  await expect(page.locator(".agent-assistant .agent-markdown").first()).toContainText("Partial report");
+  await expect(page.locator(".agent-assistant").last()).toContainText("network_error");
+  await expect(page.locator("#agentAsk")).toBeEnabled();
+  expect(calls).toBe(1);
+  expect(await page.evaluate(() => window.sent)).toEqual([]);
+});
 
 test("assistant renders Markdown while user and tool input stay literal", async ({ page }, testInfo) => {
   const markdown = '## 检查结果\n\n**连接正常**，请查看 [Radxa Docs](https://docs.radxa.com/)。\n\n1. 检查版本\n2. 查看日志\n\n```sh\nuname -a\nprintf "<tag>"\n' + 'x'.repeat(180) + '\n```\n\n| 项目 | 状态 |\n| --- | --- |\n| UART | 正常 |\n\n> 保留日志以便核对。';
@@ -1063,8 +1232,8 @@ for (const matches of [true, false]) test('automatic identity waits for shell an
 
 test('blocked task plans render verification and persist recovery steps without serial writes', async ({page}) => {
  await page.evaluate(()=>{window.__test.state.wsHost='plan-test-device';});
- await mockModel(page,(_body,count)=>count===1 ? {tool:{name:'update_task_plan',args:{steps:[
-  {title:'Inspect service',status:'completed',verification:'Observed service failure in provided logs',nextAction:''},
+ await mockModel(page,(body,count)=> count===1 ? {tool:{name:'read_serial_log',args:{}}} : count===2 ? {tool:{name:'update_task_plan',args:{steps:[
+  {title:'Inspect service',kind:'observation',status:'completed',expectedResult:'Read current diagnostic logs',evidenceIds:[JSON.parse(body.messages.at(-1).content).taskEvidence.id],verification:'Observed current diagnostic logs',nextAction:''},
   {title:'Verify recovery',status:'blocked',verification:'Device unavailable',nextAction:'Reconnect and inspect current service state'},
  ]}}} : {text:'Task is incomplete; reconnect before continuing.'});
  await ask(page,'Plan the service repair');
@@ -1074,7 +1243,64 @@ test('blocked task plans render verification and persist recovery steps without 
  const tasks=await page.evaluate(()=>JSON.parse(localStorage.getItem('linkr-agent-tasks-v1')));
  expect(tasks.at(-1).status).toBe('interrupted');
  expect(tasks.at(-1).plan[1].nextAction).toContain('Reconnect');
+ expect(tasks.at(-1).plan[0].completion).toBe('observed');
+ expect(tasks.at(-1).plan[0].evidence[0].tool).toBe('read_serial_log');
+ await expect(page.locator('#agentMessages')).toContainText('Observation recorded; repair not verified');
  expect(await page.evaluate(()=>window.sent)).toEqual([]);
+});
+
+test('the app rejects a claimed repair with invented evidence instead of displaying a completed plan',async({page})=>{
+ await page.evaluate(()=>{window.__test.state.wsHost='unverified-plan-device';});
+ await mockModel(page,(_body,round)=>round===1?{tool:{name:'update_task_plan',args:{steps:[{
+  title:'Repair complete',kind:'action',status:'completed',expectedResult:'Service is active',
+  verification:'I think the command succeeded',nextAction:'',evidenceIds:['evidence-invented'],
+ }]}}}:{text:'No verified repair result is available.'});
+ await ask(page,'Verify the repair');
+ await expect(page.locator('#agentAsk')).toBeEnabled();
+ await expect(page.locator('#agentMessages')).toContainText('Historical or invented evidence is not current');
+ await expect(page.locator('#agentMessages')).not.toContainText('[Completed] Repair complete');
+ const tasks=await page.evaluate(()=>JSON.parse(localStorage.getItem('linkr-agent-tasks-v1')));
+ expect(tasks.at(-1).plan).toEqual([]);
+ expect(await page.evaluate(()=>window.sent)).toEqual([]);
+});
+
+test('a page reload restores pending references as unknown and blocks resending the recorded operation',async({page})=>{
+ await page.evaluate(()=>{window.__test.state.wsHost='ws://checkpoint-device';
+  const send=window.__test.state.ws.send;
+  window.__test.state.ws.send=bytes=>{
+   if(new TextDecoder().decode(bytes).includes('/tmp/checkpoint-fixture')) {
+    const last=JSON.parse(localStorage.getItem('linkr-agent-tasks-v1')).at(-1);
+    window.checkpointBeforeSend=last.checkpoint.pendingExecutions.some(ref=>ref.delivery==='unknown' && /^[a-f0-9]{64}$/.test(ref.requestFingerprint));
+   }
+   send(bytes);
+  };
+  window.__test.handleIncomingBytes(new TextEncoder().encode('\nradxa@fixture:~$ '));});
+ await chooseMode(page,'full-auto');
+ await mockModel(page,(body,round)=>{
+  if(round===1 || round===6)return {tool:{name:'run_shell_command',args:{command:'touch /tmp/checkpoint-fixture'}}};
+  if(round===2)return {text:'The command was sent; its result is still unknown.'};
+  if(round===3)return {tool:{name:'get_device_status',args:{}}};
+  if(round===4)return {tool:{name:'read_serial_log',args:{}}};
+  if(round===5)return {tool:{name:'get_task_checkpoint',args:{}}};
+  expect(JSON.stringify(body.messages.at(-1))).toContain('unresolved historical execution');
+  return {text:'The prior execution is unknown and was not re-sent.'};
+ });
+ await ask(page,'Create the fixture file');
+ await expect(page.locator('#agentAsk')).toBeEnabled();
+ const original=await page.evaluate(()=>JSON.parse(localStorage.getItem('linkr-agent-tasks-v1')).at(-1));
+ expect(original.status).toBe('interrupted');
+ expect(await page.evaluate(()=>window.checkpointBeforeSend)).toBe(true);
+ expect(original.checkpoint.pendingExecutions).toHaveLength(1);
+ expect(original.checkpoint.pendingExecutions[0].requestFingerprint).toMatch(/^[a-f0-9]{64}$/);
+ await page.reload();await page.waitForFunction(()=>window.__test?.state.term);
+ await page.evaluate(()=>{const {state,setConnected}=window.__test;window.replayed=[];
+  state.mode='ws';state.wsHost='ws://checkpoint-device';state.ws={readyState:1,send:bytes=>window.replayed.push(Array.from(bytes))};setConnected(true);});
+ await page.locator('#agentButton').click();
+ await ask(page,'Continue checking the prior task');
+ await expect(page.locator('#agentAsk')).toBeEnabled();
+ await expect(page.locator('#agentMessages')).toContainText('unavailable · unknown');
+ await expect(page.locator('#agentMessages')).toContainText('was not re-sent');
+ expect(await page.evaluate(()=>window.replayed)).toEqual([]);
 });
 
 test('agent locates late documentation and serial errors without UART writes', async ({page})=>{

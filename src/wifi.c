@@ -55,10 +55,17 @@ LOG_MODULE_REGISTER(linkr_wifi, CONFIG_LOG_DEFAULT_LEVEL);
     CONFIG_LINKR_BLE_BRIDGE_WEBDAV_UPLOAD_INTERVAL_MS
 #else
 /* Keep the shared settings/diagnostic implementation compilable when the
- * optional uploader is excluded and its settings are not generated. */
+ * optional uploader is excluded and its settings are not generated.
+ *
+ * linkr_log_feed() returns before touching log_ring whenever WebDAV is off,
+ * so with the uploader compiled out nothing ever writes it; it is kept only
+ * because the shared settings/diagnostics still reference it
+ * (discard_log_buffer, ring_buf_size_get). Aliasing it to the UART ring
+ * size would make this dead buffer grow in lockstep with a live one, so
+ * give it the smallest useful stub instead. */
 #define URL_MAX    1
 #define CRED_MAX   1
-#define LOG_RING_SIZE CONFIG_LINKR_BLE_BRIDGE_UART_RX_BUFFER_SIZE
+#define LOG_RING_SIZE 512
 #define WEBDAV_UPLOAD_CHUNK 512
 #define WEBDAV_UPLOAD_INTERVAL_MS 1000
 #endif
@@ -242,7 +249,12 @@ static void wifi_scan_cache_update(const struct wifi_scan_result *result)
         }
     }
 
-    if (entry && result->rssi > entry->rssi) {
+    /* `INT8_MIN` is the empty-slot sentinel, so the comparison must be `>=`:
+     * with `>` a result whose own RSSI is exactly INT8_MIN would claim a slot
+     * (count already incremented above) and then skip the write, leaving an
+     * empty entry that prints a blank `@scan result` line and holds the slot
+     * for the rest of the scan. */
+    if (entry && result->rssi >= entry->rssi) {
         memcpy(entry->ssid, ssid, ssid_len + 1);
         entry->channel = result->channel;
         entry->rssi = result->rssi;

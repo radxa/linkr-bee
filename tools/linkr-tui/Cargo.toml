@@ -1,0 +1,77 @@
+[package]
+name = "linkr-tui"
+version = "0.1.2"
+edition = "2021"
+description = "Cross-platform host CLI and TUI for the Linkr Bee wireless serial bridge"
+license = "Apache-2.0"
+repository = "https://github.com/radxa/linkr-bee"
+authors = ["Linkr Bee contributors"]
+
+[features]
+default = ["cli", "tui"]
+cli = []
+tui = []
+
+[[bin]]
+name = "bee"
+path = "src/main.rs"
+
+[dependencies]
+ratatui = "0.30.2"
+crossterm = "0.29.0"
+unicode-width = "0.2.2"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+# The radio. `btleplug` is the only cross-platform GATT library there is, and it
+# needs a Tokio reactor — so the BLE link runs its own reactor on a thread of
+# its own and hands bytes back over a channel, rather than asking the whole
+# interface to become async. See `transport::ble`.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+btleplug = "0.13.5"
+# The LAN bridge is a WebSocket; this is the client half. It rides the same
+# Tokio reactor the BLE link already builds, so the second link costs a
+# dependency and no new threading model. See `transport::lan`.
+tokio-tungstenite = "0.30"
+uuid = { version = "1", features = ["v4"] }
+futures = "0.3"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "charset", "http2", "stream"] }
+
+# A CLI whose reader quits first should quit quietly with it; Rust disables
+# SIGPIPE for the whole process, so restoring the default takes one libc call.
+# Unix-only because only unix has the signal. See `restore_default_sigpipe`
+# in `src/main.rs`.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# BlueZ, asked for the one thing `btleplug` does not do: a discovery filter
+# with an RSSI reading in it, under which the daemon reports every
+# advertisement instead of only the ones whose signal moved. That is the
+# difference between hearing a board that sits still and not hearing it at
+# all, which is what a scan has to be able to tell. See `Listening` in
+# `src/transport/ble.rs`.
+[target.'cfg(target_os = "linux")'.dependencies]
+bluez-async = "0.9"
+
+# The Windows executable wears the project's mark, which lives in a Windows
+# resource section and nowhere else: `build.rs` embeds `assets/icon.ico`. The
+# dependency is unconditional because a build script is compiled for the
+# *host*; the embedding itself happens only when the target is Windows, and
+# cross-compiled Windows builds go through windres, which the mingw packages
+# already provide wherever the mingw linker is.
+#
+# `resvg`/`usvg` are the other half of the build script's work: they rasterise
+# `assets/logo.svg` into the cell data `src/logo.rs` includes. Both are pure
+# Rust and run on the host only — a cross-compile pays for them once, and the
+# shipped binary carries the picture, not the renderer.
+[build-dependencies]
+winresource = "0.1"
+resvg = "0.48"
+usvg = "0.48"
+
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

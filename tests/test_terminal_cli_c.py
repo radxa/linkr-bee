@@ -69,6 +69,7 @@ HARNESS_PRELUDE = r"""
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #define MAX_NAME_LEN_LOCAL 128
 #define BLE_MAX_NUS_PAYLOAD 244
@@ -158,11 +159,38 @@ int main(void)
     char small[4];
     char escape[16];
 
+    /* A name change must not hide a managed device. Explicit names still
+     * override the service filter; generic NUS devices do not auto-match. */
+    CHECK(device_matches("Bench Bee", NULL, true));
+    CHECK(device_matches("测试设备", NULL, true));
+    CHECK(device_matches(NULL, NULL, true));
+    CHECK(device_matches("Linkr BLE UART", NULL, false));
+    CHECK(device_matches("Linkr BLE UART-3", NULL, false));
+    CHECK(device_matches("linkr ble uart 7F2C", NULL, false));
+    CHECK(!device_matches("Linkr BLE UARTISH", NULL, false));
+    CHECK(!device_matches("Linkr Bee 078C", NULL, false));
+    CHECK(!device_matches("Other", NULL, false));
+    CHECK(!device_matches(NULL, NULL, false));
+    CHECK(device_matches("Other", "Other", false));
+    CHECK(!device_matches("Bench Bee", "Other", true));
+    /* A name is compared without regard to its case, so the same command
+     * line cannot land on two different boards. */
+    CHECK(device_matches("linkr bee 078c", "Linkr Bee", false));
+
+    /* A rename needs all four Management characteristics. A legacy NUS-only
+     * board has none of them, so it is not ready when management is needed. */
+    CHECK(management_paths_complete(true, true, true, true));
+    CHECK(!management_paths_complete(true, true, true, false));
+    CHECK(!management_paths_complete(true, true, false, true));
+    CHECK(!management_paths_complete(true, false, true, true));
+    CHECK(!management_paths_complete(false, true, true, true));
+    CHECK(!management_paths_complete(false, false, false, false));
+
     /* normalize_name_prefix trims, drops a trailing '*' and truncates. */
-    normalize_name_prefix("  Linkr BLE UART*  ", buf, sizeof(buf));
-    CHECK_STR(buf, "Linkr BLE UART");
-    normalize_name_prefix("Linkr BLE UART", buf, sizeof(buf));
-    CHECK_STR(buf, "Linkr BLE UART");
+    normalize_name_prefix("  Linkr Bee*  ", buf, sizeof(buf));
+    CHECK_STR(buf, "Linkr Bee");
+    normalize_name_prefix("Linkr Bee", buf, sizeof(buf));
+    CHECK_STR(buf, "Linkr Bee");
     normalize_name_prefix("*", buf, sizeof(buf));
     CHECK_STR(buf, "");
     normalize_name_prefix("", buf, sizeof(buf));
@@ -182,6 +210,18 @@ int main(void)
     check_enter((const uint8_t *)"a\n", 2, "crlf", "a\r\n");
     /* A CRLF pair becomes exactly one replacement, never two. */
     check_enter((const uint8_t *)"\r\n", 2, "crlf", "\r\n");
+
+    /* A name heard over the air is attacker-controlled. Control bytes must
+     * not reach the terminal, and an absent name must be "(unknown)", not
+     * whatever the caller's stack happened to hold. */
+    printable_ble_name(NULL, buf, sizeof(buf));
+    CHECK_STR(buf, "(unknown)");
+    printable_ble_name("", buf, sizeof(buf));
+    CHECK_STR(buf, "(unknown)");
+    printable_ble_name("a\x1b[31m" "b", buf, sizeof(buf));
+    CHECK_STR(buf, "a[31mb");
+    printable_ble_name("a\xc2\x85" "b", buf, sizeof(buf));
+    CHECK_STR(buf, "ab");
 
     /* describe_escape names the configured byte like the Python client. */
     describe_escape("\x1d", escape, sizeof(escape));
@@ -228,10 +268,35 @@ int main(void)
     CHECK(write_size_rejected("-1"));
     CHECK(write_size_rejected("x"));
 
-    /* An exact name outranks a prefix match, and NUS support breaks ties. */
-    CHECK(device_rank(true, true) > device_rank(true, false));
-    CHECK(device_rank(true, false) > device_rank(false, true));
-    CHECK(device_rank(false, true) > device_rank(false, false));
+    /* A board that speaks the Management Service is the one this project
+     * talks to, and it outranks a legacy NUS-only board; an exact name
+     * outranks a prefix match when a name was asked for at all. */
+    CHECK(device_rank(true, true, true) > device_rank(true, true, false));
+    CHECK(device_rank(true, true, false) > device_rank(false, true, true));
+    CHECK(device_rank(false, true, true) > device_rank(false, false, true));
+    CHECK(device_rank(false, true, false) > device_rank(false, false, true));
+
+    /* A name is compared the way a person writes one, and a name that is
+     * not the board's is not the board's. */
+    CHECK(name_starts_with_ci("Linkr Bee 078C", "linkr bee"));
+    CHECK(!name_starts_with_ci("Linkr Bee 078C", "Bench"));
+    CHECK(!name_starts_with_ci(NULL, "Linkr"));
+    CHECK(!name_starts_with_ci("Bee", ""));
+    CHECK(name_equals_ci("Bee", "bee"));
+    CHECK(!name_equals_ci("Bee", "Bench"));
+
+    /* An address is the identity: any spelling of the same twelve digits
+     * names the same board. */
+    normalize_address("AA:BB:CC:DD:EE:FF", buf, sizeof(buf));
+    CHECK_STR(buf, "aabbccddeeff");
+    normalize_address("aa-bb-cc-dd-ee-ff", buf, sizeof(buf));
+    CHECK_STR(buf, "aabbccddeeff");
+    normalize_address("hci0/dev_AA_BB_CC_DD_EE_FF", buf, sizeof(buf));
+    CHECK_STR(buf, "aabbccddeeff");
+    normalize_address("AA:BB:CC", buf, sizeof(buf));
+    CHECK_STR(buf, "aabbcc");
+    normalize_address(NULL, buf, sizeof(buf));
+    CHECK_STR(buf, "");
 
     if (failures) {
         printf("%d harness check(s) failed\n", failures);
@@ -255,11 +320,27 @@ class CHarnessTests(unittest.TestCase):
 
         device_helpers = extract(
             source, "static int device_rank(", "static bool iter_uuid_array_contains",
-            ["device_rank", "strip_dashes", "normalize_name_prefix"])
+            ["device_rank", "strip_dashes", "normalize_name_prefix",
+             "name_starts_with_ci", "name_equals_ci", "normalize_address"])
+        # The rules that decide what a board is: a name the caller asked for,
+        # and otherwise the service the board speaks.
+        board_rules = extract(
+            source, "static bool is_legacy_name(", "static bool consider_device(",
+            ["is_legacy_name", "device_matches"])
+        management_ready = extract(
+            source, "static bool management_paths_complete(",
+            "static bool discover_characteristics(",
+            ["management_paths_complete"])
         enter = extract(source, "static void normalize_enter(",
                         "static void describe_escape(", ["normalize_enter"])
         escape_helpers = extract(source, "static void describe_escape(", "\n/* ---",
                                  ["describe_escape"])
+        # Stop before the readback helpers: this harness only exercises the
+        # sanitiser, and the new helpers have their own harness.  Slicing
+        # through them would trip -Werror=unused-function.
+        sanitizer = extract(source, "static void printable_ble_name(",
+                            "static bool ble_name_query_value(",
+                            ["printable_ble_name"])
         validators = extract(source, "static const char *parse_escape(",
                              "static void usage(", [
                                  "parse_escape", "parse_positive_double",
@@ -268,8 +349,9 @@ class CHarnessTests(unittest.TestCase):
         harness = directory / "harness.c"
         harness.write_text(
             HARNESS_PRELUDE + "\n"
-            + escape_helpers + "\n" + enter + "\n" + device_helpers + "\n"
-            + validators + "\n" + HARNESS_MAIN
+            + escape_helpers + "\n" + enter + "\n" + sanitizer + "\n"
+            + device_helpers + "\n" + board_rules + "\n" + management_ready
+            + "\n" + validators + "\n" + HARNESS_MAIN
         )
         cls.binary = directory / "harness"
         # -Werror: the harness also enforces that the extracted helpers are
@@ -287,6 +369,30 @@ class CHarnessTests(unittest.TestCase):
                                 text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("harness ok", result.stdout)
+
+
+@unittest.skipUnless(shutil.which(CC), "a C compiler is required")
+class CManagementFramingTests(unittest.TestCase):
+    def test_management_headers_survive_small_terminal_write_sizes(self):
+        source = SOURCE_PATH.read_text()
+        helpers = extract(source, "static void put_le16(", "/* The same shape",
+                          ["put_le16", "put_le32"])
+        terminal = extract(source, "static bool write_with_mtu(", "/* ---",
+                           ["write_with_mtu"])
+        writer = extract(source, "static bool mgmt_send(", "/* Read the Protocol Info",
+                         ["mgmt_send"])
+        with tempfile.TemporaryDirectory(prefix="linkr-c-mgmt-") as directory:
+            path = Path(directory)
+            (path / "production_mgmt.inc").write_text(helpers + terminal + writer)
+            binary = path / "mgmt-client-test"
+            compiled = subprocess.run([
+                CC, "-std=c11", "-D_GNU_SOURCE", "-Wall", "-Wextra", "-Werror",
+                "-I", str(path), str(ROOT / "tests/mgmt_client_harness.c"),
+                "-o", str(binary),
+            ], capture_output=True, text=True)
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 @unittest.skipUnless(dbus_available(), "dbus-1 development files are required")
@@ -354,6 +460,41 @@ class CBinaryArgumentTests(unittest.TestCase):
             with self.subTest(flag=flag, value=value):
                 result = self.run_cli(flag, value)
                 self.assertEqual(result.returncode, 2, result.stderr)
+
+    def test_ble_name_flags_are_validated_before_any_bluetooth(self):
+        # The firmware's own limits: 1-29 UTF-8 bytes, no controls. C1 and the
+        # Unicode line separators are controls too, even though they are not
+        # C0; the host must not send a name the board will refuse.
+        for name in ("", "   ", "😀" * 8, "one\ntwo", "del\x7f",
+                     "c1\u0085", "line\u2028sep", "para\u2029sep"):
+            with self.subTest(name=name):
+                result = self.run_cli("--rename-ble", name, "--no-terminal")
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("--rename-ble", result.stderr)
+                self.assertNotIn("BlueZ", result.stderr)
+                self.assertNotIn("D-Bus", result.stderr)
+
+    def test_ble_name_flags_accept_what_the_firmware_accepts(self):
+        # NBSP and U+3000 are ordinary bytes to the firmware; only ASCII
+        # whitespace around the value is trimmed.
+        for name in ("Bench Bee", "测试😀", "\u00a0Bee\u3000"):
+            with self.subTest(name=name):
+                result = self.run_cli("--rename-ble", name, "--version")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(c_version_string(), result.stdout)
+
+    def test_rename_and_reset_cannot_both_be_asked_for(self):
+        result = self.run_cli("--rename-ble", "Bee", "--reset-ble-name")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("choose either --rename-ble or --reset-ble-name",
+                      result.stderr)
+
+    def test_ble_name_flags_are_documented(self):
+        result = self.run_cli("--help")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for flag in ("--query-ble-name", "--rename-ble", "--reset-ble-name"):
+            with self.subTest(flag=flag):
+                self.assertIn(flag, result.stdout)
 
     def test_boolean_flags_reject_an_inline_value(self):
         for argument in ("--scan=1", "--quiet=yes", "--no-terminal=true"):
@@ -558,6 +699,75 @@ class CParityTests(unittest.TestCase):
     def test_both_clients_expose_print_completion(self):
         for source in (self.c_source, self.py_source):
             self.assertIn("--print-completion", source)
+
+    def test_both_clients_expose_the_ble_name_entry(self):
+        """Every host client can read, set, and restore the advertised name."""
+        for flag in ("--query-ble-name", "--rename-ble", "--reset-ble-name"):
+            with self.subTest(flag=flag):
+                self.assertIn(flag, self.c_source)
+                self.assertIn(flag, self.py_source)
+
+    def test_both_clients_use_the_same_name_limit(self):
+        c_limit = re.search(r'#define BLE_NAME_MAX\s+(\d+)', self.c_source)
+        py_limit = re.search(r'^BLE_NAME_MAX = (\d+)', self.py_source,
+                             re.MULTILINE)
+        self.assertIsNotNone(c_limit, "BLE_NAME_MAX missing from the C client")
+        self.assertIsNotNone(py_limit, "BLE_NAME_MAX missing from the CLI")
+        self.assertEqual(c_limit.group(1), py_limit.group(1))
+
+    def test_c_nearby_list_records_before_matching_returns(self):
+        """Every device the scan heard belongs on the not-found list, so the
+        recorder must run before the address and name branches return."""
+        body = re.search(r"static bool consider_device\(.*?\n\}",
+                         self.c_source, re.S).group(0)
+        record = body.index("match->nearby_count++")
+        self.assertLess(record, body.index("return true"))
+        self.assertLess(record, body.index("if (match->address) {"))
+        self.assertLess(record, body.index("return false"))
+
+    def test_c_sanitizes_names_heard_over_the_air(self):
+        """An advertisement is attacker-controlled input: every path that
+        prints a heard name must go through the one sanitiser.
+
+        Its behaviour (ESC/C1/NULL) is covered by test_ble_name_client.py;
+        this only pins the call sites the D-Bus client actually uses.
+        """
+        self.assertGreaterEqual(self.c_source.count("printable_ble_name("), 3)
+        self.assertIn('printf("%s\\t%s\\n", addr, printable);', self.c_source)
+
+    def test_c_reads_the_name_back_after_changing_it(self):
+        """A write reply echoes the request; only @n? proves the board state.
+
+        The comparison itself is covered by test_ble_name_client.py; here we
+        pin the ordering in the D-Bus path and that only the authoritative
+        readback is printed.
+        """
+        body = re.search(r"static bool run_ble_name_actions\(.*?\n\}",
+                         self.c_source, re.S).group(0)
+        write = body.index('snprintf(command, sizeof(command), "@n=%s"')
+        reset = body.index('mgmt_send(conn, "@n default"', write)
+        read = body.index('mgmt_send(conn, "@n?"', write)
+        self.assertLess(write, read)
+        self.assertLess(reset, read)
+        self.assertIn("changed || opt->query_ble_name", body)
+        self.assertIn("ble_name_readback_matches(reply, expected", body)
+        self.assertEqual(body.count('printf("%s\\n", reply);'), 1)
+
+    def test_c_refuses_a_legacy_nus_only_board_for_name_actions(self):
+        """A board without the Management quartet is still a terminal, but a
+        rename must fail loudly instead of writing into a missing channel."""
+        body = re.search(r"static bool discover_characteristics\(.*?\n\}",
+                         self.c_source, re.S).group(0)
+        self.assertIn("legacy NUS-only", body)
+        self.assertIn("firmware cannot read or change the BLE name", body)
+        self.assertIn("need_mgmt && !management_paths_complete(", body)
+        message = body.index("legacy NUS-only")
+        self.assertLess(message, body.index("return false;", message))
+
+    def test_both_clients_reject_the_same_invisible_characters(self):
+        self.assertIn("0x2028", self.c_source)
+        self.assertIn("0x2029", self.c_source)
+        self.assertIn("0x2028, 0x2029", self.py_source)
 
 
 if __name__ == "__main__":

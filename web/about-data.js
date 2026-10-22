@@ -7,7 +7,7 @@
 export const ABOUT_DATA = {
   "app": {
     "name": "Linkr Bee Terminal",
-    "version": "0.1.0",
+    "version": "0.1.2",
     "license": "Apache-2.0",
     "licenseUrl": "https://github.com/radxa/linkr-bee/blob/main/LICENSE",
     "repository": "https://github.com/radxa/linkr-bee",
@@ -73,33 +73,21 @@ export const ABOUT_DATA = {
         },
         {
           "name": "@earendil-works/pi-agent-core",
-          "version": "0.87.1",
+          "version": "1.3.0",
           "license": "MIT",
           "url": "https://github.com/earendil-works/pi"
         },
         {
           "name": "@earendil-works/pi-ai",
-          "version": "0.87.1",
+          "version": "1.3.0",
           "license": "MIT",
           "url": "https://github.com/earendil-works/pi"
         },
         {
           "name": "@anthropic-ai/sdk",
-          "version": "0.124.0",
+          "version": "0.129.0",
           "license": "MIT",
           "url": "https://github.com/anthropics/anthropic-sdk-typescript"
-        },
-        {
-          "name": "@earendil-works/chord",
-          "version": "0.87.1",
-          "license": "MIT",
-          "url": "https://github.com/earendil-works/pi"
-        },
-        {
-          "name": "@earendil-works/pi-telemetry",
-          "version": "0.87.1",
-          "license": "MIT",
-          "url": "https://github.com/earendil-works/pi"
         },
         {
           "name": "@google/genai",
@@ -114,26 +102,14 @@ export const ABOUT_DATA = {
           "url": "https://github.com/StableLib/stablelib"
         },
         {
-          "name": "diff",
-          "version": "8.0.4",
-          "license": "BSD-3-Clause",
-          "url": "https://github.com/kpdecker/jsdiff"
-        },
-        {
           "name": "fast-sha256",
           "version": "1.3.0",
           "license": "Unlicense",
           "url": "https://github.com/dchest/fast-sha256-js"
         },
         {
-          "name": "ignore",
-          "version": "7.0.8",
-          "license": "MIT",
-          "url": "https://github.com/kaelzhang/node-ignore"
-        },
-        {
           "name": "openai",
-          "version": "6.40.0",
+          "version": "7.19.0",
           "license": "Apache-2.0",
           "url": "https://github.com/openai/openai-node"
         },
@@ -166,12 +142,6 @@ export const ABOUT_DATA = {
           "version": "1.3.27",
           "license": "MIT",
           "url": "https://github.com/sinclairzx81/typebox"
-        },
-        {
-          "name": "yaml",
-          "version": "2.9.0",
-          "license": "ISC",
-          "url": "https://github.com/eemeli/yaml"
         }
       ]
     },

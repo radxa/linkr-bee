@@ -47,3 +47,6 @@ harmonyos/**/*.p7b
 
 # Local design tooling state
 .impeccable/
+
+# Binaries built for a machine to try
+bin/

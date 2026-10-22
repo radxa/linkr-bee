@@ -4,7 +4,7 @@
 - `@xterm/addon-fit` 0.11.0: `addon-fit/addon-fit.js`
 - `marked` 18.0.12: `marked/marked.esm.js` (MIT)
 - `dompurify` 3.4.15: `dompurify/purify.es.mjs` (Apache-2.0 OR MPL-2.0)
-- `@earendil-works/pi-ai` + `pi-agent-core` 0.87.1 and dependencies:
+- `@earendil-works/pi-ai` + `pi-agent-core` 1.3.0 and dependencies:
   `agent/agent-runtime.js` (built, not copied — see `agent/README.md`)
 
 The files are copied unchanged from their npm packages so the terminal works

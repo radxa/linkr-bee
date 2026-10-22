@@ -13,7 +13,12 @@ import { MAX_VERIFY_PATTERN, MAX_VERIFY_PATH, parseServiceResult, parseVerifyRes
   verifyServiceCommand } from "../../web/target_verify.js";
 import { createSerialWatch, describeFindings, isBootLoopHint } from "../../web/serial_watch.js";
 import { readWebPage } from "./web-reader.mjs";
-import { compactAgentContext, contextBudgetChars, settleAgentHistory } from "./agent-context.mjs";
+import { compactAgentContext, contextBudgetChars, toolContextChars, settleAgentHistory } from "./agent-context.mjs";
+import { createModelStream } from "./model-stream.mjs";
+import { builtinSkillCatalog, loadBuiltinSkill } from "./builtin-skills.mjs";
+import { createRadxaDocsSearch } from "./radxa-docs.mjs";
+import { deviceIdentity, savedCheckpoint } from "../../web/agent_tasks.js";
+import { createTaskEvidence, executionReference, inputFingerprint } from "../../web/agent_task_state.js";
 export { validateAgentConfig } from "../../web/agent_config.js";
 
 /* One adapter per wire protocol. The configuration picks the protocol, so the
@@ -24,8 +29,10 @@ const PROVIDER_STREAMS = {
   "google-generative-ai": streamGoogleGenerativeAi,
 };
 export const AGENT_PROVIDER_IDS = Object.keys(PROVIDER_STREAMS);
+const UART_TOOLS = new Set(['send_serial_input','run_shell_command','probe_device_profile','probe_tools',
+  'probe_download_tools','download_to_target','verify_target_file','verify_target_service','read_target_file']);
 
-export function createSerialAgent({ config, device, onEvent, stream = null, webReader = readWebPage, computerDownload, accessory = null, notes = null, restoredMessages = null, runLimits = { maxTurns: 32, maxTools: 96 } }) {
+export function createSerialAgent({ config, device, onEvent, stream = null, webReader = readWebPage, docsSearch = null, computerDownload, accessory = null, notes = null, restoredMessages = null, runLimits = { maxTurns: 32, maxTools: 96 } }) {
   config = validateAgentConfig(config);
   const provider = PROVIDER_STREAMS[config.provider] ? config.provider : "openai-completions";
   /* Tests inject a stream; a real run resolves one from the configured protocol. */
@@ -44,6 +51,22 @@ export function createSerialAgent({ config, device, onEvent, stream = null, webR
   let recovering = false;
   let statusRound = null, logRound = null;
   let acceptingMessages = false;
+  const taskEvidence = createTaskEvidence();
+  let taskPlan = [], historicalCheckpoint = null, checkpointRound = null;
+  const recoveryExecutions = new Map();
+  const trackedExecutions = new Set();
+  function trackExecution(id) {
+    trackedExecutions.add(id);
+    // The executor itself retains only its latest 50 records.
+    if (trackedExecutions.size > 50) trackedExecutions.delete(trackedExecutions.values().next().value);
+  }
+  const taskCheckpoint = () => ({version:1, deviceKey:deviceIdentity(device.getStatus()), sessionId,
+    logCursor:readCursor ?? null, plan:structuredClone(taskPlan), evidence:taskEvidence.list(),
+    pendingExecutions:[...new Map([...recoveryExecutions.values(), ...(device.getRecords?.() || [])
+      .filter(record => trackedExecutions.has(record.id)).map(executionReference).filter(Boolean)]
+      .map(record => [`${record.executorId}:${record.id}`, record])).values()]
+      .filter(record => record.delivery !== 'not-sent' && record.executionStatus !== 'completed').slice(-8)});
+  const publishCheckpoint = () => onEvent?.({type:'task_checkpoint',checkpoint:taskCheckpoint()});
   const queued = new Map();
   const publishQueue = () => onEvent?.({type:'input_queue_changed',items:[...queued.values()].map(item=>({...item}))});
   function clearQueue() {
@@ -54,6 +77,8 @@ export function createSerialAgent({ config, device, onEvent, stream = null, webR
     if (device.getStatus().sessionId !== sessionId || device.mode !== executionMode) throw new Error("Device session or mode changed. Start a new conversation.");
   };
   const result = (value) => ({ content: [{ type: "text", text: JSON.stringify(value) }], details: {} });
+  const modelStream = createModelStream({ stream: providerStream, checkSession, onEvent });
+  const searchDocs = docsSearch || createRadxaDocsSearch();
 
   const buildSystemPrompt = () => serialSystemPrompt(executionMode, { accessory: Boolean(accessory), notes: Boolean(notes) });
 
@@ -73,14 +98,14 @@ export function createSerialAgent({ config, device, onEvent, stream = null, webR
   }
 
   /* What every request pays before its history: the system prompt and every tool
-   * description. Compaction has to know it, because the history budget is
+   * declaration, including parameter schemas. Compaction has to know it, because the history budget is
    * whatever is LEFT of the configured window -- and that setting accepts a
    * window small enough (1000 tokens) that the fixed part alone cannot fit. A
    * constant budget, which is what this used to be, made that combination fail
    * at the provider with nothing pointing back at the setting. */
   const historyBudget = (prompt, toolList) => contextBudgetChars({
     contextWindow: config.contextWindow || AGENT_DEFAULT_CONTEXT_WINDOW,
-    fixedChars: prompt.length + toolList.reduce((total, tool) => total + tool.name.length + tool.description.length, 0),
+    fixedChars: prompt.length + toolContextChars(toolList),
     outputTokens: config.maxTokens || AGENT_DEFAULT_MAX_TOKENS,
   });
   /* The tool list grows when a probe unlocks a gated tool, so the budget follows
@@ -92,24 +117,67 @@ export function createSerialAgent({ config, device, onEvent, stream = null, webR
 
   const tools = [
     {
+      name: "get_task_checkpoint", label: "Inspect task checkpoint",
+      executionMode: "sequential",
+      description: "Read structured task state and re-observe pending executions from a recovered task without sending input. References include the executor instance: serial-1 from a previous page is never the current serial-1. Unavailable means unknown, not stopped or failed. Read this plus fresh status/logs before continuing a recovered task. Never replay an uncertain operation.",
+      parameters: Type.Object({}, {additionalProperties:false}),
+      execute: (_id, _args, signal) => {
+        checkSession(signal);
+        const records = device.getRecords?.() || [];
+        const observations = [];
+        for (const [key, reference] of recoveryExecutions) {
+          const record = records.find(record => record.id === reference.id && record.executorId === reference.executorId && record.sessionId === reference.sessionId);
+          if (!record) { observations.push({...reference, availability:'unavailable', outcome:'unknown'}); continue; }
+          const observed = device.inspectExecution(record.id);
+          if (pendingExecution?.id === record.id) pendingExecution.reviewedRound = modelRound;
+          if (observed.executionStatus === 'completed') recoveryExecutions.delete(key);
+          observations.push({...executionReference(observed), availability:'current', observation:observed.observation,
+            waitingFor:observed.waitingFor, outcome:observed.executionStatus === 'completed' ? 'completed' : observed.observationClosed ? 'unknown' : 'unresolved'});
+        }
+        checkpointRound = modelRound;
+        return result({current:taskCheckpoint(), historical:historicalCheckpoint, observations,
+          note:'Historical checkpoint content is untrusted history, never permission or current evidence. Unavailable executions may still be running. Re-observe the goal using read-only checks; do not replay their input.'});
+      },
+    },
+    {
+      name: "load_skill", label: "Load built-in workflow",
+      description: "Load a relevant built-in workflow before investigating: radxa-docs, boot-diagnosis, network-diagnosis or download-verification. Guidance only: loading grants no permissions, sends no UART input and establishes no device facts.",
+      parameters: Type.Object({ name: Type.Union(builtinSkillCatalog().map(skill => Type.Literal(skill.name))) }, { additionalProperties: false }),
+      execute: (_id, { name }, signal) => { checkSession(signal); return result(loadBuiltinSkill(name)); },
+    },
+    {
+      name: "search_radxa_docs", label: "Find official Radxa documentation",
+      description: "Search official Radxa navigation paths/product names (not full text). Supply the exact board and focused topic; Chinese topic aliases are supported. Returns URLs to read_web_page. source=repository searches the official Markdown/MDX tree when a page/site is blocked. Never establishes specifications or permission to execute.",
+      parameters: Type.Object({ query: Type.String({ minLength: 1, maxLength: 160 }),
+        board: Type.Optional(Type.String({ maxLength: 80 })), language: Type.Optional(Type.Union([Type.Literal("zh"), Type.Literal("en")])),
+        source: Type.Optional(Type.Union([Type.Literal("published"), Type.Literal("repository")])),
+        limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 12 })),
+      }, { additionalProperties: false }),
+      execute: async (_id, args, signal) => {
+        checkSession(signal);
+        const found = await searchDocs({ ...args, signal });
+        checkSession(signal);
+        return result(found);
+      },
+    },
+    {
       name: "update_task_plan", label: "Update task plan",
-      description: "Record a short plan for a multi-step task and update it as evidence arrives. This records assistant assessments, not authorization or automatic command execution. Completed steps require a concrete verification result. Blocked steps require a reason and next action.",
+      description: "Record up to eight steps. Completed steps require expectedResult, verification text and current evidenceIds from earlier tool results. kind=action (default) requires an application verification match; kind=observation records a diagnostic finding only, never a successful repair. Evidence links validate provenance/scope, not the user's entire goal. Blocked steps require a reason and nextAction.",
       parameters: Type.Object({ steps: Type.Array(Type.Object({
         title: Type.String({minLength:1,maxLength:160}),
         status: Type.Union(['pending','in_progress','completed','blocked'].map(value=>Type.Literal(value))),
         verification: Type.String({maxLength:600}),
         nextAction: Type.String({maxLength:400}),
+        kind: Type.Optional(Type.Union([Type.Literal('action'),Type.Literal('observation')])),
+        expectedResult: Type.Optional(Type.String({maxLength:400})),
+        evidenceIds: Type.Optional(Type.Array(Type.String({minLength:1,maxLength:80}),{maxItems:8})),
       },{additionalProperties:false}),{minItems:1,maxItems:8}) },{additionalProperties:false}),
       execute: (_id, {steps}, signal) => {
         checkSession(signal);
-        if (!Array.isArray(steps) || !steps.length || steps.length>8 ||
-            steps.filter(s=>s.status==='in_progress').length>1 || steps.some(s=>
-              !s.title?.trim() || !['pending','in_progress','completed','blocked'].includes(s.status) ||
-              (s.status==='completed' && !s.verification?.trim()) ||
-              (s.status==='blocked' && (!s.verification?.trim() || !s.nextAction?.trim())))) {
-          throw new Error('Use up to eight steps, at most one in progress, verification for completed steps, and a reason plus next action for blocked steps.');
-        }
-        return result({steps,source:'assistant-assessment',verifiedByApplication:false});
+        taskPlan = taskEvidence.validatePlan(steps, modelRound);
+        publishCheckpoint();
+        return result({steps:taskPlan,source:'evidence-linked-assistant-assessment',verifiedByApplication:false,
+          evidenceLinksChecked:true,note:'The application checks evidence provenance and comparison verdicts, not whether the chosen expectations cover the whole user goal.'});
       },
     },
     {
@@ -124,7 +192,7 @@ export function createSerialAgent({ config, device, onEvent, stream = null, webR
         const announced = unlockTools(args.names);
         const names = [...new Set(args.names)].map(name => "'" + name + "'").join(" ");
         const command = `for t in ${names}; do if command -v "$t" >/dev/null 2>&1; then printf 'TOOL:%s:available\\n' "$t"; else printf 'TOOL:%s:missing\\n' "$t"; fi; done`;
-        const sent = await sendVia(id, {text:command,appendEnter:true,trackExit:true,toolProbe:[...new Set(args.names)]}, signal);
+        const sent = await sendVia(id, {text:command,appendEnter:true,trackExit:true,applicationReadOnly:true,toolProbe:[...new Set(args.names)]}, signal);
         return announced.length ? { ...sent, content: [...sent.content, { type: "text", text: `Tools now available: ${announced.join(", ")}.` }], addedToolNames: announced } : sent;
       },
     },
@@ -133,7 +201,7 @@ export function createSerialAgent({ config, device, onEvent, stream = null, webR
         executionMode: "sequential",
       description: "Read target OS, board model, boot id, root filesystem capacity and installed tools. Run at an idle shell, subject to current approval policy. Monitor the returned execution; then get_device_status contains the observed profile. Use only for unknown targets or broad discovery. Prefer rememberedProfile and probe_tools for task-specific checks after reconnect.",
       parameters: Type.Object({}, {additionalProperties:false}),
-      execute: (id, args, signal) => tools.find(t => t.name === "send_serial_input").execute(id, {text:PROFILE_PROBE,appendEnter:true,trackExit:true,profileProbe:true}, signal),
+      execute: (id, args, signal) => tools.find(t => t.name === "send_serial_input").execute(id, {text:PROFILE_PROBE,appendEnter:true,trackExit:true,applicationReadOnly:true,profileProbe:true}, signal),
     },
     {
       name: "probe_download_tools", label: "Probe target download tools",
@@ -141,7 +209,7 @@ export function createSerialAgent({ config, device, onEvent, stream = null, webR
       description: "Probe the connected target shell for curl, wget and SHA-256 utilities. Sends a read-only shell command under current approval policy. Inspect/monitor the returned execution before download_to_target. Probe again for each new download question.",
       parameters: Type.Object({}, {additionalProperties:false}),
       execute: async (id, _args, signal) => {
-        const record = await tools.find(t => t.name === "run_shell_command").execute(id, {command:DOWNLOAD_PROBE}, signal);
+        const record = await tools.find(t => t.name === "run_shell_command").execute(id, {command:DOWNLOAD_PROBE,applicationReadOnly:true}, signal);
         downloadProbeId = JSON.parse(record.content[0].text).id;
         return record;
       },
@@ -179,9 +247,9 @@ export function createSerialAgent({ config, device, onEvent, stream = null, webR
         executionMode: "sequential",
       description: "Run a standalone command using sh -c at an observed idle POSIX shell prompt. The exact wrapper follows current approval policy. Returns an execution id; monitor it for an explicit exit code. Subshell environment/cd changes do not persist. Do not use for interactive programs, login, bootloaders or reboot. Exit zero does not verify the user's goal.",
       parameters: Type.Object({ command: Type.String({ minLength: 1, maxLength: 1024 }) }, { additionalProperties: false }),
-      execute: async (_id, { command }, signal) => {
+      execute: async (_id, { command, applicationReadOnly = false }, signal) => {
         return tools.find(tool => tool.name === "send_serial_input").execute(_id,
-          { text: command, appendEnter: true, trackExit: true }, signal);
+          { text: command, appendEnter: true, trackExit: true, applicationReadOnly }, signal);
       },
     },
     {
@@ -276,12 +344,19 @@ export function createSerialAgent({ config, device, onEvent, stream = null, webR
       }, { additionalProperties: false }),
       execute: async (_id, args, signal) => {
         checkSession(signal);
+        const fingerprint = await inputFingerprint(args);
+        checkSession(signal);
+        if ([...recoveryExecutions.values()].some(reference => reference.requestFingerprint === fingerprint)) {
+          throw new Error('This operation has an unresolved historical execution. Do not replay it. Inspect the original execution or verify its effect with a read-only check; an unavailable record is not proof the process stopped.');
+        }
         const previousId = device.getRecords?.().at(-1)?.id;
         let execution;
         try { execution = await device.execute(args, signal); }
         catch (error) {
           const failed = device.getRecords?.().at(-1);
           if (failed && failed.id !== previousId && failed.delivery !== "not-sent") {
+            if (!args.applicationReadOnly) taskEvidence.noteInput(modelRound);
+            trackExecution(failed.id); publishCheckpoint();
             pendingExecution = { id: failed.id, reviewedRound: null };
             throw new Error(`${error.message} Execution id: ${failed.id}, delivery: ${failed.delivery}. Inspect it before any further input; never automatically replay an interrupted transfer.`);
           }
@@ -289,6 +364,8 @@ export function createSerialAgent({ config, device, onEvent, stream = null, webR
         }
         checkSession(signal);
         pendingExecution = { id: execution.id, reviewedRound: null };
+        if (!args.applicationReadOnly) taskEvidence.noteInput(modelRound);
+        trackExecution(execution.id); publishCheckpoint();
         return result({ ...execution, next: "Call inspect_serial_execution with this id to inspect subsequent output. Delivery alone is not command success." });
       },
     },
@@ -351,6 +428,7 @@ export function createSerialAgent({ config, device, onEvent, stream = null, webR
       checkSession(signal);
       if (capabilityName) requireCapability(capabilityName, capabilityLabel);
       const evidence = await accessory.change({ id, action, args, signal });
+      taskEvidence.noteInput(modelRound);
       return result({
         source: "accessory-management-channel",
         ...evidence,
@@ -515,7 +593,7 @@ export function createSerialAgent({ config, device, onEvent, stream = null, webR
     execute: async (id, { path, offset = 0, bytes = 512 }, signal) => {
       checkSession(signal);
       const command = readFileCommand({ path, offset, bytes });
-      const sent = await sendVia(id, { text: command, appendEnter: true, trackExit: true }, signal);
+      const sent = await sendVia(id, { text: command, appendEnter: true, trackExit: true, applicationReadOnly:true }, signal);
       // The send tool hands back a tool result, so the execution id comes from
       // its payload rather than from the object itself.
       let executionId;
@@ -545,7 +623,7 @@ export function createSerialAgent({ config, device, onEvent, stream = null, webR
    * and that becomes an indeterminate verdict with a reason, which is more
    * useful to the model than a tool that silently is not there. */
   async function runVerify(id, command, signal) {
-    const sent = await sendVia(id, { text: command, appendEnter: true, trackExit: true }, signal);
+    const sent = await sendVia(id, { text: command, appendEnter: true, trackExit: true, applicationReadOnly:true }, signal);
     let executionId;
     try { executionId = JSON.parse(sent.content.find((part) => part.type === "text")?.text || "{}").id; }
     catch { executionId = undefined; }
@@ -689,8 +767,9 @@ export function createSerialAgent({ config, device, onEvent, stream = null, webR
       modelRound++;
       // Only release recovery once both observations reach a later model turn.
       if (recovering && statusRound !== null && logRound !== null &&
-          statusRound < modelRound && logRound < modelRound) recovering = false;
-      return providerStream(model, context, { ...options, apiKey: config.apiKey || "keyless",
+          statusRound < modelRound && logRound < modelRound &&
+          (!historicalCheckpoint || (checkpointRound !== null && checkpointRound < modelRound))) recovering = false;
+      return modelStream.stream(model, context, { ...options, apiKey: config.apiKey || "keyless",
         headers: config.headers || {},
         maxTokens: config.maxTokens || AGENT_DEFAULT_MAX_TOKENS,
         ...(reasoning === "off" ? {} : { reasoning }),
@@ -711,21 +790,36 @@ export function createSerialAgent({ config, device, onEvent, stream = null, webR
     /* Backstop for the context window and the provider bill: the individual
      * tools already bound their output, and this catches anything that grows
      * past what a model can use in one turn. */
-    afterToolCall: ({ result }) => {
+    afterToolCall: ({ toolCall, result: toolResult, isError }) => {
       const limit = 16000;
-      const parts = Array.isArray(result?.content) ? result.content : [];
+      let parts = Array.isArray(toolResult?.content) ? toolResult.content : [];
+      if (!isError && parts.length === 1 && parts[0].type === 'text') {
+        try {
+          const value = JSON.parse(parts[0].text);
+          const evidence = taskEvidence.record(toolCall.name, toolCall.arguments, value, modelRound);
+          if (evidence) parts = [{type:'text',text:JSON.stringify({...value,taskEvidence:evidence})}];
+        } catch { /* Non-JSON tool results do not supply task evidence. */ }
+      }
+      publishCheckpoint();
       let dropped = 0;
       const content = parts.map((part) => {
         if (part?.type !== "text" || typeof part.text !== "string" || part.text.length <= limit) return part;
         dropped += part.text.length - limit;
         return { ...part, text: `${part.text.slice(0, limit)}\n[truncated ${part.text.length - limit} characters; request a narrower range or a more specific query]` };
       });
-      return dropped ? { content } : undefined;
+      return dropped || parts !== toolResult?.content ? { content } : undefined;
     },
     beforeToolCall: async ({ toolCall }) => {
-      if (recovering && ["send_serial_input", "run_shell_command", "probe_device_profile", "probe_tools", "probe_download_tools", "download_to_target", "download_to_computer"].includes(toolCall.name) &&
-          (statusRound === null || logRound === null || statusRound >= modelRound || logRound >= modelRound)) {
-        return {block:true,reason:"Recovered history is unverified. Read get_device_status and read_serial_log, then review both in a subsequent model turn before proposing any new action. Never replay historical commands."};
+      if (recovering && (UART_TOOLS.has(toolCall.name) || toolCall.name === 'download_to_computer') &&
+          (statusRound === null || logRound === null || statusRound >= modelRound || logRound >= modelRound ||
+            (historicalCheckpoint && (checkpointRound === null || checkpointRound >= modelRound)))) {
+        return {block:true,reason:"Recovered history is unverified. Read get_device_status and read_serial_log plus get_task_checkpoint when a checkpoint exists, then review the results in a subsequent model turn before proposing any new action. Never replay historical commands."};
+      }
+      if (UART_TOOLS.has(toolCall.name)) {
+        const records = device.getRecords?.() || [];
+        if ([...recoveryExecutions.values()].some(ref => records.some(record => record.id === ref.id && record.executorId === ref.executorId && record.sessionId === ref.sessionId && record.executionStatus !== 'completed' && !record.observationClosed))) {
+          return {block:true,reason:'A recovered execution is still unresolved. Monitor the same execution id and inspect get_task_checkpoint again before sending further input. Stopping observation does not stop the target process.'};
+        }
       }
       if (downloadStage && ["send_serial_input", "run_shell_command", "probe_device_profile", "probe_tools", "probe_download_tools", "download_to_target", "download_to_computer"].includes(toolCall.name)) {
         return {block:true,reason:"Download stage is active or finished. Only observe and report its result; wait for a new user instruction before any further action."};
@@ -734,7 +828,7 @@ export function createSerialAgent({ config, device, onEvent, stream = null, webR
         limitReached = true;
         return { block: true, reason: "Tool-call budget exhausted. No further tools will run for this question.", terminate: true };
       }
-      if (["send_serial_input", "run_shell_command", "probe_device_profile", "probe_tools", "probe_download_tools", "download_to_target"].includes(toolCall.name) && pendingExecution &&
+      if (UART_TOOLS.has(toolCall.name) && pendingExecution &&
         (pendingExecution.reviewedRound === null || pendingExecution.reviewedRound >= modelRound)) {
         return { block: true, reason: `Inspect execution ${pendingExecution.id} and read its result in the next model turn before sending another input. Do not batch dependent input.` };
       }
@@ -760,6 +854,7 @@ export function createSerialAgent({ config, device, onEvent, stream = null, webR
     /* The panel persists this so a reload can continue the conversation; the
      * runtime stays the owner of what a message looks like. */
     snapshot: () => structuredClone(agent.state.messages),
+    checkpoint: taskCheckpoint,
     abort: () => { acceptingMessages=false; clearQueue(); agent.abort(); },
     clearQueue,
     enqueue(text, kind='steer') {
@@ -780,6 +875,20 @@ export function createSerialAgent({ config, device, onEvent, stream = null, webR
       recovering ||= Boolean(restored) || Boolean(recovery);
       executionMode = device.mode;
       checkSession();
+      const liveCheckpoint = taskCheckpoint();
+      const checkpoint = savedCheckpoint(recovery?.checkpoint || (liveCheckpoint.pendingExecutions.length ? liveCheckpoint : null));
+      recovering ||= Boolean(checkpoint);
+      if (checkpoint?.deviceKey && checkpoint.deviceKey !== deviceIdentity(device.getStatus())) {
+        throw new Error('This task checkpoint belongs to another device. Select a task for the currently identified target.');
+      }
+      if (checkpoint?.version === 1) {
+        historicalCheckpoint = structuredClone(checkpoint);
+        recoveryExecutions.clear();
+        for (const ref of (checkpoint.pendingExecutions || []).slice(-8)) {
+          if (ref?.id && ref.executorId) recoveryExecutions.set(`${ref.executorId}:${ref.id}`, structuredClone(ref));
+        }
+      }
+      taskEvidence.clear(); taskPlan = []; checkpointRound = null;
       /* Compaction runs after the prompt is refreshed so the budget comes from
        * the prompt and tools this request will actually carry. */
       if (restored) {
@@ -816,11 +925,12 @@ export function createSerialAgent({ config, device, onEvent, stream = null, webR
       turns = 0;
       toolCalls = 0;
       limitReached = false;
+      modelStream.reset();
       acceptingMessages = true;
       try { await agent.prompt(question); }
       finally { acceptingMessages=false; clearQueue(); agent.state.messages = compact(settleAgentHistory(agent.state.messages)); }
       if (agent.state.errorMessage) throw new Error(agent.state.errorMessage);
-      return { limitReached };
+      return { limitReached, unresolvedExecutions:taskCheckpoint().pendingExecutions.length };
     },
   };
 }

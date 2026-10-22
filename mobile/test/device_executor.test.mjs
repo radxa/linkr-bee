@@ -201,9 +201,11 @@ test("a new device cannot look up old execution evidence even before UI reset", 
 });
 
 test("reset removes records and suppresses late events from the old device", async () => {
-  let finish;
-  const { device, events } = fixture({ send: () => new Promise((resolve) => { finish = resolve; }) });
+  let finish, started;
+  const transportStarted = new Promise(resolve => {started=resolve;});
+  const { device, events } = fixture({ send: () => new Promise((resolve) => { finish = resolve; started(); }) });
   const pending = device.execute(query);
+  await transportStarted;
   const id = device.getRecords()[0].id;
   device.reset();
   const eventCount = events.length;
@@ -212,6 +214,25 @@ test("reset removes records and suppresses late events from the old device", asy
   assert.equal(events.length, eventCount);
   assert.deepEqual(device.getRecords(), []);
   assert.throws(() => device.inspectExecution(id), /unavailable/);
+});
+
+test('operation fingerprints ignore fresh exit tokens and executor instances distinguish reused ids',async()=>{
+  const first=fixture(),second=fixture();
+  first.device.setMode('full-auto');second.device.setMode('full-auto');
+  const args={...query,trackExit:true};
+  const a=await first.device.execute(args),b=await second.device.execute(args);
+  assert.equal(a.id,b.id);assert.notEqual(a.executorId,b.executorId);
+  assert.notEqual(a.completionToken,b.completionToken);
+  assert.equal(a.requestFingerprint,b.requestFingerprint);
+  assert.match(a.requestFingerprint,/^[a-f0-9]{64}$/);
+  first.device.setMode('auto');second.device.setMode('auto');
+});
+test('the executor locks concurrent writers before asynchronous fingerprinting',async()=>{
+  const {device,sent}=fixture();
+  const pending=device.execute(query);
+  await assert.rejects(device.execute(query),/still active/);
+  await pending;
+  assert.equal(sent.length,1);
 });
 
 test("a second writer is refused until the first settles; snapshots cannot mutate execution", async () => {

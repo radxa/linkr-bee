@@ -77,6 +77,7 @@ export class LinkrBleHost {
   private suppressDisconnectEvent: boolean = false;
   private scanActive: boolean = false;
   private operationTail: Promise<void> = Promise.resolve();
+  private connectionGeneration: number = 0;
   private pendingNotifications: Array<PendingNotification> = [];
   private pendingNotificationBytes: number = 0;
   private notificationFlushActive: boolean = false;
@@ -344,6 +345,7 @@ export class LinkrBleHost {
       throw new Error(`Unable to create GATT client: ${this.errorMessage(error)}`);
     }
     this.client = client;
+    const generation = ++this.connectionGeneration;
     this.connectedDeviceId = deviceId;
     this.suppressDisconnectEvent = false;
     this.characteristics.clear();
@@ -351,8 +353,11 @@ export class LinkrBleHost {
 
     try {
       await this.waitForConnection(client, deviceId);
+      this.requireSession(client, generation);
       await this.negotiateMtu(client);
+      this.requireSession(client, generation);
       const services = await client.getServices();
+      this.requireSession(client, generation);
       for (const service of services) {
         for (const characteristic of service.characteristics) {
           this.characteristics.set(
@@ -368,7 +373,9 @@ export class LinkrBleHost {
         throw new Error('Linkr Management service is unavailable');
       }
     } catch (error) {
-      this.closeClient(true);
+      if (this.client === client && this.connectionGeneration === generation) {
+        this.closeClient(true);
+      }
       throw new Error(this.errorMessage(error));
     }
   }
@@ -469,6 +476,7 @@ export class LinkrBleHost {
 
   private closeClient(suppressEvent: boolean): void {
     const client = this.client;
+    this.connectionGeneration += 1;
     this.suppressDisconnectEvent = suppressEvent;
     this.client = null;
     this.connectedDeviceId = '';
@@ -559,12 +567,26 @@ export class LinkrBleHost {
   }
 
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.operationTail.then(operation, operation);
+    const client = this.client;
+    const generation = this.connectionGeneration;
+    const guarded = async (): Promise<T> => {
+      this.requireSession(client, generation);
+      const value = await operation();
+      this.requireSession(client, generation);
+      return value;
+    };
+    const result = this.operationTail.then(guarded, guarded);
     this.operationTail = result.then(
       () => undefined,
       () => undefined,
     );
     return result;
+  }
+
+  private requireSession(client: ble.GattClientDevice | null, generation: number): void {
+    if (client === null || this.client !== client || this.connectionGeneration !== generation) {
+      throw new Error('Bluetooth device session changed');
+    }
   }
 
   private requireClient(deviceId: string): ble.GattClientDevice {

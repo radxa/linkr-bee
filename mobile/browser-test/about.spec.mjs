@@ -1,4 +1,7 @@
 import { test, expect } from "@playwright/test";
+import { ABOUT_DATA } from "../../web/about-data.js";
+
+const shippedComponents = ABOUT_DATA.groups.flatMap((group) => group.components);
 
 /* The About page is a compliance surface: it must be reachable, name the
  * components the build ships, and carry the CC-BY attribution for the cursor
@@ -19,11 +22,17 @@ async function openAbout(page) {
 test("the About page lists components, licences and contributors", async ({ page }) => {
   await openAbout(page);
   await expect(page.locator("#controlsPanel")).toHaveAttribute("data-settings-active", "about");
-  await expect(page.locator("#aboutMeta")).toContainText("0.1.0");
+  await expect(page.locator("#aboutMeta")).toContainText("0.1.2");
   await expect(page.locator("#aboutMeta")).toContainText("Apache-2.0");
 
-  // 25 runtime + 5 firmware + 1 artwork component, generated from the tree.
-  await expect(page.locator("#aboutComponents .about-component")).toHaveCount(31);
+  // Dependency upgrades can add or remove transitive components.
+  await expect(page.locator("#aboutComponents .about-component")).toHaveCount(shippedComponents.length);
+  for (const name of ["@earendil-works/pi-agent-core", "@earendil-works/pi-ai"]) {
+    const component = shippedComponents.find((item) => item.name === name);
+    expect(component).toBeDefined();
+    await expect(page.locator("#aboutComponents .about-component").filter({ hasText: name }))
+      .toContainText(component.version);
+  }
   const components = page.locator("#aboutComponents");
   await expect(components).toContainText("@capacitor/core");
   await expect(components).toContainText("marked");
@@ -53,7 +62,9 @@ test("switching sections hides About and the language switch re-renders it", asy
   await page.locator('[data-settings-target="connection"]').tap();
   await expect(page.locator("#controlsPanel")).toHaveAttribute("data-settings-active", "connection");
   await expect(page.locator("#aboutPage")).toBeHidden();
-  await expect(page.locator('section[data-settings-page="connection"]')).toBeVisible();
+  // The connection page now has more than one card (the BLE-name settings are
+  // separate); target the original controls card, not an arbitrary first one.
+  await expect(page.locator('section[data-i18n-aria="connectionControls"]')).toBeVisible();
 
   await page.locator('[data-settings-target="about"]').tap();
   await page.locator("#drawerLangButton").tap();
@@ -72,6 +83,6 @@ test.describe("desktop", () => {
     await rail.click();
     await expect(page.locator("#aboutPage")).toBeVisible();
     await expect(rail).toHaveAttribute("aria-current", "page");
-    await expect(page.locator('section[data-settings-page="connection"]')).toBeHidden();
+    await expect(page.locator('section[data-i18n-aria="connectionControls"]')).toBeHidden();
   });
 });

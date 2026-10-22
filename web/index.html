@@ -7,9 +7,9 @@
     <meta name="theme-color" id="themeColorMeta" content="#05080D" />
     <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
     <link rel="stylesheet" href="./vendor/xterm/xterm.css" />
-    <link rel="stylesheet" href="./style.css?v=20260928-connect-entry" />
+    <link rel="stylesheet" href="./style.css?v=20261021-cross-browser" />
     <link rel="stylesheet" href="./window.css?v=20260906-agent-sidebar-2" />
-    <link rel="stylesheet" href="./skin-v2.css?v=20261019-drawer-unified" />
+    <link rel="stylesheet" href="./skin-v2.css?v=20261021-cross-browser" />
   </head>
   <body>
     <main class="app-shell">
@@ -223,6 +223,29 @@
             </button>
           </div>
         </details>
+
+        <section class="card" data-i18n-aria="bleNameAria" aria-label="BLE device name" data-settings-page="connection">
+          <div class="card-title"><span class="dot"></span><span data-i18n="bleNameTitle">BLE device name</span></div>
+          <p class="field-hint" data-i18n="bleNameHint">Shown when scanning nearby devices. 1–29 UTF-8 bytes; Chinese and emoji are allowed (an emoji usually uses 4 bytes). The Device ID used for verification does not change.</p>
+          <label class="field" for="bleNameInput">
+            <span class="field-label" data-i18n="bleName">Advertised name</span>
+            <span class="field-row">
+              <input id="bleNameInput" type="text" data-i18n-ph="placeholderBleName" placeholder="Linkr Bee 078C" spellcheck="false" autocomplete="off">
+              <button id="bleNameSetButton" class="btn btn-soft" type="button" disabled="">
+                <span class="btn-label" data-i18n="set">Set</span>
+              </button>
+            </span>
+          </label>
+          <p id="bleNameStatus" class="field-hint" role="status" data-i18n="bleNameUnknown">Connect over BLE to read the current name.</p>
+          <div class="btn-grid compact two-actions">
+            <button id="bleNameDefaultButton" class="btn btn-soft" type="button" disabled="">
+              <span class="btn-label" data-i18n="bleNameDefault">Restore default</span>
+            </button>
+            <button id="bleNameQueryButton" class="btn btn-soft" type="button" disabled="">
+              <span class="btn-label" data-i18n="bleNameQuery">Read name</span>
+            </button>
+          </div>
+        </section>
 
         <section class="card" data-i18n-aria="terminalSettingsAria" aria-label="Terminal settings" data-settings-page="terminal">
           <div class="card-title"><span class="dot"></span><span data-i18n="terminalSettings">Terminal Settings</span></div>
@@ -629,7 +652,7 @@
     <script src="./vendor/xterm/xterm.js"></script>
     <script src="./vendor/addon-fit/addon-fit.js"></script>
     <script type="module" src="./ble_transport.js?v=20260901-mobile1"></script>
-    <script type="module" src="./app.js?v=20261019-about"></script>
+    <script type="module" src="./app.js?v=20261021-ble-name"></script>
     <script type="module" src="./rail_nav.js?v=20261017-v2"></script>
     <script>
       /* The terminal boots from static ES modules, so one failed request -- a

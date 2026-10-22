@@ -1,5 +1,7 @@
 # HarmonyOS NEXT client
 
+[User guide](../docs/USAGE.md) | [Project overview](../README.md) | [Documentation](../docs/README.md)
+
 This directory contains a HarmonyOS Stage application for the Linkr Bee BLE
 terminal. ArkWeb renders the shared terminal UI, while the ArkTS host implements
 BLE access and exposes it through the JSON-RPC contract in
@@ -79,9 +81,12 @@ native request timeout.
 
 ## Validation boundary
 
-Firmware now requires encrypted, bonded BLE access. Hold Bee GPIO1 to GND and
-pair in the system Bluetooth UI before connecting a new host. Existing bonded
-hosts do not need GPIO1. Automatic pairing dialogs and lost-bond recovery still
+Firmware now requires encrypted, bonded BLE access. On C3/C5, hold GPIO1 to GND
+and pair in the system Bluetooth UI before connecting a new host. WROOM ships
+with pairing authorization disabled, so no GPIO4 press is needed there; GPIO4 is
+used only when `CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=y`. Existing bonded
+hosts do not need the pairing GPIO.
+Automatic pairing dialogs and lost-bond recovery still
 require a physical HarmonyOS device; see [pairing and recovery](../docs/BLE_PAIRING.md).
 
 The shared terminal now includes the Pi serial assistant. Its setup and tool

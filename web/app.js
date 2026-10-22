@@ -3,14 +3,18 @@
 import { createLanTokenStore } from "./lan_token_store.js";
 import {
   ACCESSORY_LIMITS,
+  BLE_NAME_QUERY_COMMAND,
   DIAGNOSTICS_COMMAND,
   UART_QUERY_COMMAND,
   WIFI_QUERY_COMMAND,
   WEBDAV_QUERY_COMMAND,
+  bleNameCommand,
+  parseBleName,
   parseInfoGroups,
   parseUartSettings,
   parseWebdavStatus,
   parseWifiStatus,
+  printableDeviceName,
   redactCommand,
   replyStatus,
   setUartCommand,
@@ -74,7 +78,36 @@ const MGMT_CAP_DEVICE_ID = 1 << 3;
 const MGMT_CAP_ASYNC_EVENTS = 1 << 4;
 const MGMT_CAP_RELIABLE_UART = 1 << 5;
 const BLE_MAX_ATT_VALUE = 244;
-const BLE_DEVICE_NAME_PREFIX = "Linkr BLE UART";
+const LEGACY_BLE_DEVICE_NAME_PREFIX = "Linkr BLE UART";
+/* A Linkr Bee is a device that speaks the Management Service, and that is
+ * how the picker finds one: the advertised name is a label the owner can
+ * change, so a name filter would find the factory names and nothing else.
+ * The oldest NUS-only firmware has no service to be found by and no
+ * per-device name, so its fixed name is offered as well; whether a board is
+ * one of those is decided by the service it does not have, not by its
+ * name. */
+const BLE_REQUEST_FILTERS = [
+  { services: [MGMT_SERVICE] },
+  { namePrefix: LEGACY_BLE_DEVICE_NAME_PREFIX },
+];
+
+/* Whether a failed read says the Management Service is not there, as
+ * opposed to the read being refused: a board that is not paired yet, or
+ * one whose encryption is not in place yet. The first is a legacy board
+ * whose terminal still works; the second is a pairing problem, and calling
+ * it a legacy board would hide the reason the user needs. */
+function isMissingService(error) {
+  const name = error?.name || "";
+  const text = String(error?.message || "").toLowerCase();
+  return (
+    name === "NotFoundError" ||
+    text.includes("no characteristic") ||
+    text.includes("no service") ||
+    text.includes("not found") ||
+    text.includes("unknown service")
+  );
+}
+
 const WIFI_SCAN_CMD = "@w scan";
 const WIFI_SCAN_PREFIX = "@scan ";
 const WIFI_SCAN_TIMEOUT_MS = 50000;
@@ -104,6 +137,7 @@ const state = {
   nusReady: false,
   mgmtReady: false,
   reliableReady: false,
+  legacy: false,
   reliableTxSequence: 1,
   reliableRxSequence: 1,
   reliableRxDesync: false,
@@ -147,6 +181,9 @@ const state = {
    * reports a FINAL phase, or when the fallback poll takes over. */
   wifiOperation: null,
   wifiOperationTimer: null,
+  bleName: null,
+  bleNameCustom: null,
+  bleNameSupported: null,
   diagnostics: {},
   logSize: 0,
   terminalGeometry: null,
@@ -182,6 +219,11 @@ const elements = {
   diagUart: $("diagUart"),
   diagWifi: $("diagWifi"),
   diagUpload: $("diagUpload"),
+  bleNameInput: $("bleNameInput"),
+  bleNameSetButton: $("bleNameSetButton"),
+  bleNameDefaultButton: $("bleNameDefaultButton"),
+  bleNameQueryButton: $("bleNameQueryButton"),
+  bleNameStatus: $("bleNameStatus"),
   setUartButton: $("setUartButton"),
   clearButton: $("clearButton"),
   saveButton: $("saveButton"),
@@ -370,6 +412,22 @@ const I18N = {
     diagUpload: "Upload Queue",
     refreshDiagnostics: "Refresh diagnostics",
     diagnosticsUpdated: "Diagnostics updated",
+    bleNameTitle: "BLE device name",
+    bleNameAria: "BLE device name",
+    bleNameHint: "Shown when scanning nearby devices. 1–29 UTF-8 bytes; Chinese and emoji are allowed (an emoji usually uses 4 bytes). The Device ID used for verification does not change.",
+    bleName: "Advertised name",
+    placeholderBleName: "Linkr Bee 078C",
+    bleNameUnknown: "Connect over BLE to read the current name.",
+    bleNameDefault: "Restore default",
+    bleNameQuery: "Read name",
+    bleNameSet: "BLE name updated",
+    bleNameReset: "Default BLE name restored",
+    bleNameInvalid: "Enter 1–29 UTF-8 bytes, without control characters.",
+    bleNameUnsupported: "This firmware does not support BLE name changes.",
+    bleNameReadFailed: "Could not read the BLE name.",
+    bleNameStateDefault: "current: {name} (default)",
+    bleNameStateCustom: "current: {name} (custom)",
+    legacyHint: "Legacy firmware: Management Service not found. Terminal is available; accessory settings are disabled.",
     wifiWebdav: "WiFi & WebDAV",
     connect: "Connect",
     disconnect: "Disconnect",
@@ -557,6 +615,22 @@ const I18N = {
     diagUpload: "上传队列",
     refreshDiagnostics: "刷新诊断",
     diagnosticsUpdated: "诊断信息已更新",
+    bleNameTitle: "BLE 设备名称",
+    bleNameAria: "BLE 设备名称",
+    bleNameHint: "扫描附近设备时显示的名称，最多 29 个 UTF-8 字节，可直接使用中文和 emoji（每个 emoji 通常占 4 字节）。用于连接校验的 Device ID 不会改变。",
+    bleName: "广播名称",
+    placeholderBleName: "Linkr Bee 078C",
+    bleNameUnknown: "通过 BLE 连接后可读取当前名称。",
+    bleNameDefault: "恢复默认",
+    bleNameQuery: "读取名称",
+    bleNameSet: "BLE 名称已更新",
+    bleNameReset: "已恢复默认 BLE 名称",
+    bleNameInvalid: "请输入 1–29 个 UTF-8 字节，且不能包含控制字符。",
+    bleNameUnsupported: "当前固件不支持修改 BLE 名称。",
+    bleNameReadFailed: "读取 BLE 名称失败。",
+    bleNameStateDefault: "当前：{name}（默认）",
+    bleNameStateCustom: "当前：{name}（自定义）",
+    legacyHint: "旧固件：未发现 Management Service，仅终端功能可用，配件设置已禁用。",
     wifiWebdav: "WiFi 与 WebDAV",
     connect: "连接",
     disconnect: "断开",
@@ -1033,6 +1107,7 @@ function applyLang() {
   renderRefLists();
   refreshDynamicTexts();
   renderDiagnostics();
+  renderBleNameStatus();
   updateWifiConnectionView();
   updateFullscreenButton();
   updateModifierButtons();
@@ -1635,7 +1710,7 @@ function hasManagementCapability(capability) {
 }
 
 function requestDeviceState() {
-  if (!state.connected || state.mode !== "ble") {
+  if (!state.connected || state.mode !== "ble" || !state.mgmtReady) {
     return Promise.resolve();
   }
   const requests = [requestDiagnostics()];
@@ -1650,6 +1725,160 @@ function requestDeviceState() {
     requests.push(sendControl("@s?"));
   }
   return Promise.all(requests);
+}
+
+function updateBleNameControls() {
+  const enabled =
+    state.connected &&
+    state.mode === "ble" &&
+    state.mgmtReady &&
+    state.bleNameSupported !== false;
+  elements.bleNameInput.disabled = !enabled;
+  elements.bleNameSetButton.disabled = !enabled;
+  elements.bleNameDefaultButton.disabled = !enabled;
+  elements.bleNameQueryButton.disabled = !enabled;
+}
+
+function renderBleNameStatus() {
+  if (!state.connected || state.mode !== "ble") {
+    elements.bleNameStatus.textContent = t("bleNameUnknown");
+    return;
+  }
+  // A legacy NUS-only board is connected; it simply has no Management
+  // Service, so "connect over BLE" would be untrue. Say the firmware does
+  // not support renaming instead.
+  if (!state.mgmtReady || state.bleNameSupported === false) {
+    elements.bleNameStatus.textContent = t("bleNameUnsupported");
+    return;
+  }
+  if (!state.bleName) {
+    elements.bleNameStatus.textContent = t("bleNameUnknown");
+    return;
+  }
+  const key = state.bleNameCustom ? "bleNameStateCustom" : "bleNameStateDefault";
+  // A function replacement, not a string: a name containing `$&` or `$'`
+  // must not be interpreted as a replacement pattern.
+  elements.bleNameStatus.textContent = t(key).replace("{name}", () => state.bleName);
+}
+
+function applyBleName(parsed, { custom = null } = {}) {
+  state.bleName = parsed.name;
+  if (custom !== null) {
+    state.bleNameCustom = Boolean(custom);
+  } else if (parsed.custom !== null) {
+    state.bleNameCustom = parsed.custom;
+  }
+  state.bleNameSupported = true;
+  elements.bleNameInput.value = parsed.name;
+  // The board's own name is the name everything else shows. The name the
+  // picker carried is a snapshot the owner can change from another client, so
+  // a top bar that keeps it would name a board that no longer answers to it.
+  if (state.device) {
+    state.device = { ...state.device, name: parsed.name };
+    renderDeviceName();
+  }
+  updateBleNameControls();
+  renderBleNameStatus();
+}
+
+function renderDeviceName() {
+  elements.deviceName.textContent = state.mode === "ws"
+    ? state.wsHost || ""
+    : state.device
+      ? state.device.name || state.device.id
+      : "";
+}
+
+async function readBleName({ quiet = false } = {}) {
+  if (!state.connected || state.mode !== "ble" || !state.mgmtReady) {
+    return null;
+  }
+  try {
+    const reply = await sendControl(BLE_NAME_QUERY_COMMAND, {
+      returnResponse: true,
+    });
+    const parsed = parseBleName(reply, { query: true });
+    if (!parsed) {
+      state.bleName = null;
+      state.bleNameCustom = null;
+      state.bleNameSupported = false;
+      updateBleNameControls();
+      renderBleNameStatus();
+      if (!quiet) toast(t("bleNameUnsupported"), "error");
+      return null;
+    }
+    applyBleName(parsed);
+    return parsed;
+  } catch (error) {
+    // An old board answers the query with "ERR unknown command". That is not
+    // a transient read failure: the firmware simply has no rename command.
+    if (/^ERR\b/i.test(String(error.message))) {
+      state.bleName = null;
+      state.bleNameCustom = null;
+      state.bleNameSupported = false;
+      updateBleNameControls();
+      renderBleNameStatus();
+      return null;
+    }
+    if (!quiet) {
+      appendLine(`[error] ${error.message}`);
+      toast(t("bleNameReadFailed"), "error");
+    }
+    return null;
+  }
+}
+
+async function changeBleName(command, successKey, custom) {
+  const reply = await sendControl(command, { returnResponse: true });
+  const status = replyStatus(reply);
+  if (!status.ok) {
+    throw new Error(status.error || t("bleNameReadFailed"));
+  }
+  // A write's reply has no `custom=` field, so it is parsed without the
+  // suffix rule and then verified by the read below.
+  const parsed = parseBleName(reply);
+  if (!parsed) {
+    throw new Error(t("bleNameReadFailed"));
+  }
+  applyBleName(parsed, { custom });
+  // The board is asked again, so the name on screen is the one the board
+  // reports and not the one the write's own reply carried. A write's reply
+  // has no `custom=` field, and the advertisement only carries the new name
+  // once the board has started broadcasting it. A reset's MAC suffix is not
+  // predictable here, so it only has to read back; a set must read back the
+  // name we asked for.
+  const expected = command === "@n default" ? null : command.slice(3);
+  const readBack = await readBleName({ quiet: true });
+  if (!readBack || (expected !== null && readBack.name !== expected)) {
+    throw new Error(t("bleNameReadFailed"));
+  }
+  toast(t(successKey));
+}
+
+async function setNameFromInput() {
+  let command;
+  try {
+    command = bleNameCommand({ name: elements.bleNameInput.value });
+  } catch (_error) {
+    elements.bleNameStatus.textContent = t("bleNameInvalid");
+    elements.bleNameInput.focus();
+    return;
+  }
+  try {
+    await changeBleName(command, "bleNameSet", true);
+  } catch (error) {
+    elements.bleNameStatus.textContent = t("bleNameReadFailed");
+    appendLine(`[error] ${error.message}`);
+  }
+}
+
+async function restoreDefaultBleName() {
+  try {
+    await changeBleName("@n default", "bleNameReset", false);
+  } catch (error) {
+    elements.bleNameStatus.textContent = t("bleNameReadFailed");
+    appendLine(`[error] ${error.message}`);
+  }
 }
 
 function scheduleWifiStateRefresh() {
@@ -2029,7 +2258,7 @@ function setConnected(connected, { preserveJournal = false } = {}) {
   const isWs = state.mode === "ws";
   const canConnect =
     Boolean(state.term) && (isWs || Boolean(bleTransport?.isAvailable()));
-  const canControl = connected && !isWs;
+  const canControl = connected && !isWs && state.mgmtReady;
   const canControlWifi = canControl && hasManagementCapability(MGMT_CAP_WIFI);
   const canMutateWifi =
     canControlWifi && hasManagementCapability(MGMT_CAP_ASYNC_EVENTS);
@@ -2058,11 +2287,7 @@ function setConnected(connected, { preserveJournal = false } = {}) {
       connected ? "connected" : "disconnected",
     );
   }
-  elements.deviceName.textContent = isWs
-    ? state.wsHost || ""
-    : state.device
-      ? state.device.name || state.device.id
-      : "";
+  renderDeviceName();
   elements.connectButton.disabled = connectionInFlight || connected || !canConnect;
   if (elements.mobileConnectBtn) {
     elements.mobileConnectBtn.disabled = connectionInFlight || (!connected && !canConnect);
@@ -2114,6 +2339,8 @@ function setConnected(connected, { preserveJournal = false } = {}) {
     .querySelectorAll("#cheatList button[data-cmd]")
     .forEach((button) => (button.disabled = !connected));
   refreshConnectionActions();
+  updateBleNameControls();
+  renderBleNameStatus();
   if (connected) {
     setAutoScroll(true, true);
     state.term?.focus();
@@ -2127,6 +2354,16 @@ function rememberDevice(device, restored = false) {
   state.device = device;
   state.deviceRestored = restored;
   saveSetting(LAST_DEVICE_ID_KEY, device.id);
+  /* The name belongs to the board that was there: an input still holding
+   * the last board's name would write it onto this one. */
+  state.bleName = null;
+  state.bleNameCustom = null;
+  state.bleNameSupported = null;
+  if (elements.bleNameInput) {
+    elements.bleNameInput.value = "";
+  }
+  updateBleNameControls();
+  renderBleNameStatus();
   setConnected(false);
 }
 
@@ -2139,14 +2376,11 @@ async function restoreAuthorizedDevice() {
     const devices = await bleTransport.getDevices(
       lastDeviceId ? [lastDeviceId] : [],
     );
-    const candidates = devices.filter(
-      (device) =>
-        device.id === lastDeviceId ||
-        (device.name && device.name.startsWith(BLE_DEVICE_NAME_PREFIX)),
-    );
-    const device =
-      candidates.find((candidate) => candidate.id === lastDeviceId) ||
-      candidates[0];
+    // The id is the only thing that identifies a board: the advertised
+    // name is a label the owner can change, so a board is restored by the
+    // id it was last seen under. Restoring by a name would pick whichever
+    // board happens to carry it and talk to the wrong one.
+    const device = devices.find((candidate) => candidate.id === lastDeviceId);
 
     if (!device) {
       return;
@@ -2158,7 +2392,7 @@ async function restoreAuthorizedDevice() {
       return;
     }
     rememberDevice(device, true);
-    appendLine(`[restore] ${device.name || device.id}`);
+    appendLine(`[restore] ${printableDeviceName(device.name, device.id)}`);
     toast(t("authorizedDeviceReady"));
   } catch (error) {
     debugLine(`[restore] ${error.message}`);
@@ -2166,7 +2400,7 @@ async function restoreAuthorizedDevice() {
 }
 
 function requestDiagnostics() {
-  if (!state.connected) {
+  if (!state.connected || state.mode !== "ble" || !state.mgmtReady) {
     return Promise.resolve();
   }
   state.diagnostics = {};
@@ -2636,6 +2870,13 @@ function onDisconnected() {
   state.nusReady = false;
   state.mgmtReady = false;
   state.reliableReady = false;
+  state.legacy = false;
+  state.bleName = null;
+  state.bleNameCustom = null;
+  state.bleNameSupported = null;
+  if (elements.bleNameInput) {
+    elements.bleNameInput.value = "";
+  }
   state.reliableMaxPayload = 20;
   state.reliableWriteSize = BLE_MAX_ATT_VALUE;
   // Drop any half-received frame: the next connection restarts the sequence.
@@ -2809,6 +3050,44 @@ async function connect({ chooseDevice = false } = {}) {
   }
 }
 
+/* A pre-Management-Service board still speaks the plain Nordic UART Service.
+ * Subscribe to its notify characteristic and mark the session terminal-only:
+ * every accessory control is gated on `state.mgmtReady`, so none of them will
+ * try to send a management frame the old firmware cannot answer. */
+async function adoptLegacyNus(device) {
+  const notificationSession = {};
+  bleNotificationSession = notificationSession;
+  state.writeGeneration += 1;
+  agentPanel?.connectionChanged(false);
+  agentJournal.reset();
+  await bleTransport.startNotifications(
+    device.id,
+    NUS_SERVICE,
+    NUS_TX,
+    (value) => {
+      if (bleNotificationSession !== notificationSession) return;
+      const bytes = new Uint8Array(
+        value.buffer.slice(
+          value.byteOffset,
+          value.byteOffset + value.byteLength,
+        ),
+      );
+      handleIncomingBytes(bytes);
+    },
+  );
+  state.legacy = true;
+  state.mgmtReady = false;
+  state.reliableReady = false;
+  state.nusReady = true;
+  state.mgmtCapabilities = 0;
+  state.deviceId = "";
+  state.deviceRestored = false;
+  elements.wsTokenInput.value = lanTokens.selectDevice("");
+  setConnected(true, { preserveJournal: true });
+  appendLine(`[legacy] ${printableDeviceName(device.name, device.id)}`);
+  appendLine(t("legacyHint"));
+}
+
 async function connectOnce({ chooseDevice = false } = {}) {
   if (state.mode === "ws") {
     setConnecting(true);
@@ -2840,25 +3119,39 @@ async function connectOnce({ chooseDevice = false } = {}) {
   try {
     await bleTransport.initialize();
     if (!device) {
-      appendLine(`[scan] requesting Linkr Management v1 device`);
+      appendLine(`[scan] requesting a Linkr Bee device`);
       device = await bleTransport.requestDevice({
-        filters: [{ services: [MGMT_SERVICE] }],
+        filters: BLE_REQUEST_FILTERS,
         optionalServices: [MGMT_SERVICE, NUS_SERVICE, RELIABLE_UART_SERVICE],
       });
       rememberDevice(device);
     }
 
     appendLine(`[pairing] ${t("pairingHint")}`);
-    appendLine(`[connect] ${device.name || device.id}`);
+    appendLine(`[connect] ${printableDeviceName(device.name, device.id)}`);
     pairingAttempted = true;
     await bleTransport.connect(device.id, onDisconnected);
     transportConnected = true;
     state.nusReady = true;
-    const protocolValue = await bleTransport.read(
-      device.id,
-      MGMT_SERVICE,
-      MGMT_PROTOCOL,
-    );
+    state.legacy = false;
+    let protocolValue;
+    try {
+      protocolValue = await bleTransport.read(
+        device.id,
+        MGMT_SERVICE,
+        MGMT_PROTOCOL,
+      );
+    } catch (error) {
+      /* The oldest firmware has no Management Service, and its terminal
+       * stays usable. Which board this is, is told by the failure and not
+       * by the name: a service that is not there is a legacy board, while
+       * a read that was refused is a pairing problem on a board that
+       * promised the service. The name says neither - the owner chooses
+       * it, and can choose it for a current board too. */
+      if (!isMissingService(error)) throw error;
+      await adoptLegacyNus(device);
+      return;
+    }
     if (protocolValue.byteLength < 10 || protocolValue.getUint8(0) !== MGMT_API_MAJOR) {
       throw new Error("Unsupported Linkr Management API version");
     }
@@ -2881,14 +3174,19 @@ async function connectOnce({ chooseDevice = false } = {}) {
     if (deviceIdValue.byteLength !== 16) {
       throw new Error("Invalid Linkr Device ID length");
     }
-    state.deviceId = Array.from(
-      new Uint8Array(
-        deviceIdValue.buffer.slice(
-          deviceIdValue.byteOffset,
-          deviceIdValue.byteOffset + deviceIdValue.byteLength,
-        ),
-      ),
-      (byte) => byte.toString(16).padStart(2, "0"),
+    // Any device can advertise the Management Service UUID; the namespace is
+    // what makes the service a filter. Python and the C client check it too.
+    const deviceIdBytes = new Uint8Array(
+      deviceIdValue.buffer,
+      deviceIdValue.byteOffset,
+      deviceIdValue.byteLength,
+    );
+    const linkrNamespace = [0x4c, 0x49, 0x4e, 0x4b, 0x52, 0x42, 0x4c, 0x45, 0x01, 0x00];
+    if (!linkrNamespace.every((byte, index) => deviceIdBytes[index] === byte)) {
+      throw new Error("Device ID is not a Linkr Bee ID");
+    }
+    state.deviceId = Array.from(deviceIdBytes, (byte) =>
+      byte.toString(16).padStart(2, "0"),
     ).join("");
     elements.wsTokenInput.value = lanTokens.selectDevice(state.deviceId);
     // Notifications can arrive before startNotifications resolves. Start the
@@ -2954,6 +3252,7 @@ async function connectOnce({ chooseDevice = false } = {}) {
     requestDeviceState().catch((error) =>
       appendLine(`[error] ${error.message}`),
     );
+    readBleName({ quiet: true });
   } catch (error) {
     appendLine(`[error] ${error.message}`);
     if (pairingAttempted) {
@@ -3017,6 +3316,17 @@ async function disconnect() {
           state.device.id,
           RELIABLE_UART_SERVICE,
           RELIABLE_UART_TX,
+        );
+      } catch (_error) {
+        // Ignore disconnect races.
+      }
+    }
+    if (state.legacy && state.device) {
+      try {
+        await bleTransport.stopNotifications(
+          state.device.id,
+          NUS_SERVICE,
+          NUS_TX,
         );
       } catch (_error) {
         // Ignore disconnect races.
@@ -3489,6 +3799,22 @@ function bind() {
         toast(t("uartSet"));
       })
       .catch((error) => appendLine(`[error] ${error.message}`));
+  });
+
+  elements.bleNameSetButton.addEventListener("click", () => {
+    setNameFromInput();
+  });
+  elements.bleNameDefaultButton.addEventListener("click", () => {
+    restoreDefaultBleName();
+  });
+  elements.bleNameQueryButton.addEventListener("click", () => {
+    readBleName();
+  });
+  elements.bleNameInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      setNameFromInput();
+    }
   });
 
   elements.clearButton.addEventListener("click", () => {

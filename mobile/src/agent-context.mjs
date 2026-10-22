@@ -1,6 +1,6 @@
 /* How much history may be kept, and why it cannot be a constant.
  *
- * Every request pays for the system prompt and every tool description before a
+ * Every request pays for the system prompt and every tool schema before a
  * single history message is sent, and that fixed part is large: measured
  * 2026-09-18 it is about 7,900 tokens (a 13.7 KB prompt plus 24 tool
  * descriptions). The history budget therefore has to be what is LEFT of the
@@ -24,7 +24,7 @@ export const MAX_CONTEXT_CHARS = 24000;
 export const MIN_CONTEXT_CHARS = 2000;
 
 /* No tokenizer ships with the app, so the conversion is deliberately
- * pessimistic in both directions: the prompt and tool descriptions are English
+ * pessimistic in both directions: the prompt and tool schemas are English
  * (about 3-4 characters per token), while a Chinese conversation runs closer to
  * 1-1.5. Budgeting the fixed part at 3 and history at 2 stays on the safe side
  * of both rather than guessing a single ratio. */
@@ -33,6 +33,12 @@ const HISTORY_CHARS_PER_TOKEN = 2;
 
 /* Message framing, role markers and the request envelope the provider adds. */
 const FRAMING_TOKENS = 256;
+
+// Parameters are sent on every request too. Counting just descriptions leaves
+// several thousand tokens of schemas outside the history budget.
+export function toolContextChars(tools) {
+  return JSON.stringify(tools.map(({ name, description, parameters }) => ({ name, description, parameters }))).length;
+}
 
 /* The history budget in characters for one request.
  *

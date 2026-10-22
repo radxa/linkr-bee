@@ -27,13 +27,21 @@ Management 响应不会再出现在串口数据中，串口内容也不会被误
 
 设备广播：
 
-- Complete Local Name：当前为 `Linkr BLE UART-3`，名称只用于显示；
+- Complete Local Name：所有板型的默认名都是 `Linkr Bee XXXX`，其中 `XXXX`
+  是硬件 MAC 最后四位十六进制（例如 `58:BF:25:33:07:8C` → `078C`）。
+  `@n` 可将其替换为 1–29 字节的自定义名（可含中文）。当前固件的名称只用于
+  显示，扫描仍必须按 Management Service UUID 过滤；改名后固件会重启一次
+  广播，扫描响应随即带上新名字；
 - Primary advertisement UUID：Management Service UUID；
-- 扫描必须按 Management Service UUID 过滤，不能依赖名称。
+- 当前固件必须按 Management Service UUID 扫描，不能依赖名称。仅为兼容没有
+  Management Service、只有 NUS 且固定名为 `Linkr BLE UART...` 的旧固件，
+  TUI 和 Web 允许这一种名称例外；新式 `Linkr Bee...` 名称不能替代服务校验。
 
 BLE 地址是 settings 中持久化的 random-static identity。普通升级和重启不改变
 地址；将板级恢复输入与 GND 短接并保持到上电后两秒会恢复出厂（C3 为 GPIO0，
-C5 DevKitC 为 GPIO28/BOOT），擦除 settings，并在下次启动生成新地址。
+C5 DevKitC 为 GPIO28/BOOT，WROOM 为 GPIO27），擦除 settings，并在下次启动
+生成新地址。默认名来自硬件 MAC，不随 BLE 地址变化；恢复出厂会清除自定义名，
+重新生成 `Linkr Bee XXXX`。
 
 Device ID 是只读 16 字节值：前 10 字节是 Linkr 命名空间，后 6 字节来自芯片
 硬件 ID。它与设备名和 BLE 地址无关，恢复出厂后仍保持不变。Linkr 应使用
@@ -155,14 +163,43 @@ WiFi 扫描也使用异步 Event：先返回 `OK accepted`，再发送同一 ID 
 
 `@scan done` 或 `@scan error` 带 `FINAL`。
 
+UART 自动波特率也是异步操作，但默认只在用户要求时运行：
+
+1. Linkr 发送 `@a`，例如 request ID 43；固件响应
+   `OK autobaud state=running baud=115200 timeout_ms=5000`。该 response
+   **不带** `FINAL`，表示检测已接受但尚未完成；
+2. 检测最多持续到出现结果、无有效捕获 5 秒或收到 `@a stop`；
+3. 结果使用同一 request ID 的 type=3 Event 返回，并带 `FINAL`：
+
+```text
+@event autobaud state=applied old=115200 new=1500000
+@event autobaud state=unchanged old=115200 new=115200
+@event autobaud state=timeout old=115200 new=115200
+@event autobaud state=stopped old=115200 new=115200
+@event autobaud state=error old=115200 new=57600
+```
+
+`applied` 表示端口已切换到新速率；`unchanged` 表示线速率已与当前配置一致；
+`timeout` 表示 5 秒内没有可测量的捕获（有捕获会重置计时）；`stopped` 表示被
+`@a stop` 取消；`error` 带 `ERROR` flag，表示 `uart_configure()` 拒绝新速率。
+检测状态可用 `@a?` 同步查询；WROOM 的 GPIO13 按键也可启动同一检测，但按键启动
+没有 request ID，结果只写日志，不发送 Event。检测默认在启动时保持 idle，不会
+自动跟随线速率。
+
 ## 6. 命令参考
 
 | payload | 含义 |
 | --- | --- |
 | `@h` | 命令帮助 |
+| `@n?` / `@linkr name?` | 查询当前广播名及是否为自定义名 |
+| `@n=<name>` / `@linkr name=<name>` | 设置并持久化 1–29 字节 UTF-8 自定义名；支持中文和 emoji（按字节计，通常每个 emoji 4 字节） |
+| `@n default` / `@linkr name default` | 删除自定义名，恢复 `Linkr Bee XXXX` |
 | `@i?` | 多行设备诊断，以 `@info done` 结束 |
 | `@u?` | 查询 UART 配置 |
 | `@u=115200,8,n,1,n` | 设置 baud,data,parity,stop,flow |
+| `@a?` | 查询按需自动波特率状态（`idle`/`running`、当前 baud、超时） |
+| `@a` / `@a start` | 启动一次自动波特率检测（`CONFIG_LINKR_BLE_BRIDGE_UART_AUTOBAUD=y`） |
+| `@a stop` | 取消当前检测；停止 Event 继续使用启动请求的 ID |
 | `@w?` | 查询 WiFi 状态 |
 | `@w scan` | 扫描 2.4 GHz 网络 |
 | `@w=<ssid>,<password>` | 异步连接 WiFi |
@@ -177,6 +214,15 @@ WiFi 扫描也使用异步 Event：先返回 `OK accepted`，再发送同一 ID 
 | `@linkr target?` | 查询 Bee 保存的目标机 UUID，无关联时返回 `OK target=none` |
 | `@linkr target=<UUID>` | 保存小写、带连字符的 36 字符 UUID；相同值不重复写入 |
 | `@linkr target clear` | 清除 Bee 中的目标机关联，不删除目标机 ID 文件或浏览器档案 |
+
+名称规则：固件只裁剪首尾的空格、Tab、CR、LF，拒绝 C0、DEL、C1 与
+U+2028/U+2029，长度按 UTF-8 字节计（1–29）。只有 `@n` 后恰好一个空格时的
+`@n default` 才是恢复默认；`@n=default`（以及两个空格的 `@n  default`）会设置
+一个名字字面为 `default` 的自定义名。`@n?` 的回复是
+`OK name=<name> custom=yes|no`；设置/恢复的回复是 `OK name=<name>`，不带
+`custom=`，需要来源时客户端应再查询一次。名称允许零宽或格式字符（例如
+U+200B、U+200E、U+FEFF），这类名字在扫描列表里可能看起来是空白；如果希望
+用户一眼能认出板子，请不要只用这类字符。
 
 长形式 `@linkr info?`、`@linkr wifi=...` 等仍可使用。WebDAV 查询响应使用完整
 Management payload，不再受旧 NUS 128 字节响应缓冲区截断。
@@ -268,11 +314,14 @@ bridge -> client  "@ws auth=ok\r\n"         通过，随即开始转发串口
 
 Management、Reliable UART、兼容 NUS 的值读写和 CCC 读写均要求加密连接，
 通知/指示同样受加密权限保护。未绑定连接只可发现服务，不能使用数据或管理功能。
-配对采用 LE Secure Connections Just Works，要求绑定；请求到达时 GPIO1 需为低。
-该检查同样适用于替换旧绑定密钥，已有密钥的加密重连不触发它。
+配对采用 LE Secure Connections Just Works，要求绑定。C3/C5 的 board conf
+启用 GPIO1 物理授权，请求到达时 GPIO1 需为低。WROOM 默认
+`CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=n`，不需要按 GPIO4；只有显式设为
+`y` 时才要求 GPIO4 为低。启用授权检查时，替换旧绑定密钥同样受检查，已有密钥
+的加密重连不触发它。
 
 最多保留 8 个绑定，NVS 在正常重启后恢复。恢复出厂会清除绑定及其他设置。
-GPIO1 低电平窗口允许附近主机申请配对，不能验证某一台主机的身份；Just Works
+配对 GPIO 低电平窗口允许附近主机申请配对，不能验证某一台主机的身份；Just Works
 不提供 MITM 身份核验。Device ID 与浏览器的设备授权不能替代加密绑定。
 详见 [配对说明](BLE_PAIRING.md)。
 
@@ -289,14 +338,18 @@ LAN WebSocket 默认要求访问令牌（见第 8 节），令牌只在加密的
 - 长 WebDAV URL 查询完整、不截断；
 - WiFi 初始 response 为 accepted，最终必须收到相同 ID 的 ready/failed Event；
 - WiFi 扫描以 `@scan done` FINAL Event 结束；
+- WROOM 上 `@a?` 启动时为 `idle`；`@a` 返回非 FINAL 的 running response，
+  随后收到同 ID 的 `@event autobaud ...` FINAL；`@a stop` 和 5 秒无捕获超时
+  都能结束检测；
 - Reliable UART 重复 sequence 不会重复写 UART；
 - indication 期间断线，重连订阅后相同 sequence 可重发并被客户端去重；
 - NUS 写入 `@i?` 会原样到 UART，不触发管理命令；
 - `@s?` 返回 32 位十六进制 `token=`，`@i?` 不含令牌；首次启动后该值在重启间保持；
 - LAN 客户端收到 `@ws auth=none` 或 `@ws auth=ok` 后才开始收发串口；
 - 用错误令牌连接会被断开且不写入目标机；`@s token off` 后连接收到 `auth=none`；
-- 恢复出厂后 BLE 地址变化，Device ID 保持不变。C3 使用 GPIO0，
-  C5 DevKitC 使用 GPIO28（BOOT），均在启动时接地保持两秒。
+- 恢复出厂后 BLE 地址变化，Device ID 和默认名 `Linkr Bee XXXX` 保持不变；
+  自定义名被清除并回到硬件 MAC 后缀。C3 使用 GPIO0，C5 DevKitC 使用
+  GPIO28（BOOT），WROOM 使用 GPIO27，均在启动时接地保持两秒。
 
 参考实现：网页端 `web/app.js`，Python/bleak 客户端
 `tools/linkr_ble_terminal.py`。

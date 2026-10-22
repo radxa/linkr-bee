@@ -1,5 +1,7 @@
 # Linkr Bee mobile app
 
+[User guide](../docs/USAGE.md) | [Project overview](../README.md) | [Documentation](../docs/README.md)
+
 This directory packages the shared `web/` terminal for Android and iOS. The UI,
 Management v1 protocol, and Reliable UART v1 implementation remain shared; only
 the BLE transport is native.
@@ -88,7 +90,7 @@ boot?” The app runs the Pi agent loop locally; model inference uses the config
 service. This is not an on-device/offline language model.
 
 The implementation uses pi-mono's `@earendil-works/pi-agent-core` and `pi-ai`,
-pinned to 0.85.1. It exposes these tools:
+at the versions pinned in `package-lock.json`. It exposes these tools:
 
 - `read_web_page`: reads an HTTP(S) text page and returns text plus links, without
   cookies or model credentials. Limited to 512 KiB per response, 16,000 characters
@@ -136,7 +138,7 @@ there to keep both themes, headers and controls consistent across window sizes.
 
 | Mode | Serial input behavior |
 | --- | --- |
-| Full Auto | Sends commands directly, without confirmation. |
+| Full Auto | Sends routine commands directly for up to 15 minutes; recognized destructive commands and Always ask rules still require approval. |
 | Auto (recommended, default) | Sends recognized low-risk queries at a detected shell prompt; asks for approval for everything else. |
 | Manual | Shows proposed input and waits for the user to click Send. |
 
@@ -320,6 +322,13 @@ The output is written to `mobile/dist/`. In a normal browser the build continues
 to use Web Bluetooth. Inside Capacitor it uses
 `@capacitor-community/bluetooth-le`.
 
+The native plugin accepts one filter shape, so the app scans by the Linkr
+Management Service. That finds every current board whatever name the owner
+gave it, but an old NUS-only board (fixed `Linkr BLE UART...` name, no
+Management Service) is deliberately out of scope on native: reach it with the
+Web build in Chrome/Edge or with the desktop TUI/CLI, which can scan for both
+shapes.
+
 ## Generate native projects
 
 ```sh
@@ -360,9 +369,12 @@ The first release is intentionally foreground-only. Do not add iOS
 `bluetooth-central` background mode until disconnect/reconnect and power behavior
 have been tested on real hardware.
 
-For a new host, hold Bee GPIO1 to GND before connecting and accept OS pairing.
-Android checks the existing bond and creates one only when absent; iOS handles
-pairing on encrypted GATT reads. Existing bonds reconnect without GPIO1.
+For a new host on C3/C5, hold GPIO1 to GND before connecting and accept OS
+pairing. WROOM ships with pairing authorization disabled, so no GPIO4 press is
+needed; GPIO4 is used only when
+`CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=y`. Android checks the existing bond
+and creates one only when absent; iOS handles pairing on encrypted GATT reads.
+Existing bonds reconnect without the pairing GPIO.
 See [pairing and recovery](../docs/BLE_PAIRING.md) for lost keys, the eight-host
 limit, factory reset, and required real-device acceptance checks.
 

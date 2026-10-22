@@ -43,7 +43,7 @@ AI 设置现在提供核实、绑定、解除和重新生成入口。通过 BLE 
 
 ### 2026-09-09 目标机记忆实机复核
 
-- Linkr BLE UART-3 已建立加密连接，管理通道报告 `security=2`。
+- Linkr BLE UART-3（当时的旧名，现为 `Linkr Bee XXXX`）已建立加密连接，管理通道报告 `security=2`。
 - 绑定操作读取并保留 Q8B 已有的 `/var/lib/linkr/device-id`，串口命令退出码为 0；Bee 对 `@linkr target=<UUID>` 返回成功。Agent 的 `get_device_status` 读取到同一 UUID 和 `verified: true`。
 - 首次历史档案为空；经批准执行一次只读基础探测，返回 Radxa Dragon Q8B、Ubuntu 26.04.1、内核及工具清单，退出码为 0。本次已有 ID，未触发 sudo 密码流程。
 - 主动断开后，连续两次重连返回 `Bluetooth Device is no longer in range`。重新选择设备恢复连接后，新会话自动读取一次目标 ID，退出码为 0，UUID 与 Bee 保存值匹配；未自动执行完整设备探测。

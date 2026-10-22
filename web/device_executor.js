@@ -1,6 +1,7 @@
 import { requiresInputApproval } from "./agent_execution_policy.js";
 import { parseDeviceProfile } from "./device_profile.js";
 import { inspectSerialConsole } from "./serial_console.js";
+import { inputFingerprint } from "./agent_task_state.js";
 
 const cancelled = () => new Error("Operation cancelled. Do not retry automatically.");
 
@@ -18,6 +19,7 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
   let modeExpiresAt = 0;
   let modeTimer = null;
   let nextId = 0;
+  const executorId = crypto.randomUUID();
   let active = null;
   const records = [];
   let profile = null;
@@ -237,6 +239,9 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
           toolProbe.some(name => typeof name !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.+-]{0,63}$/.test(name)))) {
         throw new Error('Invalid capability probe names.');
       }
+      // Hash the requested operation before wrapping it with a fresh exit token.
+      // A reloaded executor can reuse serial-1; executorId prevents false matches.
+      const requestedInput = {text:args.text, appendEnter:args.appendEnter};
       let completionToken;
       if (args.trackExit) {
         if (status.inputPending || consoleState().kind !== "shell" || !args.appendEnter) {
@@ -247,7 +252,7 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
         args = { text: `sh -c ${quoted}; printf '\\n%s:%s\\n' '${completionToken}' "$?"`, appendEnter: true };
         if (args.text.length > 2048) throw new Error("Tracked command is too long after shell quoting.");
       }
-      const record = { profileProbe, toolProbe:toolProbe?.slice(), download, completionToken, id: `serial-${++nextId}`, sessionId: status.sessionId, inputRevision: status.inputRevision,
+      const record = { executorId, profileProbe, toolProbe:toolProbe?.slice(), download, completionToken, id: `serial-${++nextId}`, sessionId: status.sessionId, inputRevision: status.inputRevision,
         payload: prepareInput(args), mode, console: consoleState(), state: "proposed", delivery: "not-sent",
         executionStatus: "unknown", createdAt: new Date().toISOString(), evidence: "", observation: "no-output" };
       const controller = new AbortController();
@@ -275,6 +280,8 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
             publish(record);
           });
         }
+        check(record, controller.signal);
+        record.requestFingerprint = await inputFingerprint(requestedInput);
         check(record, controller.signal);
         // Close older observations before another command can contribute output.
         observe();

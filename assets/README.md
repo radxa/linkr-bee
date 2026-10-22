@@ -1,4 +1,8 @@
-# Linkr Bee logo assets
+# Linkr Bee visual assets
+
+[Project overview](../README.md) | [User guide](../docs/USAGE.md) | [Documentation](../docs/README.md)
+
+## Logos
 
 | File | Use |
 | --- | --- |
@@ -8,12 +12,44 @@
 | `linkr-bee-mark.svg` | Icon-only mark, transparent, for dark surfaces |
 | `linkr-bee-mark-light.svg` | Icon-only mark, darker green, for light surfaces |
 | `linkr-bee-logo-concept.png` | Legacy concept sheet from the previous mark, kept for reference |
-| `screenshots/linkr-bee-terminal-desktop.jpg` | Desktop terminal-first layout |
-| `screenshots/linkr-bee-terminal-controls.jpg` | Desktop layout with connection and settings panel |
-| `screenshots/linkr-bee-terminal-mobile.jpg` | Compact mobile terminal layout |
 
 Web assets live with the app: `web/favicon.svg` is the same artwork on a
 rounded tile, and the topbar inlines the mark so it inherits `currentColor`.
+
+## Screenshots
+
+| Layout | English UI | Chinese UI |
+| --- | --- | --- |
+| Desktop terminal | [desktop-en](screenshots/linkr-bee-terminal-desktop-en.jpg) | [desktop](screenshots/linkr-bee-terminal-desktop.jpg) |
+| Serial settings | [controls-en](screenshots/linkr-bee-terminal-controls-en.jpg) | [controls](screenshots/linkr-bee-terminal-controls.jpg) |
+| Phone-width terminal | [mobile-en](screenshots/linkr-bee-terminal-mobile-en.jpg) | [mobile](screenshots/linkr-bee-terminal-mobile.jpg) |
+
+English introductions must use the `-en.jpg` captures. The original filenames are
+reserved for the Chinese README and user guide; do not share a Chinese screenshot
+between language editions. Screenshot links in this asset inventory are references,
+not an embedded cross-language gallery.
+
+The images show the current shared Web UI with sample UART output in a
+disconnected retained-transcript state. They do not demonstrate a live BLE session,
+native-app acceptance, or measured target behavior. The capture uses clean browser
+contexts without API keys, user conversations, or real target data.
+
+To regenerate all six images, install the dependencies in `mobile/`, start the
+static server, and run the capture in a second terminal:
+
+```sh
+# Terminal 1, from the repository root
+tools/serve_web.sh
+
+# Terminal 2
+node tools/capture_docs_screenshots.mjs
+```
+
+The script uses the existing Playwright dependency and its installed Chromium,
+falling back to Google Chrome. Set `PLAYWRIGHT_CHROMIUM_EXECUTABLE` to choose a
+browser binary, or pass a different local URL as the script's first argument.
+Desktop captures use a 1440 x 900 viewport; phone captures use 430 x 932. Both use
+a 2x pixel scale. English visible translation labels are checked before capture.
 
 ## proposals/
 

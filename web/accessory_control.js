@@ -22,12 +22,16 @@ export const ACCESSORY_LIMITS = {
   ssidMax: 32,
   passwordMax: 64,
   webdavUrlMax: 256,
+  /* The firmware stores the advertised name in 29 UTF-8 bytes, not characters:
+   * a Chinese name is three bytes per ideograph. */
+  bleNameMaxBytes: 29,
 };
 
 export const DIAGNOSTICS_COMMAND = "@i?";
 export const UART_QUERY_COMMAND = "@u?";
 export const WIFI_QUERY_COMMAND = "@w?";
 export const WEBDAV_QUERY_COMMAND = "@d?";
+export const BLE_NAME_QUERY_COMMAND = "@n?";
 
 function invalid(reason) {
   throw new Error(reason);
@@ -74,6 +78,30 @@ export function webdavCommand({ action = "on", url } = {}) {
   if (!/^https?:\/\//i.test(target)) invalid("url must start with http:// or https://");
   if (/[\s\x00-\x1f\x7f]/.test(target)) invalid("url must not contain whitespace or control characters");
   return `@d=${target}`;
+}
+
+/* The advertised BLE name is display metadata, not an identity: the TUI and Web
+ * clients still verify the Management Service and Device ID. Restoring the
+ * default uses the dedicated command so the firmware regenerates the
+ * hardware-MAC suffix instead of the UI trying to guess it. */
+export function bleNameCommand({ name, reset = false } = {}) {
+  if (reset) return "@n default";
+  // Trim only the four ASCII bytes the firmware trims; String.trim() would
+  // also remove NBSP and U+3000, making the same command store a different
+  // name depending on which host sent it.
+  const value = String(name ?? "").replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, "");
+  if (!value) invalid("name is required");
+  // The firmware's reject set: C0, DEL, C1, and the two Unicode line
+  // separators. Keeping it in step here means a name the board would refuse
+  // is stopped before it leaves the browser.
+  if (/[\x00-\x1f\x7f-\x9f\u2028\u2029]/.test(value)) {
+    invalid("name must not contain control characters");
+  }
+  const bytes = new TextEncoder().encode(value).length;
+  if (bytes > ACCESSORY_LIMITS.bleNameMaxBytes) {
+    invalid(`name must be at most ${ACCESSORY_LIMITS.bleNameMaxBytes} UTF-8 bytes`);
+  }
+  return `@n=${value}`;
 }
 
 /* The WiFi password travels in the command, so anything shown to the user or
@@ -147,6 +175,38 @@ export function parseWebdavStatus(text) {
   return { state: match[1].toLowerCase(), url: (match[2] || "").trim() };
 }
 
+/* Query replies append "custom=yes|no"; set and reset replies do not. The name
+ * itself may contain spaces, so only the fixed suffix is removed and the
+ * remaining text is kept verbatim. A write's reply is parsed with
+ * `query: false`: a name that itself ends in " custom=yes" must survive. */
+export function parseBleName(text, { query = false } = {}) {
+  const line = String(text ?? "")
+    .split(/\r?\n/)
+    .find((candidate) => /\bOK\s+name=/i.test(candidate)) || "";
+  if (!line) return null;
+  const prefix = line.match(/\bOK\s+name=/i);
+  if (!prefix) return null;
+  let value = line.slice(prefix.index + prefix[0].length).replace(/\r$/, "");
+  let custom = null;
+  if (query) {
+    const suffix = value.match(/ custom=(yes|no)$/i);
+    if (suffix) {
+      custom = suffix[1].toLowerCase() === "yes";
+      value = value.slice(0, suffix.index);
+    }
+  }
+  if (!value) return null;
+  return { name: value, custom };
+}
+
+/* A device name comes from the radio, not from us: strip control bytes before
+ * it reaches a terminal line, so a nearby device cannot inject escape
+ * sequences into the journal. */
+export function printableDeviceName(name, fallback = "") {
+  const text = String(name ?? "").replace(/[\x00-\x1f\x7f-\x9f]/g, "");
+  return text || String(fallback ?? "");
+}
+
 /* `@i?` answers with several "@info <group> key=value …" frames terminated by
  * "@info done"; the app accumulates them while this module only shapes them. */
 export function parseInfoGroups(lines) {
@@ -184,6 +244,8 @@ export function accessoryChangeSummary(command, lang = "en") {
   if (text === "@w off") return zh ? "断开 WiFi 并清除当前配置" : "Disconnect WiFi and clear the current configuration";
   if (text.startsWith("@d=")) return zh ? `启用日志上传到 ${text.slice(3)}` : `Enable log upload to ${text.slice(3)}`;
   if (text === "@d off") return zh ? "关闭 WebDAV 日志上传" : "Disable WebDAV log upload";
+  if (text.startsWith("@n=")) return zh ? `把 BLE 名称改为「${text.slice(3)}」` : `Set the BLE name to "${text.slice(3)}"`;
+  if (text === "@n default") return zh ? "恢复按 MAC 生成的默认 BLE 名称" : "Restore the hardware-MAC default BLE name";
   return text;
 }
 

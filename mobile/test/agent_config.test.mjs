@@ -208,8 +208,9 @@ test("a context window too small for the assistant's own prompt is reported as t
   // Saving more room for output lowers the floor, so a deliberate small output
   // can make a small window work rather than being warned about forever.
   assert.equal(minimumUsefulContextWindow(512) < minimumUsefulContextWindow(), true);
-  assert.equal(isContextWindowTight(10000, 512), false);
-  assert.equal(isContextWindowTight(10000, 0), true);
+  const smallOutputWindow = minimumUsefulContextWindow(512);
+  assert.equal(isContextWindowTight(smallOutputWindow, 512), false);
+  assert.equal(isContextWindowTight(smallOutputWindow, 0), true);
   assert.ok(minimumUsefulContextWindow() > AGENT_FIXED_CONTEXT_TOKENS, "the floor covers the fixed part plus output");
 });
 

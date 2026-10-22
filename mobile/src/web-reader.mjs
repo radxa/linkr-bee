@@ -14,7 +14,10 @@ export function extractWebPage(source, url, contentType) {
   doc.querySelectorAll("script,style,noscript,iframe,template,svg").forEach(node => node.remove());
   const links = [];
   const seen = new Set();
-  for (const anchor of doc.querySelectorAll("a[href]")) {
+  const primary = doc.querySelector("main,article") || doc.body;
+  // Large documentation menus must not consume the link budget before the
+  // page's own references and next chapter are reached.
+  for (const anchor of [...primary.querySelectorAll("a[href]"), ...doc.querySelectorAll("a[href]")]) {
     try {
       const href = webUrl(anchor.getAttribute("href"), url);
       if (!seen.has(href)) {
@@ -65,7 +68,9 @@ export async function readWebPage({ url, offset = 0, limit = 16000, find, signal
     source += decoder.decode();
     const finalUrl = webUrl(response.url || url);
     const page = extract(source, finalUrl, contentType);
-    const text = page.text.replace(/[\t ]+/g, " ").replace(/\n\s*\n/g, "\n\n").trim();
+    // Raw Markdown/MDX and config examples need their original indentation.
+    const text = contentType.includes("html")
+      ? page.text.replace(/[\t ]+/g, " ").replace(/\n\s*\n/g, "\n\n").trim() : page.text;
     const matchIndex = find === undefined ? null : text.toLowerCase().indexOf(find.toLowerCase(), offset);
     const start = Math.min(text.length, find === undefined ? offset : matchIndex < 0 ? text.length : Math.max(offset,matchIndex-200));
     const nextOffset = Math.min(text.length,start+limit);

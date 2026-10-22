@@ -56,6 +56,13 @@ int main(void) {
  // Disconnect and handle reuse cannot replay an older connection's data.
  rx(0,&ltk); rx(0,&acl[1]); rx(0,&disc);
  assert(acl[1].freed && pending_handle==UINT16_MAX);
+ // A disconnect ends the quarantine whatever handle it names: with the link
+ // gone the quarantined distribution packets can never be used, and gating on
+ // the handle leaked up to PENDING_MAX buffers for the rest of the session.
+ rx(0,&ltk); rx(0,&acl[2]); assert(pending_count==1);
+ d[4]=2; rx(0,&disc);
+ assert(pending_count==0 && acl[2].freed && pending_handle==UINT16_MAX);
+ d[4]=1;
  // Bounded buffering; unrelated handle events cannot release it.
  for(int i=0;i<5;i++) acl[i].freed=0;
  rx(0,&ltk); for(int i=0;i<5;i++) rx(0,&acl[i]);

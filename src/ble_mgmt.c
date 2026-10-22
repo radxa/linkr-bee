@@ -333,8 +333,12 @@ static void tx_message_send(struct linkr_mgmt_tx_message *message)
 	uint16_t sent;
 	int err;
 
-	mtu_payload = MIN((uint16_t)(bt_gatt_get_mtu(message->conn) - 3),
-			  (uint16_t)sizeof(fragment));
+	uint16_t mtu = bt_gatt_get_mtu(message->conn);
+
+	/* Clamp before subtracting: an unexchanged MTU reads back as 0 and
+	 * `0 - 3` in uint16_t wraps to 65533, which the MIN below would then
+	 * carry into the fragment size. */
+	mtu_payload = MIN(mtu > 3 ? mtu - 3 : 1, (uint16_t)sizeof(fragment));
 	if (mtu_payload < sizeof(*header)) {
 		LOG_WRN("Management ATT payload too small: %u", mtu_payload);
 		return;

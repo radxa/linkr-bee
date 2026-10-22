@@ -1,20 +1,45 @@
 # Linkr Bee documentation
 
-These documents are for people building, integrating, or maintaining Linkr Bee.
-If you just want to use the accessory, start with the project README instead:
-[English](../README.md) · [中文](../README.zh-CN.md).
+[Project overview](../README.md) | [Chinese documentation](README.zh-CN.md)
 
-| Document | Audience | Contents |
+## Start here
+
+| Document | What you will find |
+| --- | --- |
+| [Project README](../README.md) | Product overview, client choices, wiring, first connection, and troubleshooting |
+| [User guide](USAGE.md) | English interface screenshots, terminal controls, phone/tablet behavior, assistant, LAN, and logs |
+| [Rust CLI / TUI](../tools/linkr-tui/README.md) | Desktop terminal, scripted requests, resident sessions, and host implementation |
+| [Android / iOS](../mobile/README.md) | Native BLE packaging, platform setup, and shared assistant implementation |
+| [HarmonyOS NEXT](../harmonyos/README.md) | DevEco build, signing, emulator coverage, and remaining real-device checks |
+
+The English README and user guide use English-language interface captures.
+Chinese interface captures are kept in the [Chinese user guide](USAGE.zh-CN.md).
+Screenshots are UI previews with sample output, not hardware acceptance evidence.
+
+## Build and integrate
+
+| Document | Language | What you will find |
 | --- | --- | --- |
-| [Project README](../README.md) · [中文](../README.zh-CN.md) | Users | What Linkr Bee is for, what it does, setup, everyday use, and troubleshooting |
-| [Development guide](DEVELOPMENT.md) | Firmware and client developers | Build, flash, UART integration, test modes, terminal tools, validation status, and Kconfig |
-| [开发指南](DEVELOPMENT.zh-CN.md) | 固件与客户端开发者 | 构建、刷写、UART 集成、测试模式、终端工具、验证状态与 Kconfig |
-| [BLE accessory API v1](LINKR_BLE_API.zh-CN.md) | Linkr and third-party integrators | GATT services, framed requests, Reliable UART, events, and acceptance checks |
-| [BLE pairing / 蓝牙配对](BLE_PAIRING.md) | Users and client developers | GPIO1 authorization, persistent bonds, client steps, and recovery |
-| [Hardware requirements](HARDWARE.md) | Board and hardware engineers | SoC, pinout, electrical requirements, test points, and production notes |
-| [WiFi/BLE coexistence findings](WIFI_DEBUG_FINDINGS.md) | Firmware maintainers | Reproduction evidence, Zephyr patches, and regression checks |
-| [Agent validation](AGENT_VALIDATION.zh-CN.md) | Firmware and client developers | Task recovery, device profiles, and what still needs hardware acceptance |
-| [Agent capability and roadmap](AGENT_ROADMAP.zh-CN.md) | Product and client developers | Current tool surface, known gaps, and the planned phases |
-| [Android/iOS client](../mobile/README.md) | Mobile developers | Capacitor build and native platform requirements |
-| [HarmonyOS NEXT client](../harmonyos/README.md) | HarmonyOS developers | DevEco build, signing, emulator status, and hardware-test boundary |
-| [HarmonyOS bridge protocol](../harmonyos/BRIDGE_PROTOCOL.md) | Client implementers | ArkWeb-to-ArkTS JSON bridge contract |
+| [Development guide](DEVELOPMENT.md) | English | Firmware build/flash, Kconfig, terminal tools, protocols, and test modes |
+| [Development guide](DEVELOPMENT.zh-CN.md) | Chinese | Chinese edition of the development guide |
+| [Hardware requirements](HARDWARE.md) | Chinese | Pinout, electrical requirements, test points, and production notes |
+| [BLE accessory API v1](LINKR_BLE_API.zh-CN.md) | Chinese | GATT services, framed requests, Reliable UART, and events |
+| [BLE pairing and recovery](BLE_PAIRING.md) | Chinese | Pairing GPIO authorization (GPIO1 on C3/C5; WROOM optional GPIO4, off by default), persistent bonds, client steps, and recovery |
+| [HarmonyOS bridge protocol](../harmonyos/BRIDGE_PROTOCOL.md) | English | ArkWeb-to-ArkTS JSON bridge contract |
+| [Visual assets](../assets/README.md) | English | Logos, screenshot languages, and reproducible capture instructions |
+
+## Design and validation records
+
+These records describe design decisions, investigations, and validation limits;
+they are not substitutes for checking the current hardware and firmware.
+
+| Document | Language | Topic |
+| --- | --- | --- |
+| [Product scope](../PRODUCT.md) | Chinese | Product requirements and scope |
+| [Design notes](../DESIGN.md) | Chinese | Interface and interaction design |
+| [WiFi/BLE coexistence findings](WIFI_DEBUG_FINDINGS.md) | Chinese | Reproduction evidence and radio regression checks |
+| [Bridge queue findings](BRIDGE_QUEUE_FINDINGS.md) | Chinese | Buffering and bridge behavior |
+| [Agent validation](AGENT_VALIDATION.zh-CN.md) | Chinese | Verified behavior and remaining hardware acceptance |
+| [Agent capability and roadmap](AGENT_ROADMAP.zh-CN.md) | Chinese | Current tool surface and planned phases |
+| [Agent skills](AGENT_SKILLS.zh-CN.md) | Chinese | Skill discovery, use, and boundaries |
+| [Agent tasks](AGENT_TASKS.zh-CN.md) | Chinese | Task records and recovery behavior |

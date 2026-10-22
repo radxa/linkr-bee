@@ -1,14 +1,15 @@
 # Linkr Bee development guide
 
-> [Project overview](../README.md) | [中文开发指南](DEVELOPMENT.zh-CN.md) | [BLE accessory API guide (Chinese)](LINKR_BLE_API.zh-CN.md)
+> [Project overview](../README.md) | [User guide](USAGE.md) | [Documentation](README.md) | [中文开发指南](DEVELOPMENT.zh-CN.md) | [BLE accessory API guide (Chinese)](LINKR_BLE_API.zh-CN.md)
 
 This guide covers firmware builds, flashing, UART integration, control commands,
 test modes, client tooling, protocols, and Kconfig options.
 
-Zephyr application for an ESP32-C3/C5 BLE serial bridge. The first milestone is a
+Zephyr application for an ESP32-C3/C5/WROOM BLE serial bridge. The first milestone is a
 plain Bluetooth LE UART window:
 
-- BLE peripheral advertising as `Linkr BLE UART-3`
+- BLE peripheral advertising as `Linkr Bee XXXX`, where `XXXX` is the last
+  four hex digits of the hardware MAC (all boards; `@n` can replace it)
 - Nordic UART Service compatible UUIDs
 - BLE RX characteristic writes are forwarded to the selected UART
 - UART RX bytes are forwarded through BLE TX notifications
@@ -26,9 +27,10 @@ repository owns the accessory firmware and reference clients.
   - [GitHub Actions Build](#github-actions-build)
 - [UART Selection](#uart-selection)
 - [SBC UART Settings](#sbc-uart-settings)
+  - [On-demand UART Autobaud (ESP32-WROOM)](#on-demand-uart-autobaud-esp32-wroom)
 - [WiFi and WebDAV Log Upload](#wifi-and-webdav-log-upload)
   - [UART over WebSocket (LAN Bridge)](#uart-over-websocket-lan-bridge)
-  - [GPIO1 Pairing, Persistence, and Factory Reset](#gpio1-pairing-persistence-and-factory-reset)
+  - [Pairing GPIO, Persistence, and Factory Reset](#pairing-gpio-persistence-and-factory-reset)
 - [Control Commands Reference](#control-commands-reference)
 - [Test Options](#test-options)
 - [BLE Protocol](#ble-protocol)
@@ -70,8 +72,11 @@ tools/serve_web.sh  # Open http://127.0.0.1:8765/
 
 - Firmware: ESP32-C3 DevKitM, DevKitC, Super Mini, and ESP32-C5 DevKitC
 - Zephyr: **v4.4.1**
-- Single firmware feature set: BLE UART bridge, WiFi station control,
-  anonymous HTTP WebDAV log upload, and UART-over-WebSocket LAN access
+- One firmware source tree with BLE UART bridge, WiFi station control,
+  anonymous HTTP WebDAV log upload, and UART-over-WebSocket LAN access.
+  WebDAV is enabled in the default C3/C5 builds; the ESP32-WROOM build disables
+  it for DRAM (`CONFIG_LINKR_BLE_BRIDGE_WEBDAV=n`), and the host reports the
+  device's refusal on that board instead of hiding the command.
 
 ## Build
 
@@ -114,12 +119,22 @@ west build -b esp32c5_devkitc/esp32c5/hpcore linkr-bee
 
 ### GitHub Actions build
 
-The workflow in `.github/workflows/build.yml` builds the default WiFi + BLE
-configuration for `esp32c3_supermini`, `esp32c3_devkitm`, `esp32c3_devkitc`, and
-`esp32c5_devkitc/esp32c5/hpcore`. It runs on pushes to `main`, version tags,
-pull requests, and manual dispatches using Zephyr
-v4.4.1 with Zephyr SDK 1.0.1. To keep runner disk usage bounded, it installs
-only the `riscv64-zephyr-elf` toolchain instead of the full Zephyr CI image.
+The workflow in `.github/workflows/build.yml` builds each board's default
+WiFi + BLE configuration for `esp32c3_supermini`, `esp32c3_devkitm`,
+`esp32c3_devkitc`, `esp32c5_devkitc/esp32c5/hpcore`, and
+`esp32_devkitc/esp32/procpu` (ESP32-WROOM-32). It runs on pushes to `main`,
+pull requests, and manual dispatches using Zephyr v4.4.1 with Zephyr SDK
+1.0.1. To keep runner disk usage bounded, each job installs only the
+toolchain its board needs — `riscv64-zephyr-elf` for the RISC-V targets and
+`xtensa-espressif_esp32_zephyr-elf` for the WROOM — instead of the full Zephyr
+CI image.
+
+A project release starts from a `v*` tag. `.github/workflows/release.yml`
+reuses this workflow and the desktop matrix, then
+`tools/assemble_release.py` checks the version carried by each artifact and
+assembles the firmware ZIPs, Web package, APK and desktop archives. A manual
+release dispatch can run the same assembly as a dry run from a tag without
+touching the GitHub release.
 
 Download the artifact matching the target from the completed GitHub Actions
 run. The flashable images are:
@@ -129,6 +144,7 @@ linkr-bee-esp32c3-supermini.bin
 linkr-bee-esp32c3-devkitm.bin
 linkr-bee-esp32c3-devkitc.bin
 linkr-bee-esp32c5-devkitc.bin
+linkr-bee-esp32-wroom-32.bin
 ```
 
 On macOS or Linux, extract the artifact, install
@@ -146,9 +162,9 @@ If more than one serial device is connected, select it explicitly:
 ```
 
 The script infers the target from the standard image name and writes C3 at
-`0x0` or C5 at `0x2000` without a full-chip erase. Only image sectors are
-rewritten, so normal upgrades preserve the BLE identity and saved
-configuration. Use the board-specific factory-reset input when those settings
+`0x0`, C5 at `0x2000`, or WROOM at `0x1000` without a full-chip erase. Only
+image sectors are rewritten, so normal upgrades preserve the BLE identity and
+saved configuration. Use the board-specific factory-reset input when those settings
 must be cleared. The artifact also contains `FLASHING.txt`,
 `firmware.json`, the ELF, linker map, final Kconfig, runner metadata, and
 `SHA256SUMS` for debugging and traceability. The workflow fails if the default
@@ -206,12 +222,57 @@ OK uart=115200,8,N,1,none
 ERR format: @u=115200,8,n,1,n
 ```
 
+### On-demand UART autobaud (ESP32-WROOM)
+
+The WROOM build supports `CONFIG_LINKR_BLE_BRIDGE_UART_AUTOBAUD`, but its
+board default leaves the option off (`=n`) so a release image never rewrites
+the UART settings on its own. Enable it explicitly in the build; even then the
+detector is idle at boot and does not follow the line rate until asked:
+
+```text
+@a?          query: OK autobaud state=idle|running baud=... timeout_ms=5000
+@a           start one pass (also @a start)
+@a stop      cancel the running pass
+```
+
+A pass samples one 400 ms RMT window at a time and requires two agreeing
+windows before it calls `uart_configure()`. It ends on a confirmed match
+(`applied` or `unchanged`), a failed reconfigure (`error`), no measurable
+capture for 5 seconds (`timeout`), or `@a stop` (`stopped`). Every capture,
+and every pin sample that finds the line active, resets the 5-second clock,
+so a line that is still talking keeps the pass alive even when its gaps are
+too short for the receiver to begin a capture. A 60-second hard deadline still
+bounds a line that never goes quiet. A completed pass is never restarted
+automatically.
+
+The start response is non-final. The result arrives later as a type=3
+Management event with the same request ID and `FINAL`:
+
+```text
+@event autobaud state=applied old=115200 new=1500000
+@event autobaud state=unchanged old=115200 new=115200
+@event autobaud state=timeout old=115200 new=115200
+@event autobaud state=stopped old=115200 new=115200
+@event autobaud state=error old=115200 new=57600
+```
+
+The WROOM overlay maps the active-low `linkr-autobaud` key to GPIO13. Pressing
+it starts exactly the same one-shot pass, with no request ID; that pass only
+logs its result. GPIO2 remains the board's active-low activity LED, so the LED
+and key do not share a pin. Do not connect a key from GPIO2 to GND: GPIO2 is an
+output, and the LED is still connected, so that would short the output. GPIO13
+has no boot strapping function, but do not hold the key during reset: the pass
+would start as soon as the firmware boots.
+
 ## WiFi and WebDAV log upload
 
-The single supported firmware always includes WiFi, WebDAV, and WebSocket
-support. The WiFi radio stays off until the user sends `@w=ssid,pass`, so an
-unprovisioned unit still behaves as a BLE UART bridge without requiring a
-separate image.
+The firmware source includes WiFi, WebDAV, and WebSocket support. WebDAV is
+enabled in the default ESP32-C3/C5 builds; the ESP32-WROOM build disables it
+because its DRAM budget is too small (`CONFIG_LINKR_BLE_BRIDGE_WEBDAV=n`). The
+feature is still part of the protocol, so the host keeps the command and shows
+the board's own refusal on a build where it is absent. The WiFi radio stays off
+until the user sends `@w=ssid,pass`, so an unprovisioned unit still behaves as a
+BLE UART bridge without requiring a separate image.
 
 WiFi credentials are RAM-only by default and are discarded on reboot. Set
 `CONFIG_LINKR_BLE_BRIDGE_PERSIST_CREDENTIALS=y` only on production devices
@@ -221,7 +282,7 @@ explicit option, saved credentials reconnect on boot. The anonymous WebDAV URL
 and the upload boot counter are persisted independently so upload filenames do
 not collide after reboot.
 
-A normal build already includes it:
+A normal C3 build already includes it:
 
 ```sh
 west build -b esp32c3_supermini linkr-bee
@@ -286,18 +347,21 @@ The shipped configuration enables
 session disconnects, UART capture continues feeding WebSocket clients and the
 log uploader; bytes discarded from BLE delivery are not replayed on reconnect.
 
-### GPIO1 pairing, persistence, and factory reset
+### Pairing GPIO, persistence, and factory reset
 
 BLE uses LE Secure Connections Just Works pairing, bonding and encrypted GATT
-access. Hold GPIO1 low before a new host requests pairing. Existing bonds
-restore encryption without GPIO1; replacing lost host keys requires GPIO1 again.
-The default is eight bonds with no automatic eviction. A full table requires
-factory reset before adding more hosts. See [pairing and recovery](BLE_PAIRING.md).
+access. C3/C5 hold GPIO1 low before a new host requests pairing. WROOM ships
+with `CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=n`, so no GPIO press is needed;
+if that option is enabled, GPIO4 is the pairing input. Existing bonds restore
+encryption without the pairing GPIO; replacing lost host keys requires it again
+when the check is enabled. The default is eight bonds with no automatic
+eviction. A full table requires factory reset before adding more hosts. See
+[pairing and recovery](BLE_PAIRING.md).
 
 | Item | Default / persistence rule | Clear or transfer |
 | --- | --- | --- |
 | BLE bonds | Up to eight host key records persisted by `CONFIG_BT_SETTINGS` | Board-specific factory reset clears all bonds and other settings |
-| BLE identity/address | A random-static Linkr identity is persisted in NVS and reused across normal reboots | Board-specific factory reset generates a new identity/address so hosts do not reuse stale device-name caches |
+| BLE identity/address | A random-static Linkr identity is persisted in NVS and reused across normal reboots | Board-specific factory reset generates a new identity/address so hosts do not reuse stale caches; the default `Linkr Bee XXXX` name stays tied to the hardware MAC and does not change |
 | WiFi SSID/PSK | RAM-only by default; `CONFIG_LINKR_BLE_BRIDGE_PERSIST_CREDENTIALS=y` saves it and reconnects on boot | `@w off` disables it and disconnects; factory reset erases it |
 | WebDAV target | Anonymous URL is persisted independently of WiFi credential persistence | `@d off` disables it; factory reset erases it |
 | Upload boot ID | Persisted when the uploader reserves a new boot ID, preventing filename reuse after reboot | Factory reset erases it |
@@ -370,12 +434,80 @@ All commands support short form (fits 20-byte BLE write before MTU exchange) and
 | `@s token=<32 hex>` | `@linkr socket token=<32 hex>` | Set the LAN access token |
 | `@s token off` | `@linkr socket token off` | Disable LAN auth (unauthenticated access) |
 
+### BLE Name Commands (all boards)
+
+| Short Form | Long Form | Description |
+|------------|-----------|-------------|
+| `@n?` | `@linkr name?` | Query the current advertised name and whether it is custom |
+| `@n=<name>` | `@linkr name=<name>` | Set and persist a 1–29 byte UTF-8 name; Chinese and emoji are allowed (emoji are usually 4 bytes each) |
+| `@n default` | `@linkr name default` | Delete the custom name and restore `Linkr Bee XXXX` |
+
+`XXXX` is the last four hex digits of the factory hardware MAC (for example
+`58:BF:25:33:07:8C` becomes `078C`). Names are limited by UTF-8 bytes, not
+characters: Chinese is allowed, and emoji are valid too (a typical emoji uses
+four bytes, so seven fit in 28 bytes while eight exceed the 29-byte limit).
+The firmware trims only space, tab, CR and LF from the value, and rejects C0,
+DEL, C1 and U+2028/U+2029; hosts apply the same rule and byte count before
+sending. `@n default` is the reset form only with exactly one space after
+`@n`; `@n=default` (and `@n  default` with two spaces) sets a custom name
+literally called `default`. A query answers `OK name=<name> custom=yes|no`;
+a set or reset answers `OK name=<name>` without the provenance field, so a
+client that needs to know where the name came from queries again. For current firmware the
+name is display-only: hosts must discover the Management Service UUID and
+verify Device ID, never match on the advertised name. The TUI and Web clients
+keep one narrow compatibility exception: a pre-service device with the fixed
+`Linkr BLE UART...` name and only NUS is treated as a terminal-only legacy
+board. A `Linkr Bee...` name without the service is always refused.
+
+**The address identifies a board; the name labels it.** The owner can rename
+a board at any time, so a name is never an identity:
+
+- the board is *found* by the Management Service it advertises, and reached by
+  its BLE address;
+- the board is *named* by its own answer to `@n?`, which is what every client
+  shows. The desktop terminal asks the board as soon as a link comes up and
+  again after every rename, so a board renamed from another client is named
+  correctly on the next connection;
+- a client that is given a name that matches nothing says which boards were
+  heard and how to reach one of them by address;
+- a rename makes the board broadcast the new name: the scan response is
+  copied into the controller when advertising starts, so the firmware restarts
+  the advertising once the new name is installed.
+
+Every host client exposes the same three operations:
+
+| Host | Read | Set | Restore default |
+| --- | --- | --- | --- |
+| `bee` (TUI) | Network view → *Read name* | Network view → *Rename* | Network view → *Restore default* |
+| `bee-cli` | `--query-ble-name` / `query ble-name` | `--rename-ble NAME` / `set ble-name NAME` | `--reset-ble-name` / `set ble-name default` |
+| `bee --serve` | `{"op":"ble-name"}` | `{"op":"ble-name","name":"…"}` | `{"op":"ble-name","default":true}` |
+| `linkr_ble_terminal.py` | `--query-ble-name` | `--rename-ble NAME` | `--reset-ble-name` |
+| `linkr_ble_terminal_c` | `--query-ble-name` | `--rename-ble NAME` | `--reset-ble-name` |
+| Web / mobile | *BLE name* controls next to the device | same | same |
+
+The desktop and mobile clients ask the board first (`@n?`) and show whether the
+name is the MAC-derived default or a custom one; a write is confirmed by the
+board and read back. The C client prints the board's answer on stdout.
+
 ### UART Commands
 
 | Short Form | Long Form | Description |
 |------------|-----------|-------------|
 | `@u?` | `@linkr uart?` | Query UART settings |
 | `@u=baud,data,parity,stop,flow` | `@linkr uart=...` | Set UART mode |
+
+### Autobaud Commands (ESP32-WROOM)
+
+| Short Form | Long Form | Description |
+|------------|-----------|-------------|
+| `@a?` | `@linkr autobaud?` | Query detector state and current baud |
+| `@a` / `@a start` | `@linkr autobaud` / `@linkr autobaud start` | Start one on-demand pass |
+| `@a stop` | `@linkr autobaud stop` | Cancel the running pass |
+
+The start response is non-final; the result is a `FINAL` type=3
+`@event autobaud ...` on the same request ID. See
+[on-demand autobaud](#on-demand-uart-autobaud-esp32-wroom) for the state
+machine and GPIO13 trigger.
 
 ### Response Format
 
@@ -394,7 +526,7 @@ dropped-byte count, WiFi/IP state, and WebDAV
 queue, drop, HTTP, failure, and success counters:
 
 ```text
-@info fw version=0.2.0 zephyr=4.4.1
+@info fw version=0.1.2 zephyr=4.4.1
 @info sys uptime_ms=123456 owner=0 security=1
 @info uart dropped=0 buffer=0/16384
 @info wifi state=connected ip=ready error=0
@@ -414,11 +546,25 @@ python3 tools/linkr_ble_terminal.py --wifi MySSID,secret --query-wifi
 python3 tools/linkr_ble_terminal.py --webdav http://host/dav/
 ```
 
+The advertised BLE name is read and changed the same way on every host:
+
+```sh
+python3 tools/linkr_ble_terminal.py --query-ble-name --no-terminal
+python3 tools/linkr_ble_terminal.py --rename-ble '测试😀' --no-terminal
+python3 tools/linkr_ble_terminal.py --reset-ble-name --no-terminal
+```
+
+The name is 1–29 UTF-8 bytes and is checked on the host before anything is
+sent, so Chinese and emoji are accepted and a name the firmware would refuse
+fails without touching the radio. The change is persisted in the board's
+settings and survives a reboot; `--reset-ble-name` restores the
+MAC-derived `Linkr Bee XXXX`.
+
 Scripting and safety notes:
 
 - `--json` writes management responses and events to stdout as one JSON object
   per line, e.g.
-  `{"type":"response","requestId":1,"ok":true,"lines":["OK fw version=0.2.0"],"command":"@i?"}`.
+  `{"type":"response","requestId":1,"ok":true,"lines":["OK fw version=0.1.2"],"command":"@i?"}`.
   `@w=`/`@d=` commands are always reported as `<redacted>` in that field.
 - `--quiet` suppresses progress messages (`linkr: …`); errors and
   `loopback PASS/FAIL` still print.
@@ -429,6 +575,8 @@ Scripting and safety notes:
   `--wifi SSID,PASSWORD` still works but is visible in `ps`.
 - `--uart` is validated locally (baud 300–3000000, data 5–8, parity n/o/e,
   stop 1/2, flow n/rtscts) and fails before anything is sent to the device.
+- `--rename-ble` is validated locally too: 1–29 UTF-8 bytes, no control
+  characters, and the two name flags cannot both be given.
 - Exit codes: `0` ok, `1` error, `2` bad arguments, `3` device disconnected
   during the terminal session.
 
@@ -559,8 +707,10 @@ The host terminal prints the detected write chunk size when it connects.
 ## BLE terminal
 
 `tools/linkr_ble_terminal.py` is the current host reference client. It connects
-to a `Linkr BLE UART*` device, verifies Management API v1 and Device ID, uses
-Reliable UART for terminal bytes, and keeps management responses separate.
+to a Linkr Bee, verifies Management API v1 and Device ID, uses Reliable UART for
+terminal bytes, and keeps management responses separate. The advertised name is
+display-only; the default is `Linkr Bee XXXX`, where `XXXX` is the last four hex
+digits of the hardware MAC.
 
 Install the host dependency if needed (`--help`/`--version` do not need it):
 
@@ -586,8 +736,11 @@ A Linux-only reference implementation written in C is provided in
 `tools/linkr_ble_terminal.c`. It talks to BlueZ over the system D-Bus using
 `libdbus-1` directly, without GLib. This keeps the userspace dependency small,
 but it still requires a working Linux BLE central stack underneath it.
-The C program is currently a legacy NUS terminal; use the Python or Web client
-for Management v1 and Reliable UART integration.
+The C program speaks legacy NUS for the terminal, and Management Service v1
+for the advertised BLE name: `--query-ble-name`, `--rename-ble NAME`, and
+`--reset-ble-name` read Protocol Info and the Device ID first, and are refused
+on legacy NUS-only firmware. Use the Python or Web client for the remaining
+Management v1 controls (WiFi, WebDAV, UART) and for Reliable UART.
 
 Runtime path:
 
@@ -684,13 +837,16 @@ hciconfig -a
 ls -l /sys/class/bluetooth
 ```
 
-The legacy C terminal supports raw NUS terminal and scan/loopback workflows.
-Its old management flags are not compatible with API v1; use the Python client
+The legacy C terminal supports raw NUS terminal and scan/loopback workflows,
+and it reads and renames the advertised BLE name over Management Service v1.
+Its other management flags are not compatible with API v1; use the Python client
 for configuration and diagnostics:
 
 ```sh
 ./linkr_ble_terminal_c --loopback-test A --no-terminal
 ./linkr_ble_terminal_c --scan
+./linkr_ble_terminal_c --query-ble-name --no-terminal
+./linkr_ble_terminal_c --rename-ble 'Bench Bee' --no-terminal
 python3 tools/linkr_ble_terminal.py --query-info --no-terminal
 ```
 
@@ -748,6 +904,9 @@ Useful options:
 
 - `Ctrl-]`: exit the terminal
 - `--query-info --no-terminal`: read firmware and runtime diagnostics
+- `--query-ble-name --no-terminal`: read the advertised BLE name
+- `--rename-ble NAME --no-terminal`: set the advertised BLE name
+- `--reset-ble-name --no-terminal`: restore the MAC-derived BLE name
 - `--wifi-scan --no-terminal`: list nearby 2.4 GHz WiFi networks through the bridge
 - `--loopback-test A --no-terminal`: send `A` and require `A` back
 - `--scan --no-terminal`: list nearby BLE devices
@@ -829,10 +988,12 @@ reuse the authorization without reopening the chooser.  If the saved device is
 no longer available, the page clears it and falls back to the normal chooser on
 the next attempt.  Browsers without `getDevices()` always use the chooser.
 
-The firmware places the Management Service UUID in the primary advertising packet and
-the `Linkr BLE UART-3` name in the scan response.  The page filters the browser
-device chooser by the Management service UUID, which is more reliable than name-only
-filtering on macOS Chromium browsers.
+The firmware places the Management Service UUID in the primary advertising
+packet and the advertised name in the scan response. The default name is
+`Linkr Bee XXXX` on every board, where `XXXX` is the last four hex digits of the
+hardware MAC; `@n` can replace it with a custom name. The page filters the
+browser device chooser by the Management Service UUID, which is more reliable
+than name-only filtering on macOS Chromium browsers.
 
 Plain static hosting has no bundler, so the assistant is shipped prebuilt in
 `web/vendor/agent/`. Rebuild it after changing the agent runtime or upgrading the
@@ -929,10 +1090,10 @@ See [`mobile/README.md`](../mobile/README.md) for Android/iOS requirements and
 [`harmonyos/README.md`](../harmonyos/README.md) plus
 [`harmonyos/BRIDGE_PROTOCOL.md`](../harmonyos/BRIDGE_PROTOCOL.md) for the HarmonyOS
 host contract, debug signing, and host-side tests. The first mobile release is
-foreground-only. The firmware requires an encrypted, bonded BLE link and gates
-new pairings on GPIO1, so each new host must be authorized physically before it
-can pair; see [pairing and recovery](BLE_PAIRING.md) for the authorization and
-recovery rules.
+foreground-only. The firmware requires an encrypted, bonded BLE link. C3/C5 gate
+new pairings on GPIO1; WROOM ships with the pairing check off, and uses GPIO4
+only when `CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=y`. See
+[pairing and recovery](BLE_PAIRING.md) for the authorization and recovery rules.
 
 ---
 
@@ -987,7 +1148,7 @@ hardware.
 | Config Option | Default | Description |
 |---------------|---------|-------------|
 | `CONFIG_LINKR_BLE_BRIDGE_CONTROL_COMMANDS` | `y` | Enable management commands (`@u`, `@w`, `@d`, etc.) |
-| `CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION` | `0.2.0` | Reported firmware version |
+| `CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION` | `0.1.2` | Reported firmware version |
 
 ### Test Configuration
 

@@ -1,0 +1,529 @@
+name: Host terminal (bee)
+
+# The host client is a Rust crate under tools/linkr-tui. It has its own gates —
+# one of which cross-checks every target a Linux runner can compile for — and
+# its own release artifacts, so
+# it is a workflow of its own rather than jobs bolted onto the firmware one:
+# a TUI change should not spin up five Zephyr toolchains, and a firmware change
+# should not rebuild the host's release matrix.
+#
+# Every binary a release carries is built here, in the format its platform's
+# users reach for: `.zip` for Windows, a `.dmg` (and a `.tar.gz` beside it) for
+# macOS, `.tar.gz` and `.deb` for Linux. Tag a release with
+# `linkr-tui-v<version>`; the archives are attached to it. The tag is namespaced
+# so it cannot collide with the firmware's `v*` releases.
+
+on:
+  push:
+    # Every branch, filtered to the crate's own files: a TUI change runs these
+    # gates wherever it is pushed, a firmware-only change does not. Path filters
+    # are not evaluated for tag pushes, which is what a release wants — the tag
+    # builds whatever it points at.
+    branches:
+      - "**"
+    tags:
+      - "linkr-tui-v*"
+    paths:
+      - "tools/linkr-tui/**"
+      - ".github/workflows/linkr-tui.yml"
+  pull_request:
+    paths:
+      - "tools/linkr-tui/**"
+      - ".github/workflows/linkr-tui.yml"
+  workflow_dispatch:
+  # Project releases (v*) call this workflow for the desktop matrix. The
+  # called workflow's own release job is gated on a linkr-tui-v* tag, so the
+  # project release job can attach the same archives to its own release.
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linkr-tui-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # `cargo check` links nothing, but libdbus-sys still asks pkg-config for the
+  # target's flags — on a cross target that question must be allowed to cross.
+  PKG_CONFIG_ALLOW_CROSS: "1"
+
+defaults:
+  run:
+    # Commands default to the crate, the way they are run by hand — the one
+    # firmware step says so when it reaches up to the repository root instead.
+    working-directory: tools/linkr-tui
+
+jobs:
+  gates:
+    name: Gates (fmt · clippy · test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # rust-toolchain.toml names the channel, the components and the ten
+      # targets, so there is nothing to install here beyond honouring it.
+      - name: Show the toolchain
+        run: |
+          set -euo pipefail
+          cargo --version
+          rustc --version
+
+      # The licence page and the shipped notice are generated from Cargo.lock
+      # and cargo metadata. A dependency bump that forgets to regenerate them
+      # is a stale compliance artefact, so the gate fails here rather than
+      # after the archives are built.
+      - name: Check the generated licence page
+        run: python3 dev/gen-licenses.py --check
+
+      # What the tests need before they run, so the gate measures the suite
+      # rather than the runner: every test binary links the host's libdbus,
+      # and the completion tests are written for fish and zsh — they skip
+      # themselves where a shell is absent, which hides coverage quietly.
+      - name: Install the test dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y libdbus-1-dev pkg-config fish zsh
+
+      - name: Cache the build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tools/linkr-tui -> target
+
+      - name: Style
+        run: cargo fmt --check
+
+      - name: Lints, warnings are errors
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Tests, headless
+        # `--locked`: Cargo.lock is committed, and a gate that silently updates
+        # it would be testing a dependency set nobody reviewed.
+        run: cargo test --locked
+
+      # The second face of the same program. The `cli/` archives are built with
+      # the interface feature off, which is where a bin notices what the
+      # interface was holding up — so this face gets its own lint-and-test pass
+      # rather than being trusted because the other one is green.
+      - name: Lints of the CLI build, warnings are errors
+        run: cargo clippy --all-targets --locked --no-default-features --features cli -- -D warnings
+
+      - name: Tests of the CLI build
+        run: cargo test --locked --no-default-features --features cli
+
+      # The third face: the interface without the request flags around it. A
+      # CLI-only build notices what the interface was holding up; this is the
+      # reverse — the interface on its own, and the only build in which the
+      # request path is not compiled at all.
+      - name: Lints of the interface build, warnings are errors
+        run: cargo clippy --all-targets --locked --no-default-features --features tui -- -D warnings
+
+      - name: Tests of the interface build
+        run: cargo test --locked --no-default-features --features tui
+
+      # Firmware is tested by the firmware workflow; this workflow is TUI/CLI
+      # only and does not compile or test src/ or tests/.
+
+  targets:
+    name: Cross targets
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # The C in the dependency tree (aws-lc-sys) is compiled for the target,
+      # check or no check, so the cross C compilers are what this job needs.
+      # The libdbus is only for the probe — a check links nothing, but
+      # libdbus-sys still asks pkg-config for the Linux targets' flags.
+      # `nasm` is for the 32-bit x86 targets: aws-lc's i386 assembly is NASM
+      # source, and its absence is a build failure, not a fallback to C.
+      - name: Install the cross compilers
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y gcc-aarch64-linux-gnu gcc-mingw-w64-x86-64 \
+                                  gcc-mingw-w64-i686 libdbus-1-dev pkg-config nasm
+
+      - name: Cache the build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tools/linkr-tui -> target
+          key: targets
+
+      # The fourth gate: the targets a Linux runner can genuinely compile
+      # for. The other six are built for real by the package matrix — on their
+      # own systems, with the SDKs or the staged cross libraries only their leg
+      # installs — which is a stronger claim than a check. This job is the fast
+      # one, not the only one.
+      - name: Check the cross targets
+        run: |
+          set -euo pipefail
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
+                        x86_64-pc-windows-gnu i686-pc-windows-gnu; do
+            echo "::group::$target"
+            cargo check --locked --all-targets --target "$target"
+            cargo check --locked --all-targets --no-default-features --features cli \
+              --target "$target"
+            echo "::endgroup::"
+          done
+
+  package:
+    name: Package ${{ matrix.target }}
+    needs: [gates]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux on x86-64: the host this is developed on, so it is also the
+          # one whose archive is *run* before it is uploaded. It links the
+          # host's own libdbus, installed with the cross tools below.
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            native: true
+            apt: libdbus-1-dev
+            deb: true
+          # Linux on ARM and on 32-bit x86: cross builds, each with its own
+          # linker and its own staged libdbus. Both are Debian architectures
+          # (arm64, armhf, i386) as well as Rust targets, which is what the two
+          # extra columns are for.
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            apt: gcc-aarch64-linux-gnu
+            linker_var: CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER
+            linker: aarch64-linux-gnu-gcc
+            stage: true
+            deb: true
+          - os: ubuntu-latest
+            target: armv7-unknown-linux-gnueabihf
+            apt: gcc-arm-linux-gnueabihf
+            linker_var: CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER
+            linker: arm-linux-gnueabihf-gcc
+            stage: true
+            deb: true
+          - os: ubuntu-latest
+            target: i686-unknown-linux-gnu
+            apt: gcc-i686-linux-gnu nasm
+            linker_var: CARGO_TARGET_I686_UNKNOWN_LINUX_GNU_LINKER
+            linker: i686-linux-gnu-gcc
+            stage: true
+            deb: true
+          # Windows, GNU ABI: built on Linux, where mingw-w64 is one apt away.
+          # `zip` writes the archive there and `unzip` reads it back for the
+          # listing check; a Windows runner falls back to 7z and PowerShell.
+          - os: ubuntu-latest
+            target: x86_64-pc-windows-gnu
+            apt: gcc-mingw-w64-x86-64 zip unzip
+            linker_var: CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER
+            linker: x86_64-w64-mingw32-gcc
+          - os: ubuntu-latest
+            target: i686-pc-windows-gnu
+            apt: gcc-mingw-w64-i686 zip unzip nasm
+            linker_var: CARGO_TARGET_I686_PC_WINDOWS_GNU_LINKER
+            linker: i686-w64-mingw32-gcc
+          # Windows, MSVC ABI, on Windows: the ARM64 tools ship with the
+          # Visual Studio build the runner has.
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            native: true
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+          # macOS on both architectures. `macos-latest` is ARM, and Apple's
+          # clang links either, so the x86-64 build is a target swap and no more.
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            native: true
+          - os: macos-latest
+            target: x86_64-apple-darwin
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install what the link needs
+        if: matrix.apt != ''
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y ${{ matrix.apt }}
+
+      # A cross Linux leg cannot link the host's libdbus: the target's own
+      # `.pc` files are what `libdbus-sys` asks pkg-config for, and the runner
+      # has them for neither ARM nor i386. The script knows which archive
+      # carries which architecture and prints the environment; appending it to
+      # `$GITHUB_ENV` is what hands it to every step after this one.
+      - name: Stage the target's libdbus
+        if: matrix.stage
+        shell: bash
+        run: dev/stage-cross-dbus.sh "${{ matrix.target }}" >> "$GITHUB_ENV"
+
+      - name: Point cargo at the linker
+        if: matrix.linker_var != ''
+        shell: bash
+        run: echo "${{ matrix.linker_var }}=${{ matrix.linker }}" >> "$GITHUB_ENV"
+
+      - name: Cache the build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tools/linkr-tui -> target
+          key: ${{ matrix.target }}
+
+      # The layout of an archive is decided in one place, by the script, and
+      # the workflow only calls it — the same call a developer makes by hand.
+      # Both faces of the program are packaged: the interface and the CLI. The
+      # format follows the target's platform, and the Debian packages are built
+      # from the same source and the same target one line later.
+      - name: Build and package
+        shell: bash
+        run: |
+          dev/package.sh "${{ matrix.target }}"
+          dev/package.sh --cli "${{ matrix.target }}"
+          if [ "${{ matrix.deb }}" = "true" ]; then
+            dev/package-deb.sh "${{ matrix.target }}"
+          fi
+
+      # What a release carries is read back before it is uploaded: the entries
+      # of every archive, the package's own name and the binary inside it. The
+      # script knows every format and the tool each platform reads it with, so
+      # every leg is checked exactly as much as its neighbours are — a
+      # Windows-produced `.zip` used to be read by nobody.
+      - name: Check the archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for archive in dist/*; do
+            dev/check-archive.sh "$archive"
+          done
+
+      # Only the host's own target can be executed here. The rest are checked by
+      # the fact that they linked, which is the most this runner can say.
+      - name: Run the packaged binaries
+        if: matrix.native
+        shell: bash
+        run: |
+          set -eu
+          rm -rf /tmp/smoke && mkdir -p /tmp/smoke
+          mounted=""
+          cleanup() {
+            for mount in $mounted; do
+              hdiutil detach "$mount" -quiet || true
+            done
+          }
+          trap cleanup EXIT
+          for archive in dist/*; do
+            stem=$(basename "$archive")
+            dir=/tmp/smoke/"$stem"
+            mkdir -p "$dir"
+            case "$archive" in
+              *.tar.gz) tar -xzf "$archive" -C "$dir" ;;
+              *.zip)
+                case "$(uname -s)" in
+                  Linux) unzip -q "$archive" -d "$dir" ;;
+                  MINGW*|MSYS*|CYGWIN*)
+                    # Git Bash has no `unzip`, and its `tar` is GNU tar, which
+                    # cannot read a zip. PowerShell can, and `cygpath` is what
+                    # keeps the extraction pointed at the same directory the
+                    # shell will look in.
+                    powershell -NoProfile -Command \
+                      "Expand-Archive -LiteralPath '$(cygpath -w "$archive")' \
+                         -DestinationPath '$(cygpath -w "$dir")' -Force" >/dev/null
+                    ;;
+                  # macOS reaches a bsdtar as `tar`, and it reads a zip as
+                  # happily as a tarball.
+                  *) tar -xf "$archive" -C "$dir" ;;
+                esac
+                ;;
+              *.dmg)
+                # A volume image is proved by mounting it: the file that lands
+                # under `$dir` is the one the user will double-click.
+                mounted="$mounted $dir"
+                hdiutil attach "$archive" -nobrowse -quiet -mountpoint "$dir"
+                ;;
+              *.deb) dpkg-deb -x "$archive" "$dir" ;;
+              *) continue ;;
+            esac
+            bin=bee
+            case "$stem" in linkr-bee-cli-*) bin=bee-cli ;; esac
+            found=$(find "$dir" -type f \( -name "$bin" -o -name "$bin.exe" \) | head -1)
+            if [ -z "$found" ]; then
+              echo "no $bin in $archive" >&2
+              exit 1
+            fi
+            echo "running $found"
+            "$found" --version
+            if [ "$bin" = bee-cli ]; then
+              # The CLI build runs a command over the built-in loopback: the
+              # exec path is what an agent harness calls, so it is what the
+              # archive proves before it is uploaded.
+              "$found" --bridge - --no-terminal --exec "echo hi" --quiet > /dev/null
+              # Run bare it has no interface to open, and must say so rather
+              # than exiting with silence.
+              status=0
+              "$found" </dev/null > /dev/null 2>&1 || status=$?
+              [ "$status" -eq 2 ] || {
+                echo "expected exit 2 from a bare CLI run, got $status" >&2
+                exit 1
+              }
+            else
+              # The paint path, through the same renderer the TUI uses.
+              "$found" --print-frame 80x24 --lang en --sample > /dev/null
+              # And the resident session — the mode an agent harness keeps
+              # open — answers one request and quits over the loopback. The
+              # whole answer is read before it is judged: `grep -q` as the
+              # reader exits the moment it matches, and a session whose next
+              # write lands after that dies of the closed pipe — a race that
+              # failed a runner once, not the question being asked.
+              echo '{"id":1,"op":"state"}' | "$found" --bridge - --serve > /tmp/session.json
+              grep -q '"event":"ready"' /tmp/session.json || {
+                echo "the resident session did not come up" >&2
+                exit 1
+              }
+            fi
+            # A dial that cannot open must fail loudly rather than start a broken
+            # session — this is the exit code the tool documents. (`|| status=$?`
+            # rather than `if`: the subject is the *exit code*, and an `if` whose
+            # condition is false has a status of its own.)
+            status=0
+            "$found" --bridge /no/such/program > /dev/null 2>&1 || status=$?
+            [ "$status" -eq 2 ] || { echo "expected exit 2, got $status" >&2; exit 1; }
+          done
+
+      - name: Upload the archives
+        uses: actions/upload-artifact@v4
+        with:
+          name: linkr-tui-${{ matrix.target }}
+          path: tools/linkr-tui/dist/*
+          if-no-files-found: error
+
+  release:
+    name: Attach the archives to the release
+    if: startsWith(github.ref, 'refs/tags/linkr-tui-v')
+    needs: [targets, package]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      # The one job that writes anything: a release upload.
+      contents: write
+    env:
+      # No checkout in this job, so `gh` cannot read the repository out of a
+      # local git — "fatal: not a git repository" is that missing answer.
+      # Every `gh` call below is about this workflow's own repository.
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Collect the archives
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: .
+        run: |
+          set -euo pipefail
+          cd dist
+          # Every format the matrix writes, and nothing else: a checksum file
+          # that names a file nobody uploaded is worse than no file.
+          shopt -s nullglob
+          files=(*.tar.gz *.zip *.dmg *.deb)
+          sha256sum "${files[@]}" > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create the release if it is not there yet
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            echo "release $GITHUB_REF_NAME already exists"
+          else
+            echo "creating release $GITHUB_REF_NAME"
+            # The tag is namespaced (`linkr-tui-v0.2.0`) while the release
+            # carries the `linkr-bee` archive prefix; the title names the
+            # program and version without repeating the tag's whole ref.
+            gh release create "$GITHUB_REF_NAME" \
+              --title "linkr-bee ${GITHUB_REF_NAME#linkr-tui-}" --generate-notes
+          fi
+
+      # A draft is invisible to everyone without the token, so from outside it
+      # reads as "the release never happened"; taking the flag off is
+      # idempotent on a published release. This run exists so the release
+      # matches this build — including being seen.
+      - name: Make sure it is published
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release edit "$GITHUB_REF_NAME" --draft=false
+
+      # A tag can be re-pointed — this one has been — and the assets a previous
+      # run uploaded under it keep their names and stay there until something
+      # removes them. Without this, the Windows `.tar.gz` of an older format
+      # would sit beside the new `.zip` and read as a choice somebody should
+      # make, and the release would carry files its own checksums do not name.
+      # After this step the release is exactly the files just built.
+      - name: Drop the assets this build does not carry
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd dist
+          shopt -s nullglob
+          keep=(*.tar.gz *.zip *.dmg *.deb SHA256SUMS)
+          gh release view "$GITHUB_REF_NAME" --json assets \
+            --jq '.assets[].name' > /tmp/assets
+          while IFS= read -r name; do
+            for wanted in "${keep[@]}"; do
+              [ "$name" = "$wanted" ] && continue 2
+            done
+            echo "dropping $name: this build does not carry it"
+            gh release delete-asset "$GITHUB_REF_NAME" "$name" -y
+          done < /tmp/assets
+
+      # `--clobber` so re-running a workflow over an existing tag replaces the
+      # archives rather than failing halfway. The globs are expanded from a
+      # list so a format a platform did not produce is not a missing argument.
+      - name: Upload the archives and the checksums
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(dist/*.tar.gz dist/*.zip dist/*.dmg dist/*.deb dist/SHA256SUMS)
+          gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
+
+      # The run is not done when the upload returns: it is done when the
+      # release, read back from GitHub, is public and carries exactly the
+      # files this build made. A silent divergence upstream — the state that
+      # left this tag without a visible release once — fails here instead of
+      # shipping.
+      - name: The release carries this build
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd dist
+          shopt -s nullglob
+          expected=(*.tar.gz *.zip *.dmg *.deb SHA256SUMS)
+          count=$(gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets | length')
+          draft=$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft')
+          echo "release $GITHUB_REF_NAME: assets=$count expected=${#expected[@]} draft=$draft"
+          [ "$draft" = "false" ] || {
+            echo "the release is a draft — nobody without the token can see it"
+            exit 1
+          }
+          [ "$count" = "${#expected[@]}" ] || {
+            echo "the release carries $count assets, this build made ${#expected[@]}"
+            exit 1
+          }

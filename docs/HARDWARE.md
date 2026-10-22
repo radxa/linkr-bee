@@ -130,8 +130,8 @@ ESP32-C5 DevKitC 差异：
 | USB | 内置 USB Serial JTAG | 外置 CH340 USB-UART |
 | 桥接 UART | UART0 (GPIO20/21) | UART2 (GPIO16 RX / GPIO17 TX) |
 | Console | USB Serial JTAG | UART0 (GPIO1 TX / GPIO3 RX) via CH340 |
-| LED | GPIO8 | GPIO2 |
-| 配对按钮 | GPIO1 | GPIO4（默认不启用授权检查） |
+| 活动 LED / 自动波特率键 | GPIO8（仅 LED） | GPIO2（LED）/ GPIO13（可选按键） |
+| 配对按钮 | GPIO1 | GPIO4（默认关闭，可选） |
 | 恢复出厂 | GPIO0 | GPIO27（外接跳线接地） |
 | DRAM | 单一 SRAM ~400KB | dram0 ~137KB + dram1 ~96KB |
 | WebDAV | 默认开启 | **关闭**（DRAM 不足） |
@@ -140,31 +140,49 @@ ESP32-C5 DevKitC 差异：
 
 | 功能 | GPIO | 方向 | 说明 |
 |------|------|------|------|
-| 桥接 UART2 RX | 16 | in | 接 SBC TX（通过 CH340 → ttyUSB0） |
-| 桥接 UART2 TX | 17 | out | 接 SBC RX（通过 CH340 → ttyUSB0） |
-| Console UART0 TX | 1 | out | USB Type-C CH340（ttyUSB1） |
-| Console UART0 RX | 3 | in | USB Type-C CH340（ttyUSB1） |
-| 活动 LED | 2 | out | 蓝色，收发活动闪烁（40ms 脉冲） |
-| 配对按钮 | 4 | in | 内部上拉，低有效；默认不启用授权检查 |
+| 桥接 UART2 RX | 16 | in | 接 SBC TX（CH340；端口名以实际枚举为准） |
+| 桥接 UART2 TX | 17 | out | 接 SBC RX（CH340；端口名以实际枚举为准） |
+| Console UART0 TX | 1 | out | USB Type-C CH340（端口名以实际枚举为准） |
+| Console UART0 RX | 3 | in | USB Type-C CH340（端口名以实际枚举为准） |
+| 活动 LED | 2 | out | 板载蓝色 LED，低有效；UART 收发时闪烁（40ms 脉冲） |
+| 自动波特率键 | 13 | in | 可选；仅 `UART_AUTOBAUD=y` 时启用，内部上拉、低有效，外接按键或跳线到 GND |
+| 配对按钮 | 4 | in | 可选；默认关闭授权检查，内部上拉、低有效 |
 | 恢复出厂 | 27 | in | 外接跳线接地后上电或复位，保持至少 2 秒后释放 |
 
 **配对与恢复说明：**
 
-受当前硬件条件限制，WROOM-32 默认设置 `CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=n`，附近主机无需按键即可申请配对。该选项只关闭物理授权检查；GATT 仍要求加密，绑定仍需保存，已有绑定重连仍恢复加密，未绑定完成或加密失败仍会断开。C3/C5 默认保留 GPIO 授权。
+WROOM-32 的 board conf 默认设置
+`CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=n`：新主机可直接配对，GPIO4 仅
+作为可选输入保留。GATT 仍要求加密和绑定；未完成配对或加密失败会断开。已有
+绑定的主机使用保存的 LTK 加密重连，不需要操作 GPIO4。若需要物理授权，将该
+选项设为 `y`：GPIO4 内部上拉、低有效，新主机首次配对或替换旧密钥前必须把
+GPIO4 接到 GND。C3/C5 在各自 board conf 中显式保持 GPIO1 授权。
 
-如果为 WROOM-32 外接了 GPIO4 配对按钮，可将该选项设为 `y` 恢复物理授权。恢复出厂使用独立的 GPIO27 跳线，会清除保存的设置与绑定；本板 GPIO0/BOOT 在复位时拉低会进入 ROM 下载模式，不能按 C3 的 GPIO0 恢复步骤操作。
+GPIO2 是板载蓝色活动 LED，低有效，UART 收发时闪烁；`gpio-leds` 和固件的
+活动指示共用该引脚。**GPIO2 现在是输出，不能把按键或跳线接到 GND**，否则会
+短路 LED 输出；自动波特率按键只能接 GPIO13。WROOM 默认
+`CONFIG_LINKR_BLE_BRIDGE_UART_AUTOBAUD=n`；需要按需检测时设为 `y`。启用后，
+检测器启动时保持 idle，按一次 GPIO13（低有效）才开始一次检测。GPIO13 不是
+启动 strapping 引脚，内部上拉保持空闲为高；测试时用外接按键或跳线将 GPIO13
+接到 GND，复位时不要按住该键，以免上电后立即触发一次检测。
+恢复出厂使用独立的 GPIO27 跳线，会清除保存的设置与绑定；本板 GPIO0/BOOT 在
+复位时拉低会进入 ROM 下载模式，不能按 C3 的 GPIO0 恢复步骤操作。
 
-本次修订的回调测试覆盖授权开关两种配置、加密失败及绑定重连；GPIO27 恢复出厂接线仍需在 WROOM-32 实机验收。
+2026-10-21 实机验证（Novice-PG）：本机验证镜像通过构建目录外的
+`EXTRA_CONF_FILE` 打开 autobaud，并确认 `PAIRING_GPIO_AUTH=n`。普通刷写并保留
+NVS 后，已绑定主机无需 GPIO4 即可加密重连并读写管理服务；GPIO13 按键、GPIO27
+恢复出厂接线和 GPIO2 活动 LED 仍需在 WROOM-32 实机操作验收。默认提交配置中
+autobaud 与 GPIO4 授权均为 `n`。
 
 **DRAM 约束与优化：**
 
 ESP32-WROOM-32 的 dram1 仅 96KB，需要以下限制：
 
 - `CONFIG_LINKR_BLE_BRIDGE_WEBDAV=n` — 关闭 WebDAV 节省 ~12KB noinit
-- `CONFIG_LINKR_BLE_BRIDGE_UART_RX_BUFFER_SIZE=4096` — UART RX 从 16KB 降至 4KB
-- BT ACL TX buffer 从 12 降至 4
-- 各线程栈缩减（main=2048, workqueue=4096, WiFi connect=2048）
-- HTTP server 单客户端，栈 2048
+- `CONFIG_LINKR_BLE_BRIDGE_UART_RX_BUFFER_SIZE=16384` — 保留 C3 基线的接收缓冲
+- BT ACL TX buffer 为 10，与控制器上报数量一致
+- 线程栈：main=4096，system workqueue=4096，WiFi connect=2048
+- HTTP server 允许 2 个客户端，WS 每客户端栈 4096
 
 **功能差异：**
 
@@ -177,12 +195,14 @@ ESP32-WROOM-32 的 dram1 仅 96KB，需要以下限制：
 **已知限制：**
 
 - BLE 4.2（非 5.0），MTU 协商最大 247
-- 双 CH340 USB：ttyUSB0 = 桥接 UART2，ttyUSB1 = console UART0（端口可能因 USB 插拔顺序交换）
+- 双 CH340 USB：两个口都插入时会出现两个 `ttyUSB`，编号随插拔顺序变化，不能按固定编号判断；当前单口实测 `ttyUSB0` 可烧录并输出 UART0 console，桥接 UART2 口未插入时不会出现对应设备。用 `esptool read-mac` 或 console 输出确认端口。
 - WiFi/BLE 共存时功耗较高（power save 已禁用以降低延迟）
 
 ## 12. 固件对外接口（供硬件/集成联调）
 
-- BLE 广播名：`Linkr BLE UART-3`
+- BLE 广播名：所有板型默认 `Linkr Bee XXXX`，`XXXX` 为硬件 MAC 最后四位
+  十六进制（例如 `58:BF:25:33:07:8C` → `078C`）。`@n` 可设置 1–29 字节的
+  自定义名；名称只用于显示，恢复出厂会恢复默认名
 - NUS UUID：`6e400001` / `-02` / `-03` - `b5a3-f393-e0a9-e50e24dcca9e`
   - 服务：`6e400001-b5a3-f393-e0a9-e50e24dcca9e`
   - RX 写特征：`6e400002-b5a3-f393-e0a9-e50e24dcca9e`
@@ -192,11 +212,13 @@ ESP32-WROOM-32 的 dram1 仅 96KB，需要以下限制：
   仍自动分片并保留 20 字节兼容路径
 - 控制命令：
   - `@u?` / `@u=baud,data,parity,stop,flow`（UART）
+  - `@n?` / `@n=<name>` / `@n default`（查询、设置、恢复默认广播名；名称 1–29 字节 UTF-8，支持中文和 emoji）
+  - `@a?` / `@a` / `@a stop`（WROOM 按需自动波特率，需 `CONFIG_LINKR_BLE_BRIDGE_UART_AUTOBAUD=y`；GPIO13 可选）
   - `@w=ssid,pass` / `@w off` / `@w?`（WiFi）
   - `@d=http://host/path/` / `@d off` / `@d?`（匿名 HTTP WebDAV）
   - `@h`（help）
 - WiFi 默认启用但无线电关闭，`@w=` 后开启；凭据默认只在 RAM，只有启用 `CONFIG_LINKR_BLE_BRIDGE_PERSIST_CREDENTIALS=y` 才写入 NVS（要求 secure boot + flash encryption）
-- GPIO1 为配对授权输入，内部上拉、低有效；通过按钮或跳线接 GND。Management 与两个 UART 服务要求加密 BLE；绑定持久化，已绑定主机重连无需拉低 GPIO1。GPIO1 不执行恢复出厂。详见 [蓝牙配对](BLE_PAIRING.md)。
+- C3/C5 的 GPIO1 为配对授权输入，内部上拉、低有效，通过按钮或跳线接 GND；WROOM 的 GPIO4 为可选输入，默认 `PAIRING_GPIO_AUTH=n`，不需要物理按键。Management 与两个 UART 服务要求加密 BLE；绑定持久化，已绑定主机重连无需拉低配对 GPIO。配对 GPIO 不执行恢复出厂。详见 [蓝牙配对](BLE_PAIRING.md)。
 
 ## 13. 量产要点
 
@@ -231,3 +253,4 @@ west flash --runner esp32
 |------|------|------|
 | 2026-07-07 | v1.0 | 初版，对应已验证固件（含 WiFi/WebDAV） |
 | 2026-09-16 | v1.1 | 新增 ESP32-WROOM-32 (Xtensa) 支持 |
+| 2026-10-21 | v1.2 | WROOM 增加按需自动波特率（默认关闭，可选 `@a`/GPIO13 按键）、默认关闭 GPIO4 配对授权、恢复 GPIO2 活动 LED；所有板型默认广播 `Linkr Bee XXXX`（硬件 MAC 后四位），支持 `@n` 自定义名 |

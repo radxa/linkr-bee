@@ -92,7 +92,12 @@ class FirmwareTests(unittest.TestCase):
         self.assertEqual(first, retry)
 
     def test_default_firmware_keeps_lan_and_logs_flowing_after_ble_disconnect(self):
-        self.run_scenario("forward")
+        # The exit code alone would pass even if a chunk were dropped from, or
+        # duplicated into, the LAN or log sink, so assert the counts the
+        # firmware reports: 100 idle chunks reach both, a connected peer's
+        # transient failure feeds neither, and the retry feeds both once more.
+        (summary,) = self.run_scenario("forward")
+        self.assertEqual(summary, ["forward", "101", "101"])
 
     def test_webdav_setters_reject_before_mutating_and_publish_atomically(self):
         """The production setters, not a simulation of them."""
@@ -196,7 +201,9 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
                     caps = terminal.MGMT_CAP_DEVICE_ID | terminal.MGMT_CAP_RELIABLE_UART
                     return bytes([1, 0]) + (512).to_bytes(2, "little") + caps.to_bytes(4, "little") + b"\0\0"
                 if uuid == terminal.MGMT_DEVICE_ID_UUID:
-                    return bytes(16)
+                    # A Device ID as a Linkr board reports it: the fixed
+                    # namespace, then the chip's hardware id.
+                    return b"LINKRBLE\x01\x00" + bytes(6)
                 return bytes([1, 0]) + (232).to_bytes(2, "little") + (1).to_bytes(4, "little") * 2 + bytes(4)
 
             def notify(self, data):

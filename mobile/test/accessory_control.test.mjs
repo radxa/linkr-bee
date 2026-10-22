@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   accessoryChangeSummary,
+  bleNameCommand,
   isDiagnosticsDone,
+  parseBleName,
   parseInfoGroups,
   parseUartSettings,
   parseWebdavStatus,
@@ -48,6 +50,60 @@ test("WebDAV commands accept only plain HTTP endpoints", () => {
   assert.throws(() => webdavCommand({ url: "http://host/a b" }), /whitespace/);
 });
 
+test("BLE name commands use UTF-8 byte limits and can restore the MAC default", () => {
+  assert.equal(bleNameCommand({ name: "Linkr Bee 078C" }), "@n=Linkr Bee 078C");
+  assert.equal(bleNameCommand({ name: "  测试 Bee  " }), "@n=测试 Bee");
+  assert.equal(bleNameCommand({ reset: true }), "@n default");
+  // 9 Chinese characters are 27 bytes, 10 are 30.
+  assert.equal(bleNameCommand({ name: "测试测试测试测试测" }), "@n=测试测试测试测试测");
+  assert.throws(() => bleNameCommand({ name: "测试测试测试测试测试" }), /29 UTF-8 bytes/);
+  assert.throws(() => bleNameCommand({ name: "   " }), /required/);
+  assert.throws(() => bleNameCommand({ name: "Bee\nName" }), /control/);
+  // The firmware's full reject set, not only C0/DEL: C1 and the Unicode line
+  // separators are refused before the command would leave the browser.
+  assert.throws(() => bleNameCommand({ name: "a\u0085b" }), /control/);
+  assert.throws(() => bleNameCommand({ name: "a\u2028b" }), /control/);
+  assert.throws(() => bleNameCommand({ name: "a\u2029b" }), /control/);
+  // Trimming matches the firmware's four ASCII bytes; NBSP and U+3000 are
+  // ordinary characters and must survive so every host stores the same name.
+  assert.equal(bleNameCommand({ name: "\u00a0Bee\u3000" }), "@n=\u00a0Bee\u3000");
+});
+
+test("BLE names allow emoji and enforce the byte budget, not the character count", () => {
+  // A four-byte emoji plus ASCII still fits; seven emoji are 28 bytes and one
+  // more ASCII byte reaches the exact 29-byte advertisement limit.
+  assert.equal(bleNameCommand({ name: "🐝 Linkr Bee" }), "@n=🐝 Linkr Bee");
+  assert.equal(bleNameCommand({ name: `${"😀".repeat(7)}a` }), `@n=${"😀".repeat(7)}a`);
+  assert.throws(() => bleNameCommand({ name: "😀".repeat(8) }), /29 UTF-8 bytes/);
+  // Multi-code-point emoji sequences are ordinary valid UTF-8: family (ZWJ),
+  // flag (regional indicators), heart (variation selector), and skin tone.
+  for (const name of ["👨‍👩‍👧‍👦", "🇨🇳", "❤️", "👍🏽"]) {
+    assert.equal(bleNameCommand({ name }), `@n=${name}`);
+  }
+  assert.equal(
+    bleNameCommand({ name: "👨‍👩‍👧‍👦🐝" }),
+    "@n=👨‍👩‍👧‍👦🐝",
+    "a 25-byte family plus a 4-byte emoji is exactly 29 bytes",
+  );
+});
+
+test("BLE name replies preserve spaces and report whether the name is custom", () => {
+  assert.deepEqual(parseBleName("OK name=Linkr Bee 078C custom=no", { query: true }), { name: "Linkr Bee 078C", custom: false });
+  assert.deepEqual(parseBleName("OK name=测试 Bee custom=yes", { query: true }), { name: "测试 Bee", custom: true });
+  assert.deepEqual(parseBleName("OK name=🐝 Linkr Bee custom=yes", { query: true }), { name: "🐝 Linkr Bee", custom: true });
+  assert.deepEqual(parseBleName("OK name=Linkr Bee 078C"), { name: "Linkr Bee 078C", custom: null });
+  // A write reply carries no `custom=` field, so a name that itself ends in
+  // " custom=yes" must survive a write parse intact; only a query strips the
+  // final suffix.
+  assert.deepEqual(parseBleName("OK name=Bee custom=yes"), { name: "Bee custom=yes", custom: null });
+  assert.deepEqual(parseBleName("OK name=Bee custom=yes custom=no", { query: true }), { name: "Bee custom=yes", custom: false });
+  // A trailing U+3000 belongs to the name; the parser strips only the line
+  // ending, not Unicode whitespace the firmware would have stored.
+  assert.deepEqual(parseBleName("OK name=Bee\u3000 custom=no", { query: true }), { name: "Bee\u3000", custom: false });
+  assert.equal(parseBleName("ERR name expected 1-29 UTF-8 bytes"), null);
+  assert.equal(parseBleName(""), null);
+});
+
 test("credentials never survive into a display or a tool result", () => {
   assert.equal(redactCommand("@w=Bench,secret"), "@w=Bench,<redacted>");
   assert.equal(redactCommand("@w=Open,"), "@w=Open,<redacted>");
@@ -84,16 +140,16 @@ test("status replies are parsed into the fields a change is verified against", (
 
 test("the @i? stream is grouped until the device reports completion", () => {
   const lines = [
-    "@info fw version=0.2.0 zephyr=4.4.1",
+    "@info fw version=0.1.2 zephyr=4.4.1",
     "@info sys uptime_ms=123456 owner=0 security=2",
     "@info uart dropped=0 dropped_no_conn=0 buffer=12/4096",
   ];
   assert.deepEqual(parseInfoGroups(lines), {
-    fw: { version: "0.2.0", zephyr: "4.4.1" },
+    fw: { version: "0.1.2", zephyr: "4.4.1" },
     sys: { uptime_ms: "123456", owner: "0", security: "2" },
     uart: { dropped: "0", dropped_no_conn: "0", buffer: "12/4096" },
   });
   assert.equal(isDiagnosticsDone("@info done"), true);
-  assert.equal(isDiagnosticsDone("@info fw version=0.2.0"), false);
+  assert.equal(isDiagnosticsDone("@info fw version=0.1.2"), false);
   assert.equal(parseInfoGroups(["@info done"]).done, undefined);
 });

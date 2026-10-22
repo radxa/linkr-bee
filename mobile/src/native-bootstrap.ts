@@ -3,7 +3,7 @@ import { Capacitor } from "@capacitor/core";
 
 type DeviceDescriptor = { id: string; name: string };
 type RequestDeviceOptions = {
-  filters?: Array<{ services?: string[] }>;
+  filters?: Array<{ services?: string[]; namePrefix?: string }>;
   optionalServices?: string[];
 };
 
@@ -107,8 +107,20 @@ function createNativeBleBackend(): NativeBleBackend {
       const services = Array.from(
         new Set(options.filters?.flatMap((filter) => filter.services || []) || []),
       );
+      const namePrefixes = Array.from(
+        new Set(options.filters?.flatMap((filter) => filter.namePrefix || []) || []),
+      );
+      /* The plugin takes one filter shape, while Web Bluetooth takes an OR of
+       * several. Prefer the service filter when the caller supplied one: it
+       * finds every current board regardless of how the owner renamed it,
+       * including Chinese and emoji names. The name prefixes remain a fallback
+       * for callers that only have names (the oldest NUS-only firmware is
+       * discoverable through the Web/TUI clients, which can scan both). */
+      const filter = services.length
+        ? { services }
+        : { namePrefix: namePrefixes[0] || "Linkr BLE UART" };
       const device = await BleClient.requestDevice({
-        services,
+        ...filter,
         optionalServices: options.optionalServices || [],
       });
       return { id: device.deviceId, name: deviceName(device) };

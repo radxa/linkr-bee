@@ -71,8 +71,8 @@ const labels = {
   /* The window is not only the conversation: the system prompt and every tool
    * description are paid first, on every request. Saying so here is the
    * difference between "the model refused" and "this field is too small". */
-  contextWindowHint: ["留空或填 0 表示使用内置默认值。助手自身的系统提示词与工具说明每次请求都要占用一部分窗口，其余才是对话历史。", "Leave blank or 0 to keep the built-in default. The assistant's own system prompt and tool descriptions consume part of the window on every request; the rest is conversation history."],
-  contextWindowTight: ["窗口太小：助手自身的提示词与工具说明约占 {fixed} token，加上最大输出后至少需要 {min}。按当前设置，每次请求都会超出窗口并报错。", "Window too small: the assistant's own prompt and tool descriptions already cost about {fixed} tokens, and with the max output it needs at least {min}. At the current value every request overflows and fails."],
+  contextWindowHint: ["留空或填 0 表示使用内置默认值。系统提示词、工具说明和参数结构每次请求都占用窗口，还需为回复留出空间，其余才是对话历史。", "Leave blank or 0 to keep the built-in default. The system prompt, tool descriptions and parameter schemas consume part of each request's window. Room is also reserved for the reply; the rest is conversation history."],
+  contextWindowTight: ["窗口可能不足：提示词和工具（含参数结构）按约 {fixed} token 预留，加上最大输出建议至少 {min}。请增大窗口或降低最大输出；实际用量随模型和启用的工具变化。", "The window may be too small: about {fixed} tokens are reserved for the prompt and tools, including schemas. With max output, at least {min} is recommended. Increase the window or reduce max output; actual usage varies by model and enabled tools."],
   providerError: ["请选择接口协议。", "Choose an API protocol."],
   reasoningError: ["请选择推理强度。", "Choose a reasoning effort."],
   contextWindowError: ["上下文窗口必须是 0，或 1000 到 2000000 之间的整数。", "Context window must be 0, or an integer between 1000 and 2000000."],

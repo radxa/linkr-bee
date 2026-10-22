@@ -185,6 +185,10 @@ html,
 body {
   margin: 0;
   height: 100%;
+  /* Mobile engines otherwise inflate small text after a viewport change, so
+   * the same page opens at a different type scale on Edge and Firefox. */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
 body {

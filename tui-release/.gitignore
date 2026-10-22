@@ -1,0 +1,7 @@
+# Release artifacts, not source: rebuild them with dev/package.sh and
+# dev/package-deb.sh from tools/linkr-tui rather than committing binaries.
+*.deb
+*.tar.gz
+*.zip
+*.dmg
+*.exe

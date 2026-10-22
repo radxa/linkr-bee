@@ -96,9 +96,10 @@ test("reading a target file returns the decoded page and its size", async () => 
   let turns = 0;
   const { agent, sent } = makeAgent({ journal, files: { "/etc/os-release": "ID=linkr-bee\nVERSION=1\n" },
     stream: fakeStream((context) => {
-    // One question, three turns: probe (which unlocks the reader), read, report.
+    // Review the probe before issuing the dependent file read.
     if (++turns === 1) return [call("probe_tools", { names: ["dd", "base64"] })];
-    if (turns === 2) return [call("read_target_file", { path: "/etc/os-release", bytes: 16 })];
+    if (turns === 2) return [call('monitor_serial_execution',{id:'serial-1',timeoutMs:100})];
+    if (turns === 3) return [call("read_target_file", { path: "/etc/os-release", bytes: 16 })];
     const evidence = JSON.parse(toolText(context.messages.at(-1)));
     assert.equal(evidence.status, "ok");
     // totalBytes is the file, bytes is this page: that difference is how the
@@ -112,7 +113,7 @@ test("reading a target file returns the decoded page and its size", async () => 
   await agent.prompt("Which OS is this? Read /etc/os-release.");
   // The read goes out as a tracked shell command.
   assert.ok(sent.some((payload) => String(payload).includes("LINKR_FILE:end") || String(payload).includes("dd bs=1")));
-  assert.equal(turns, 3);
+  assert.equal(turns, 4);
 });
 
 test("an unreadable target file is reported as the target's own answer", async () => {
@@ -123,7 +124,8 @@ test("an unreadable target file is reported as the target's own answer", async (
     getStatus: () => status,
     stream: fakeStream((context) => {
       if (++turns === 1) return [call("probe_tools", { names: ["dd", "base64"] })];
-      if (turns === 2) return [call("read_target_file", { path: "/root/secret" })];
+      if (turns === 2) return [call('monitor_serial_execution',{id:'serial-1',timeoutMs:100})];
+      if (turns === 3) return [call("read_target_file", { path: "/root/secret" })];
       const evidence = JSON.parse(toolText(context.messages.at(-1)));
       assert.equal(evidence.status, "denied");
       assert.ok(evidence.reason && evidence.reason.length > 0, "a refusal must come with the target's reason");
@@ -131,5 +133,5 @@ test("an unreadable target file is reported as the target's own answer", async (
       return [{ type: "text", text: "Not readable." }];
     }) });
   await agent.prompt("Read /root/secret");
-  assert.equal(turns, 3);
+  assert.equal(turns, 4);
 });

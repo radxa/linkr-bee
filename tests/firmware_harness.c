@@ -217,6 +217,10 @@ int main(int argc, char **argv)
             ws_feeds != 101 || log_feeds != 101) {
             return 6;
         }
+        /* Asserted by tests/test_regressions.py: both sinks saw every idle
+         * chunk, the failed send fed neither, and the retry fed both exactly
+         * once more — the "LAN and logs keep flowing" the test name promises. */
+        printf("forward|%d|%d\n", ws_feeds, log_feeds);
         return 0;
     }
     if (!strcmp(scenario, "setters")) {

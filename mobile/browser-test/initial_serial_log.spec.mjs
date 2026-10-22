@@ -36,6 +36,11 @@ test.beforeEach(async ({ page }) => {
           view.setUint16(2, 512, true);
           view.setUint32(4, (1 << 3) | (1 << 5), true);
         }
+        if (characteristic.startsWith("4c4b0003")) {
+          // The Linkr Device ID namespace; the app rejects any other board
+          // advertising the same Management Service UUID.
+          bytes.set([0x4c, 0x49, 0x4e, 0x4b, 0x52, 0x42, 0x4c, 0x45, 0x01, 0x00]);
+        }
         if (characteristic.startsWith("4c4b0013")) {
           bytes[0] = 1;
           view.setUint16(2, 232, true);

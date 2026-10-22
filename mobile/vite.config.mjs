@@ -14,7 +14,10 @@ const browserDependencies = ["@capacitor/core", "@capacitor-community/bluetooth-
   // late discovery by reloading the page underneath the running session.
   "@earendil-works/pi-ai/api/openai-completions",
   "@earendil-works/pi-ai/api/anthropic-messages",
-  "@earendil-works/pi-ai/api/google-generative-ai"];
+  "@earendil-works/pi-ai/api/google-generative-ai",
+  "@earendil-works/pi-ai/utils/event-stream",
+  "@earendil-works/pi-ai/utils/retry",
+  "@earendil-works/pi-ai/utils/overflow"];
 
 export default defineConfig({
   root: webDir,

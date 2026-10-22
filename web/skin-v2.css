@@ -302,6 +302,10 @@ h1 {
 }
 
 .icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
   width: 30px;
   min-width: 30px;
   height: 30px;
@@ -387,17 +391,49 @@ h1 {
 }
 
 @media (min-width: 901px) {
+  /* Keep the header one row on every engine. Once the actions wrap, the
+   * topbar grows and pushes the whole terminal down; Segoe UI on Windows and
+   * the Linux system font measure the same labels differently, so the old
+   * wrapping rule made the two platforms open at different heights. */
+  .topbar {
+    flex-wrap: nowrap;
+  }
+
   .top-right {
     display: contents;
   }
 
+  .brand {
+    flex: 0 1 auto;
+    min-width: 0;
+  }
+
+  .brand h1,
+  .brand .support-text {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
   .status-pill {
     order: 1;
+    flex: 0 1 auto;
+    min-width: 0;
     margin-left: 4px;
+  }
+
+  .status-pill #statusText,
+  .status-pill .device-name {
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
   }
 
   .top-actions {
     order: 2;
+    flex: 0 0 auto;
+    flex-wrap: nowrap;
     margin-left: auto;
     gap: 4px;
   }
@@ -418,6 +454,24 @@ h1 {
   -webkit-backdrop-filter: var(--glass-blur);
   scrollbar-width: thin;
   scrollbar-color: var(--line) transparent;
+  /* Firefox reserves a classic scrollbar; Chromium can overlay it. Reserving
+   * the gutter in both keeps the drawer's text measure identical. */
+  scrollbar-gutter: stable;
+}
+
+/* Firefox before 103 and browsers that disable compositing render the glass
+ * tokens as almost transparent panels. Keep the layout, make the chrome
+ * readable instead of falling back to the page background. */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .topbar,
+  .rail,
+  .controls.window-surface {
+    background: var(--bg);
+  }
+
+  .status-pill {
+    background: var(--panel-2);
+  }
 }
 
 .controls .card {

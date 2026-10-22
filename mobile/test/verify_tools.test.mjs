@@ -230,3 +230,28 @@ test("an unusable verify request is an error rather than a quiet pass", async ()
   assert.equal(errors.length, 1, "a request that cannot be honoured must fail loudly");
   assert.match(JSON.stringify(errors[0]), /exactly one of unit, process or port/);
 });
+
+test('multiple read-only comparisons remain valid when the plan is updated after both results',async()=>{
+  let round=0,first,lastPath='',execution=0;
+  const agent=createSerialAgent({config,device:{mode:'auto',getStatus:()=>status,getRecords:()=>[],
+    execute:async args=>{
+      assert.equal(args.applicationReadOnly,true);
+      lastPath=args.text.includes('/tmp/first')?'/tmp/first':'/tmp/second';
+      return {id:`verify-${++execution}`,delivery:'sent'};
+    },
+    inspectExecution:id=>({id,delivery:'sent',executionStatus:'completed',exitCode:0,
+      evidence:`\nLINKR_VERIFY:path=${lastPath}\nLINKR_VERIFY:file\nLINKR_VERIFY:bytes=3\nLINKR_VERIFY:done\n`}),
+  },stream:fakeStream(context=>{
+    if(++round===1)return [call('verify_target_file',{path:'/tmp/first',bytes:3})];
+    if(round===2){first=JSON.parse(toolText(context.messages.at(-1)));return [call('verify_target_file',{path:'/tmp/second',bytes:3})];}
+    if(round===3){
+      const second=JSON.parse(toolText(context.messages.at(-1)));
+      return [call('update_task_plan',{steps:[first,second].map((proof,index)=>({title:`Check file ${index+1}`,
+        kind:'action',status:'completed',expectedResult:'File has 3 bytes',verification:'Application comparison matched',
+        evidenceIds:[proof.taskEvidence.id],nextAction:''}))})];
+    }
+    assert.deepEqual(JSON.parse(toolText(context.messages.at(-1))).steps.map(step=>step.completion),['verified','verified']);
+    return [{type:'text',text:'Both comparisons matched.'}];
+  })});
+  await agent.prompt('Verify both files');assert.equal(round,4);
+});

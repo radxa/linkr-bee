@@ -26,7 +26,7 @@ endif
 
 config LINKR_BLE_BRIDGE_FIRMWARE_VERSION
 	string "Firmware version"
-	default "0.2.0"
+	default "0.1.2"
 	help
 	  Human-readable application version returned by the diagnostic command
 	  and included in release metadata.
@@ -34,12 +34,17 @@ config LINKR_BLE_BRIDGE_FIRMWARE_VERSION
 config LINKR_BLE_BRIDGE_UART_RX_CHUNK
 	int "Maximum UART bytes gathered before BLE transmission"
 	default 232
-	range 20 244
+	range 20 232
 	help
 	  UART data is accumulated up to this many bytes before it is handed to
 	  Reliable UART. The default plus its 12-byte frame header fits in one
 	  ATT value when the central negotiates the production MTU of 247. It is
 	  segmented automatically when the negotiated MTU is smaller.
+
+	  Never set this above 232: Reliable UART refuses any payload larger than
+	  LINKR_UART_RELIABLE_MAX_PAYLOAD (232) with -EINVAL, and the UART-to-BLE
+	  thread retries a failed chunk in place, so a larger value would wedge
+	  that thread and stop it feeding the log ring and the LAN bridge.
 
 config LINKR_BLE_BRIDGE_UART_IDLE_MS
 	int "UART idle flush timeout in milliseconds"
@@ -57,6 +62,10 @@ config LINKR_BLE_BRIDGE_UART_RX_BUFFER_SIZE
 	  notifications are being sent. Larger values reduce dropped boot-log
 	  bytes when the SBC emits a burst faster than BLE can transmit.
 
+	  The consumer keeps draining even when this buffer is full. Without
+	  hardware flow control, sustained input faster than the transports can
+	  still overflow it; stopping the consumer cannot throttle the producer.
+
 config LINKR_BLE_BRIDGE_BLE_TO_UART_QUEUE_DEPTH
 	int "Transport to UART packet queue depth"
 	default 8
@@ -71,6 +80,121 @@ config LINKR_BLE_BRIDGE_UART_BAUD_RATE
 	help
 	  Default bridge UART baud rate. Typical SBC console values are 115200,
 	  1500000, 921600, and 1000000.
+
+config LINKR_BLE_BRIDGE_UART_AUTOBAUD
+	bool "Enable on-demand bridge UART line-rate detection"
+	depends on SOC_SERIES_ESP32
+	default n
+	help
+	  Follow the peer's line rate instead of demanding it match us, so a
+	  swapped SBC never has to change a single stty to suit this board.
+
+	  The detector is idle at boot. Start one bounded pass with @a (or the
+	  active-low linkr-autobaud GPIO key), query it with @a?, and cancel it
+	  with @a stop. A pass ends when it confirms a match, applies a new
+	  rate, sees no measurable capture for 5 s, or is stopped. The port is
+	  never changed without a pass, and a completed pass is not restarted
+	  automatically.
+
+	  While a pass is running, every 400 ms the RMT receiver hands back one
+	  burst it captured from RXD as a train of run durations, and software
+	  refines the bit time
+	  out of the train — (sum of runs) / (bit times they add up to) —
+	  then reconfigures the port through the existing @u= path. Measuring
+	  a whole span instead of the UART detector's single shortest pulse
+	  is what makes the number trustworthy: run durations are grid
+	  aligned, so edge quantisation cancels except at the two ends of the
+	  span (probe run and raw numbers: 改动/666666/autobaud-RMT探针-C方案-2026-10-17.md).
+	  Everything else — deciding when to try, believing the result,
+	  programming the divisor, giving up — is still software.
+
+	  It acts only when the line is measured three ways: the capture must
+	  sit on whole multiples of its own estimate, two consecutive windows
+	  must agree within 2%, and the result must fall outside the current
+	  rate's hold band. Within 2% it is a match; within 5% of a verified
+	  or standard configured rate it is held to avoid an unnecessary
+	  reconfiguration that resets the ring and discards buffered data.
+	  A capture that fits no whole multiple (a rate that moved
+	  mid-capture, noise, a torn edge) is refused as no measurement.
+
+	  Limits: it needs the peer to toggle bits, so an idle line is simply
+	  skipped, and a line slower than about 1.2 kHz produces no captures
+	  at all (the receiver's 819 us idle window closes between its bits),
+	  so a peer that slow has to be matched by hand. Traffic whose runs
+	  never include a one-bit run rates as our own rate divided by the
+	  multiple its shortest run is — two
+	  or five for 8N1 framed bytes (a repeated 0x9E reads current/2,
+	  0xF0 reads current/5). Other frame formats can reach further: 8E2
+	  has twelve bit times, and repeated 0xE0 reads current/6. Mixed
+	  shapes that fit no multiple are refused outright. That
+	  reading cannot be corrected by waiting: the run lengths belong to
+	  RXD and not to our divisor, so once the port moves there the same
+	  lengths match at the new rate and every later window agrees.
+
+	  The refusal is two-tiered, to keep the port out of that. While the
+	  link is verified — any reading within 2% marks it so — a reading of
+	  our own rate over k is refused and logged for every k in 2..9.
+	  Eight windows without a capture (3.2 s of silence) drop the
+	  verified state and hand the larger divisors back: after the quiet,
+	  a real drop outside the active frame's artifact range is followed
+	  (921600 to 115200 is k = 8). The artifact bound is at least five,
+	  extended to half the frame length where needed (six for 8E2).
+	  Its divisor shapes are refused in every state because a quiet line that
+	  comes back carrying a binary file reads as exactly one of them. So
+	  a peer switching 115200 to 57600 (k = 2) is never followed: not
+	  while it keeps sending, and not after any amount of silence — that
+	  band is what the guard gives up, on purpose.
+
+	  Restricted to the classic ESP32: this depends on the classic
+	  ESP32's UART divider and RMT receiver register definitions, wired
+	  up and validated on esp32_devkitc only. Widening it to C3/C5/S3
+	  needs the span measurement re-validated on those parts' RMT and a
+	  real link test first.
+
+config LINKR_BLE_BRIDGE_UART_BULK_TX
+	bool "Fill the UART FIFO in one write instead of one byte at a time"
+	depends on SOC_SERIES_ESP32
+	default n
+	help
+	  Send each packet to the UART by filling its hardware FIFO in a
+	  single write, instead of looping uart_poll_out() once per byte.
+
+	  uart_poll_out() waits for one byte of FIFO space and then writes
+	  that one byte; on the classic ESP32 its body is 50 bytes of code
+	  and the spin is inside it. The FIFO is 128 bytes
+	  (SOC_UART_FIFO_LEN) and a packet is up to 244, so a full packet is
+	  244 trips through that function plus the caller's loop — 244 calls
+	  through the device api, 244 status reads, 244 single-byte writes,
+	  and 116 of them spinning because the FIFO is full. This option does
+	  the same bytes in the same order but offers the FIFO everything it
+	  can take in one call, so the per-packet driver overhead falls from
+	  244 round trips to a handful.
+
+	  Be clear about what that buys: CPU time, not line speed. A 244-byte
+	  packet is 21.2 ms of serialisation at 115200 baud and no firmware
+	  change shortens it — that 11520 B/s is the ceiling on this link.
+	  The saving is the redundant bookkeeping around the wire, which is
+	  worth having but is not a faster port.
+
+	  Turned off, the byte-at-a-time loop is compiled instead and every
+	  board builds exactly as it did before. It is off by default because
+	  the change is on a live TX path and the only board it has been
+	  built and measured on is esp32_devkitc.
+
+	  Only the classic ESP32 is validated. It reaches <hal/uart_hal.h>
+	  for the free-slot count and the FIFO write, neither of which is
+	  used anywhere else in this tree. C3/C5 have their own uart_ll.h with
+	  the same two entry points and would very likely work, but "very
+	  likely" is not what shipping firmware runs on: widening this needs a
+	  build and a sustained transfer on those parts first, the same bar
+	  the autobaud option above is held to.
+
+	  There is no reason to enable it together with
+	  LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY: the loopback config
+	  reads its own bytes back on the other side of the wire, and the
+	  header collapses to a no-op stub under that config regardless of
+	  this setting.
+
 
 choice LINKR_BLE_BRIDGE_UART_DATA_BITS
 	prompt "UART data bits"
@@ -142,12 +266,34 @@ config LINKR_BLE_BRIDGE_CONTROL_COMMANDS
 
 config LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH
 	bool "Require GPIO button press for BLE pairing"
-	default y
+	default n
 	help
 	  When enabled, the pairing GPIO (linkr-pairing alias) must be held
 	  active before the host can initiate BLE pairing. Set to n to allow
 	  pairing without physical button access, e.g. for boards without a
 	  dedicated pairing button or during development.
+
+config LINKR_BLE_BRIDGE_BLE_NAME_FROM_MAC
+	bool "Dynamic BLE name with hardware-MAC suffix and runtime override"
+	depends on BT && SETTINGS
+	default y
+	select BT_DEVICE_NAME_DYNAMIC
+	help
+	  Advertise "Linkr Bee XXXX" by default, where XXXX is the last four
+	  hex digits of the factory hardware MAC in uppercase (for example
+	  58:BF:25:33:07:8C becomes 078C). The name is stable for the life of
+	  the board and distinct between units without another stored value.
+
+	  The @n command (or @linkr name) can replace the complete name at
+	  runtime. A custom name is persisted in settings and restored across
+	  boots; @n default removes it and returns to the hardware-MAC name.
+	  Names are 1-29 UTF-8 bytes so they fit a complete legacy
+	  advertisement.
+
+	  New firmware is still discovered and verified by the Linkr
+	  Management Service UUID and Device ID, never by this display name.
+	  Firmware that predates the service keeps its fixed
+	  "Linkr BLE UART..." name as a compatibility discovery signal.
 
 config LINKR_BLE_BRIDGE_TEST_UART_ECHO
 	bool "Echo received UART bytes back to UART"

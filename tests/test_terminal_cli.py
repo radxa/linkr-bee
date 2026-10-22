@@ -22,7 +22,7 @@ import sys
 import tempfile
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -61,10 +61,11 @@ def uart_frame(sequence, payload):
 
 
 class FakeDevice:
-    def __init__(self, name, address, rssi=None):
+    def __init__(self, name, address, rssi=None, service_uuids=()):
         self.name = name
         self.address = address
         self.rssi = rssi
+        self.service_uuids = service_uuids
 
 
 class FakeWriteClient:
@@ -90,6 +91,7 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("usage:", result.stdout)
         self.assertIn("--wifi-key-file", result.stdout)
+        self.assertIn("--rename-ble", result.stdout)
         self.assertNotIn("Traceback", result.stderr)
 
     def test_version_works_without_bleak(self):
@@ -122,6 +124,101 @@ class ParserTests(unittest.TestCase):
         parser = terminal.build_parser()
         args = parser.parse_args(["--uart", "115200, 8, none, 1, hw"])
         self.assertEqual(args.uart, "115200,8,n,1,rtscts")
+
+    def test_ble_name_validation_matches_the_firmware(self):
+        parser = terminal.build_parser()
+        for name in ("Bench Bee", "测试😀", "😀" * 7):
+            with self.subTest(name=name):
+                self.assertEqual(
+                    parser.parse_args(["--rename-ble", name]).rename_ble, name)
+        # Surrounding ASCII whitespace is trimmed rather than stored; NBSP and
+        # U+3000 are ordinary name bytes, exactly as the firmware sees them.
+        self.assertEqual(
+            parser.parse_args(["--rename-ble", "  Bee  "]).rename_ble, "Bee")
+        self.assertEqual(
+            parser.parse_args(["--rename-ble", "\u00a0Bee\u3000"]).rename_ble,
+            "\u00a0Bee\u3000")
+        for name in ("", "   ", "😀" * 8, "one\ntwo", "del\x7f",
+                     "c1\u0085", "line\u2028sep", "para\u2029sep"):
+            with self.subTest(name=name):
+                with self.assertRaises(SystemExit):
+                    parser.parse_args(["--rename-ble", name])
+
+    def test_ble_name_reply_parsing_takes_customness_only_from_a_query(self):
+        module = load_terminal()
+        self.assertEqual(
+            module.parse_ble_name("OK name=Bench Bee custom=yes", query=True),
+            "Bench Bee")
+        # A name that itself ends in the suffix text survives a query parse:
+        # only the final field belongs to the reply.
+        self.assertEqual(
+            module.parse_ble_name("OK name=Bee custom=yes custom=no", query=True),
+            "Bee custom=yes")
+        # A write's reply has no custom field to peel.
+        self.assertEqual(
+            module.parse_ble_name("OK name=Bee custom=yes"),
+            "Bee custom=yes")
+        self.assertEqual(
+            module.parse_ble_name("OK name=Bee\u3000 custom=no", query=True),
+            "Bee\u3000")
+
+    def test_device_names_from_the_air_cannot_drive_the_terminal(self):
+        module = load_terminal()
+        self.assertEqual(
+            module.printable_device_name("Bee\x1b[2J\x85name"), "Bee[2Jname")
+        self.assertEqual(module.printable_device_name(None), "(unknown)")
+        self.assertEqual(module.printable_device_name("\x1b"), "(unknown)")
+
+    def test_rename_and_reset_cannot_both_be_asked_for(self):
+        result = self.run_cli("--rename-ble", "Bee", "--reset-ble-name")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--rename-ble and --reset-ble-name are mutually exclusive",
+                      result.stderr)
+        # The parser refuses before any radio work; bleak was never imported.
+        self.assertNotIn("bleak", result.stderr.lower())
+
+
+class BleNameVerifyTests(unittest.IsolatedAsyncioTestCase):
+    """The write path must ask the board, not trust the write reply."""
+
+    def management(self, answer):
+        calls = []
+
+        class FakeManagement:
+            async def send(self, command):
+                calls.append(command)
+                return answer
+
+        return FakeManagement(), calls
+
+    async def test_a_rename_is_verified_with_a_query(self):
+        module = load_terminal()
+        management, calls = self.management(
+            b"OK name=Bench Bee custom=yes\r\n")
+        await module.verify_ble_name(management, "Bench Bee")
+        self.assertEqual(calls, [b"@n?"])
+
+    async def test_a_board_that_reports_another_name_fails_the_rename(self):
+        module = load_terminal()
+        management, calls = self.management(
+            b"OK name=Old Name custom=yes\r\n")
+        with self.assertRaisesRegex(RuntimeError, "reports"):
+            await module.verify_ble_name(management, "Bench Bee")
+        self.assertEqual(calls, [b"@n?"])
+
+    async def test_a_reset_only_requires_a_readable_name(self):
+        module = load_terminal()
+        management, calls = self.management(
+            b"OK name=Linkr Bee 078C custom=no\r\n")
+        await module.verify_ble_name(management, None)
+        self.assertEqual(calls, [b"@n?"])
+
+    async def test_an_unreadable_answer_fails_even_a_reset(self):
+        module = load_terminal()
+        management, calls = self.management(b"ERR name=1\r\n")
+        with self.assertRaisesRegex(RuntimeError, "did not report"):
+            await module.verify_ble_name(management, None)
+        self.assertEqual(calls, [b"@n?"])
 
 
 class CompletionTests(unittest.TestCase):
@@ -312,7 +409,7 @@ class CompletionTests(unittest.TestCase):
         # A prefix that several options share returns all of them.
         self.assertEqual(self.bash_complete("linkr_ble_terminal.py", "--json", "--q"),
                          ["--query-info", "--query-uart", "--query-wifi",
-                          "--query-webdav", "--quiet"])
+                          "--query-webdav", "--query-ble-name", "--quiet"])
         self.assertEqual(self.bash_complete("linkr_ble_terminal.py", "--quiet", "--j"),
                          ["--json"])
         # --flag=value is accepted by the parser, so the value completes too.
@@ -360,7 +457,9 @@ class ScanRuleTests(unittest.TestCase):
     def test_scan_with_a_control_action_continues(self):
         for extra in (["--query-info"], ["--pair"], ["--loopback-test"],
                       ["--wifi", "ssid,pass"], ["--uart", "115200,8,n,1,n"],
-                      ["--wifi-scan"], ["--webdav", "http://host/dav/"]):
+                      ["--wifi-scan"], ["--webdav", "http://host/dav/"],
+                      ["--query-ble-name"], ["--rename-ble", "Bee"],
+                      ["--reset-ble-name"]):
             with self.subTest(extra=extra):
                 self.assertTrue(
                     terminal.has_control_action(self.parse("--scan", *extra)))
@@ -535,18 +634,135 @@ class WifiCredentialTests(unittest.TestCase):
                 terminal.resolve_wifi_credentials("ssid", str(key))
 
 
-class DeviceMatchTests(unittest.TestCase):
-    def test_exact_name_wins_over_prefix(self):
-        devices = [FakeDevice("Linkr BLE UART 2", "AA:2"),
-                   FakeDevice("Linkr BLE UART", "AA:1")]
+class BoardSelectionTests(unittest.TestCase):
+    """A board is found by the service it speaks, not by the label it carries.
+
+    The name is the owner's to change, so a host that looked for a board by
+    its name would lose it the moment it was renamed.
+    """
+
+    def board(self, name, address="AA:BB:CC:DD:EE:FF", services=()):
+        device = FakeDevice(name, address)
+        device.service_uuids = tuple(services)
+        return device
+
+    def test_a_board_is_found_by_the_service_it_speaks(self):
+        devices = [
+            self.board("Linkr Bee 078C", "AA:1"),
+            self.board("测试😀", "AA:2", services=[terminal.MGMT_SERVICE_UUID]),
+        ]
+        self.assertEqual(terminal.match_device(devices, None), "AA:2")
+
+    def test_a_renamed_board_is_still_found(self):
+        devices = [self.board("Bench Bee", "AA:3", services=[terminal.MGMT_SERVICE_UUID])]
+        self.assertEqual(terminal.match_device(devices, None), "AA:3")
+
+    def test_a_legacy_board_is_the_fallback(self):
+        # The oldest NUS-only firmware has no service to be found by, so its
+        # fixed name is the only thing that recognises it.
+        devices = [self.board("Linkr BLE UART-3", "AA:4")]
+        self.assertEqual(terminal.match_device(devices, None), "AA:4")
+
+    def test_a_board_without_the_service_is_not_guessed_at(self):
+        # A board that says nothing about the service and carries no legacy
+        # name is not a board this client may talk to.
+        self.assertIsNone(terminal.match_device([self.board("Other", "AA:5")], None))
+
+    def test_a_name_the_user_gave_still_matches(self):
+        devices = [self.board("测试😀", "AA:6")]
+        self.assertEqual(terminal.match_device(devices, "测试😀"), "AA:6")
+        self.assertEqual(terminal.match_device(devices, "测试*"), "AA:6")
+        self.assertIsNone(terminal.match_device(devices, "Linkr Bee"))
+
+    def test_a_name_is_compared_without_regard_to_its_case(self):
+        devices = [self.board("Linkr Bee 078C", "AA:7")]
+        self.assertEqual(terminal.match_device(devices, "linkr bee"), "AA:7")
+
+    def test_the_failure_names_the_boards_that_were_there(self):
+        devices = [self.board("测试😀", "AA:8"), self.board("Other", "BB:9")]
+        with self.assertRaises(RuntimeError) as caught:
+            asyncio.run(terminal.find_device("Linkr Bee", None, 0.1, devices=devices))
+        message = str(caught.exception)
+        self.assertIn("AA:8", message, "the address is what reaches the board")
+        self.assertIn("测试😀", message, "and the name it answers to")
+        self.assertIn("--address", message, "and the way to use it")
+
+    def test_the_failure_without_a_name_says_the_same(self):
+        devices = [self.board("测试😀", "AA:8")]
+        with self.assertRaises(RuntimeError) as caught:
+            asyncio.run(terminal.find_device(None, None, 0.1, devices=devices))
+        message = str(caught.exception)
+        self.assertIn("AA:8", message)
+        self.assertIn("--address", message)
+
+    def test_an_address_reaches_a_renamed_board(self):
         self.assertEqual(
-            terminal.match_device(devices, "Linkr BLE UART"), "AA:1")
+            asyncio.run(terminal.find_device(None, "AA:8", 0.1, devices=[])),
+            "AA:8",
+        )
+
+    def test_a_completed_scan_is_used_without_bleak(self):
+        # The host that hands over a scan does not need the radio library to
+        # pick an address from it, and a CI machine without bleak installed
+        # must still be able to run these rules.
+        devices = [self.board("测试😀", "AA:9", services=[terminal.MGMT_SERVICE_UUID])]
+        # The module caches the imported names, so they are cleared here as
+        # well: without that the guard would pass on a machine that had
+        # already imported bleak and prove nothing.
+        with patch.dict(sys.modules, {"bleak": None}), \
+                patch.object(terminal, "BleakClient", None), \
+                patch.object(terminal, "BleakScanner", None):
+            self.assertEqual(
+                asyncio.run(terminal.find_device(None, None, 0.1, devices=devices)),
+                "AA:9",
+            )
+
+
+class DeviceIdTests(unittest.TestCase):
+    """The Device ID is what makes the Management Service a filter."""
+
+    def test_a_linkr_device_id_is_recognised(self):
+        self.assertTrue(terminal.is_linkr_device_id(b"LINKRBLE\x01\x00" + bytes(6)))
+        self.assertTrue(terminal.is_linkr_device_id(b"LINKRBLE\x01\x00\x01\x02\x03\x04\x05\x06"))
+
+    def test_another_device_id_is_not(self):
+        self.assertFalse(terminal.is_linkr_device_id(b"\x00" * 16))
+        self.assertFalse(terminal.is_linkr_device_id(b"LINKRBLE\x01\x00"))
+        self.assertFalse(terminal.is_linkr_device_id(b"LINKRBEE\x01\x00" + bytes(6)))
+
+
+class DeviceMatchTests(unittest.TestCase):
+    def test_automatic_discovery_accepts_renamed_and_unnamed_linkr_devices(self):
+        self.assertIsNone(terminal.build_parser().parse_args([]).name)
+        for name in ("Bench Bee", "测试设备", None):
+            with self.subTest(name=name):
+                device = FakeDevice(name, "AA:1", service_uuids=(terminal.MGMT_SERVICE_UUID,))
+                self.assertEqual(terminal.match_device([device], None), "AA:1")
+
+    def test_automatic_discovery_keeps_legacy_names_but_rejects_unrelated_nus(self):
+        for name in ("Linkr BLE UART", "Linkr BLE UART-3", "linkr ble uart 7F2C"):
+            self.assertEqual(terminal.match_device([FakeDevice(name, "AA:1")], None), "AA:1")
+        for name in ("Linkr Bee 078C", "Other", "Linkr BLE UARTISH", None):
+            device = FakeDevice(name, "BB:1", service_uuids=("6e400001-b5a3-f393-e0a9-e50e24dcca9e",))
+            self.assertIsNone(terminal.match_device([device], None))
+
+    def test_explicit_name_overrides_service_discovery(self):
+        devices = [FakeDevice("Bench Bee", "AA:1", service_uuids=(terminal.MGMT_SERVICE_UUID,)),
+                   FakeDevice("Other", "BB:1")]
+        self.assertEqual(terminal.match_device(devices, "Other"), "BB:1")
+        self.assertIsNone(terminal.match_device(devices, "Linkr Bee"))
+
+    def test_exact_name_wins_over_prefix(self):
+        devices = [FakeDevice("Linkr Bee 2", "AA:2"),
+                   FakeDevice("Linkr Bee", "AA:1")]
+        self.assertEqual(
+            terminal.match_device(devices, "Linkr Bee"), "AA:1")
 
     def test_prefix_matches_the_default_name(self):
         devices = [FakeDevice("Other", "BB:1"),
-                   FakeDevice("Linkr BLE UART 7F2C", "AA:7")]
+                   FakeDevice("Linkr Bee 7F2C", "AA:7")]
         self.assertEqual(
-            terminal.match_device(devices, "Linkr BLE UART*"), "AA:7")
+            terminal.match_device(devices, "Linkr Bee*"), "AA:7")
 
     def test_no_match_returns_none(self):
         self.assertIsNone(terminal.match_device([FakeDevice("Other", "BB:1")], "x*"))
@@ -556,8 +772,11 @@ class DeviceMatchTests(unittest.TestCase):
 
         class FakeScanner:
             @staticmethod
-            async def discover(timeout):
-                return devices
+            async def discover(timeout, return_adv):
+                assert return_adv
+                return {dev.address: (dev, types.SimpleNamespace(
+                    local_name=dev.name, rssi=dev.rssi, service_uuids=[]))
+                    for dev in devices}
 
         buffer = io.StringIO()
         with patch.object(terminal, "BleakClient", object), \
@@ -576,14 +795,30 @@ class DeviceMatchTests(unittest.TestCase):
             async def discover(timeout):  # pragma: no cover - must not be called
                 raise AssertionError("find_device scanned twice")
 
-        devices = [FakeDevice("Linkr BLE UART 7F2C", "AA:7")]
+        devices = [FakeDevice("Linkr Bee 7F2C", "AA:7")]
         with patch.object(terminal, "BleakClient", object), \
                 patch.object(terminal, "BleakScanner", ExplodingScanner):
             self.assertEqual(
-                asyncio.run(terminal.find_device("Linkr BLE UART*", None, 0.1,
+                asyncio.run(terminal.find_device("Linkr Bee*", None, 0.1,
                                                  devices=devices)),
                 "AA:7",
             )
+
+    def test_scan_reuses_advertisement_services_for_default_selection(self):
+        device = FakeDevice("Cached name", "AA:1")
+        adv = types.SimpleNamespace(local_name="测试设备", rssi=-42,
+                                    service_uuids=[terminal.MGMT_SERVICE_UUID.upper()])
+        scanner = types.SimpleNamespace(discover=AsyncMock(
+            return_value={device.address: (device, adv)}))
+        async def run():
+            scanned = await terminal.scan_devices(0.1)
+            self.assertEqual(scanned[0].name, "测试设备")
+            return await terminal.find_device(None, None, 0.1, devices=scanned)
+        with patch.object(terminal, "BleakClient", object), \
+                patch.object(terminal, "BleakScanner", scanner), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(asyncio.run(run()), "AA:1")
+        scanner.discover.assert_awaited_once_with(timeout=0.1, return_adv=True)
 
     def test_explicit_address_skips_the_scan(self):
         self.assertEqual(

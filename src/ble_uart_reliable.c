@@ -64,6 +64,74 @@ static struct k_sem indication_done;
 static struct bt_gatt_indicate_params indication_params;
 static int indication_result;
 
+/*
+ * Instrumentation for the confirmed-indication handoff.
+ *
+ * Question it was added to answer: do the 40-92 ms per-fragment handoff stalls
+ * come from this module's own 25 ms retry backoff (`slept_ms`), or from waiting
+ * on the peer (`wait_max_ms`)? The counters answer by measurement rather than
+ * assumption and change no control flow.
+ *
+ * Measured outcome (2026-10-12, diagnostic firmware, 16 KiB uplink):
+ *   ind=254 retry=0 busy=0 nomem=0 slept_ms=0 timeout=0 wait_max_ms=123
+ * The backoff never fired — not once in 300 indications. So the bimodal
+ * 30 ms / 60 ms split is NOT the retry sleep; the stall is the confirmed
+ * indication round trip itself, serialised against a 30 ms connection interval
+ * (air capture: Write Req -> Write Resp took 54.7 ms, and adjacent indications
+ * landed 30.0 ms apart). Kept in the tree because it re-answers the same
+ * question after any future change to the handoff path, at the cost of a few
+ * atomics.
+ */
+static atomic_t diag_ind_total;
+static atomic_t diag_ind_retry;
+static atomic_t diag_ind_busy;
+static atomic_t diag_ind_nomem;
+static atomic_t diag_ind_slept_ms;
+static atomic_t diag_ind_timeout;
+static atomic_t diag_ind_wait_max_ms;
+
+void linkr_uart_reliable_diag(uint32_t *total, uint32_t *retry, uint32_t *busy,
+			      uint32_t *nomem, uint32_t *slept_ms,
+			      uint32_t *timeout, uint32_t *wait_max_ms)
+{
+	if (total) {
+		*total = (uint32_t)atomic_get(&diag_ind_total);
+	}
+	if (retry) {
+		*retry = (uint32_t)atomic_get(&diag_ind_retry);
+	}
+	if (busy) {
+		*busy = (uint32_t)atomic_get(&diag_ind_busy);
+	}
+	if (nomem) {
+		*nomem = (uint32_t)atomic_get(&diag_ind_nomem);
+	}
+	if (slept_ms) {
+		*slept_ms = (uint32_t)atomic_get(&diag_ind_slept_ms);
+	}
+	if (timeout) {
+		*timeout = (uint32_t)atomic_get(&diag_ind_timeout);
+	}
+	if (wait_max_ms) {
+		*wait_max_ms = (uint32_t)atomic_get(&diag_ind_wait_max_ms);
+	}
+}
+
+/* Keep the largest observed wait without a lock: read, compare, retry on a
+ * lost race. The value is a diagnostic, so a torn update is not a concern as
+ * long as the maximum never goes backwards. */
+static void diag_note_max(atomic_t *slot, uint32_t value)
+{
+	uint32_t current = (uint32_t)atomic_get(slot);
+
+	while (value > current) {
+		if (atomic_cas(slot, current, value)) {
+			break;
+		}
+		current = (uint32_t)atomic_get(slot);
+	}
+}
+
 static uint32_t sequence_next(uint32_t sequence)
 {
 	return sequence == UINT32_MAX ? 1 : sequence + 1;
@@ -222,6 +290,7 @@ static int indicate_fragment(struct bt_conn *conn, const uint8_t *data,
 			     uint16_t len)
 {
 	int err;
+	int64_t started_at = k_uptime_get();
 
 	if (!atomic_get(&indication_enabled) ||
 	    !bt_gatt_is_subscribed(conn, &linkr_uart_reliable_service.attrs[4],
@@ -229,6 +298,7 @@ static int indicate_fragment(struct bt_conn *conn, const uint8_t *data,
 		return -ENOTCONN;
 	}
 
+	atomic_inc(&diag_ind_total);
 	for (int retry = 0; retry < 20; retry++) {
 		k_sem_reset(&indication_done);
 		indication_result = -ETIMEDOUT;
@@ -242,6 +312,16 @@ static int indicate_fragment(struct bt_conn *conn, const uint8_t *data,
 		if (err != -EBUSY && err != -ENOMEM) {
 			break;
 		}
+		/* Count the reason before sleeping: the split between -EBUSY and
+		 * -ENOMEM says whether the ATT handshake is still settling or the
+		 * ACL pool is genuinely exhausted. */
+		if (err == -EBUSY) {
+			atomic_inc(&diag_ind_busy);
+		} else {
+			atomic_inc(&diag_ind_nomem);
+		}
+		atomic_inc(&diag_ind_retry);
+		atomic_add(&diag_ind_slept_ms, 25);
 		k_sleep(K_MSEC(25));
 	}
 	if (err) {
@@ -250,11 +330,17 @@ static int indicate_fragment(struct bt_conn *conn, const uint8_t *data,
 	if (k_sem_take(&indication_done, K_MSEC(INDICATE_TIMEOUT_MS))) {
 		/* Do not return while Zephyr still owns indication_params. Force the
 		 * connection down so GATT completes the request, then wait for destroy. */
+		atomic_inc(&diag_ind_timeout);
 		LOG_WRN("Reliable UART indication timed out; disconnecting peer");
 		(void)bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
 		(void)k_sem_take(&indication_done, K_FOREVER);
 		return -ETIMEDOUT;
 	}
+	/* Wall time from submitting the indication to its confirmation landing.
+	 * This includes any sleep the retry above added, so a max that keeps
+	 * climbing while `slept_ms` stays flat means the stall is elsewhere. */
+	diag_note_max(&diag_ind_wait_max_ms,
+		      (uint32_t)(k_uptime_get() - started_at));
 	return indication_result;
 }
 
@@ -304,8 +390,12 @@ int linkr_uart_reliable_send(struct bt_conn *conn, const uint8_t *data,
 	if (!conn || !data || !len || len > LINKR_UART_RELIABLE_MAX_PAYLOAD) {
 		return -EINVAL;
 	}
-	mtu_payload = MIN((uint16_t)(bt_gatt_get_mtu(conn) - 3),
-			  (uint16_t)sizeof(fragment));
+	uint16_t mtu = bt_gatt_get_mtu(conn);
+
+	/* Clamp before subtracting: an unexchanged MTU reads back as 0 and
+	 * `0 - 3` in uint16_t wraps to 65533, which the MIN below would then
+	 * carry into the fragment size. */
+	mtu_payload = MIN(mtu > 3 ? mtu - 3 : 1, (uint16_t)sizeof(fragment));
 	if (mtu_payload <= sizeof(*header)) {
 		return -EMSGSIZE;
 	}

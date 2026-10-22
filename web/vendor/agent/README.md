@@ -28,7 +28,7 @@ The Vite (Capacitor) and ArkWeb builds do not use this bundle: they alias
 
 - The bundle is fetched only when a question is asked, so the terminal keeps its
   original load time. All three provider adapters are included, which is why the
-  artifact is 979 KiB minified (252 KiB gzip) where an OpenAI-only bundle was
+  artifact is 1241 KiB minified (307 KiB gzip) where an OpenAI-only bundle was
   488 KiB. The Vite and ArkWeb builds code-split it out of the initial download.
 - Browser requests to the model endpoint are subject to CORS. Most hosted
   providers and local model servers (Ollama, LM Studio, llama.cpp) answer a

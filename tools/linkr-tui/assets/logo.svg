@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200" role="img" aria-label="Linkr Bee icon">
+  <title>Linkr Bee icon</title>
+  <desc>Green hexagonal terminal mark: a "&gt;" prompt chevron and a cursor bar inside a rounded hexagonal outline.</desc>
+
+  <!-- hexagon (pointy-top), r = 80 centered at 100,100 -->
+  <polygon
+    points="100,20 169.28,60 169.28,140 100,180 30.72,140 30.72,60"
+    fill="none"
+    stroke="#3DD68C"
+    stroke-width="13"
+    stroke-linecap="round"
+    stroke-linejoin="round"/>
+
+  <!-- prompt chevron: > -->
+  <polyline
+    points="70,74 120,100 70,126"
+    fill="none"
+    stroke="#3DD68C"
+    stroke-width="15"
+    stroke-linecap="round"
+    stroke-linejoin="round"/>
+
+  <!-- cursor bar -->
+  <line
+    x1="140" y1="72" x2="140" y2="128"
+    stroke="#3DD68C"
+    stroke-width="15"
+    stroke-linecap="round"/>
+</svg>

@@ -24,6 +24,9 @@ function planSection(plan, zh) {
   for (const step of plan) {
     out.push(`- [${step.status || "pending"}] ${redactTaskText(step.title || "")}`.trimEnd());
     if (step.verification) out.push(`  - ${zh ? "验证" : "Verification"}: ${redactTaskText(step.verification)}`);
+    if (step.expectedResult) out.push(`  - ${zh ? "预期" : "Expected"}: ${redactTaskText(step.expectedResult)}`);
+    if (step.completion) out.push(`  - ${zh ? "证据类别" : "Evidence category"}: ${step.completion}`);
+    for (const evidence of step.evidence || []) out.push(`  - ${redactTaskText(evidence.id)}: ${redactTaskText(evidence.tool)} · ${redactTaskText(evidence.subject)} · ${redactTaskText(evidence.status)} · ${redactTaskText(JSON.stringify(evidence.expected || {}))}`);
     if (step.nextAction) out.push(`  - ${zh ? "下一步" : "Next"}: ${redactTaskText(step.nextAction)}`);
   }
   out.push("");

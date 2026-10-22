@@ -37,8 +37,14 @@ static int ordered_receive(const struct device *dev, struct net_buf *buf)
 			   sys_get_le16(p + 4) == pending_handle) {
 			complete = true;
 			success = p[3] == 0 && p[6] != 0;
-		} else if (p[1] == BT_HCI_EVT_DISCONN_COMPLETE && buf->len >= 7 &&
-			   sys_get_le16(p + 4) == pending_handle) {
+		} else if (p[1] == BT_HCI_EVT_DISCONN_COMPLETE && buf->len >= 7) {
+			/* One connection only: a disconnect ends any quarantine,
+			 * whatever handle it names. The link is gone, so the
+			 * quarantined SMP distribution packets can never be used —
+			 * and gating this on `pending_handle` left up to
+			 * PENDING_MAX buffers out of the pool for the rest of the
+			 * session whenever the handle did not match (a stale
+			 * handle, a missed event, an abnormal disconnect). */
 			clear_pending();
 		}
 	} else if (buf->len >= 5 && p[0] == BT_HCI_H4_ACL &&
