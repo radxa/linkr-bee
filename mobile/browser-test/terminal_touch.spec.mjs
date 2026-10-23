@@ -326,6 +326,58 @@ test("long press with the keyboard open selects and copies without closing it", 
   await expect.poll(() => page.evaluate(() => window.__terminalCopied)).toBe(selected);
 });
 
+test("a long press keeps a keyboard the WebView took focus from", async ({ page, context }) => {
+  // Physical Android WebViews drop activeElement while their own long-press
+  // gesture runs, which used to read as "the keyboard was closed" and made the
+  // app dismiss an IME the user had just opened. The IME state is judged by the
+  // visual viewport, so the gesture must survive a lost focus.
+  await openTerminal(page);
+  await page.evaluate(() => window.__terminalTest.state.term.focus());
+  await page.evaluate(() => {
+    Object.defineProperty(visualViewport, "height", {
+      configurable: true,
+      get: () => 420,
+    });
+    visualViewport.dispatchEvent(new Event("resize"));
+  });
+  const keyboardButton = page.locator("#focusTerminalButton");
+  await expect(keyboardButton).toHaveAttribute("aria-pressed", "true");
+
+  const box = await page.locator(".xterm-screen").boundingBox();
+  const termSize = await page.evaluate(() => ({
+    rows: window.__terminalTest.state.term.rows,
+    cols: window.__terminalTest.state.term.cols,
+  }));
+  const client = await context.newCDPSession(page);
+  const x = box.x + (box.width / termSize.cols) * 12;
+  const y = box.y + box.height - 50;
+
+  await page.evaluate(() => {
+    window.__terminalBlurs = 0;
+    window.__terminalTest.state.term.textarea.addEventListener("blur", () => {
+      window.__terminalBlurs += 1;
+    });
+  });
+
+  await client.send("Input.dispatchTouchEvent", {
+    type: "touchStart",
+    touchPoints: [{ x, y, radiusX: 8, radiusY: 8, force: 1, id: 7 }],
+  });
+  await page.waitForTimeout(600);
+  // The WebView's gesture detector moves focus off the textarea mid-gesture.
+  await page.evaluate(() => document.activeElement?.blur());
+  await client.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+
+  expect(await page.evaluate(() => window.__terminalTest.state.term.getSelection()))
+    .toBe("abcdefghijklmnopqrstuvwxyz");
+  // Only the simulated one: the app itself must not blur the terminal when the
+  // keyboard was already up, and it must hand focus back afterwards.
+  expect(await page.evaluate(() => window.__terminalBlurs)).toBe(1);
+  await expect.poll(() => page.evaluate(() => document.activeElement?.className || ""))
+    .toContain("xterm-helper-textarea");
+  await expect(keyboardButton).toHaveAttribute("aria-pressed", "true");
+});
+
 test("swiping history keeps an open keyboard open", async ({ page, context }) => {
   await openTerminal(page);
   await page.evaluate(() => window.__terminalTest.state.term.focus());

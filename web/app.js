@@ -2657,7 +2657,13 @@ function beginTerminalLongPress(clientX, clientY) {
     return false;
   }
   terminalTouch.longPress = true;
-  suppressTerminalFocus();
+  // Only the synthetic click has to be swallowed when the keyboard is already
+  // up: suppressing focus as well is what made the IME disappear on release.
+  if (terminalTouch.blurOnEnd) {
+    suppressTerminalFocus();
+  } else {
+    terminalTouch.suppressClick = true;
+  }
   navigator.vibrate?.(8);
   return true;
 }
@@ -2683,8 +2689,9 @@ function onTerminalTouchStart(event) {
   terminalTouch.selectionBase = null;
   // Read the keyboard state here, not in pointerdown: some WebViews deliver
   // only touch events. A keyboard that is already open must stay open while
-  // the user selects text or scrolls.
-  terminalTouch.blurOnEnd = !terminalHasFocus();
+  // the user selects text or scrolls, so judge it by the IME, not by
+  // activeElement — the WebView may take focus away mid-gesture.
+  terminalTouch.blurOnEnd = !terminalImeIsOpen();
   terminalTouch.cancelled = false;
   // Drop any WebView-owned DOM selection before xterm draws its own. A later
   // collapsed DOM selection inside the rows makes xterm clear the selection.
@@ -2733,7 +2740,11 @@ function onTerminalTouchMove(event) {
     Math.abs(dy) >= Math.abs(dx)
   ) {
     terminalTouch.scrolling = true;
-    suppressTerminalFocus();
+    if (terminalTouch.blurOnEnd) {
+      suppressTerminalFocus();
+    } else {
+      terminalTouch.suppressClick = true;
+    }
     clearTerminalTouchTimer();
   }
   if (terminalTouch.scrolling) {
@@ -2792,15 +2803,26 @@ function finishTerminalTouch(event) {
   }
 
   if (wasScrolling || wasLongPress || wasCancelled || (heldLongEnough && !wasMoved)) {
-    // Keep the synthetic click/mousedown and any delayed WebView focus from
-    // reopening the keyboard after a scroll or selection gesture. The next
-    // touchstart releases the guard, so a deliberate tap still opens it.
-    suppressTerminalFocus(1200);
     if (blurOnEnd) {
+      // The keyboard was closed when the gesture started, so keep it closed and
+      // hold focus off long enough for the WebView's delayed focus and the
+      // synthetic click to arrive. The next touchstart releases the guard, so a
+      // deliberate tap still opens it.
+      suppressTerminalFocus(1200);
       state.term?.blur();
       for (const delay of [0, 120, 400, 800]) {
         window.setTimeout(blurTerminalIfFocusSuppressed, delay);
       }
+    } else {
+      // The keyboard was already open and must stay open. Release the guard
+      // that touchstart armed, otherwise the next focusin is killed, and take
+      // focus back if the WebView moved it during its own long-press handling.
+      releaseTerminalFocusSuppression();
+      window.requestAnimationFrame(() => {
+        if (state.connected && !terminalHasFocus()) {
+          state.term?.focus();
+        }
+      });
     }
     event.preventDefault();
     return;
@@ -4144,6 +4166,19 @@ function terminalHasFocus() {
   return Boolean(active && elements.terminalOutput.contains(active));
 }
 
+/* Whether the soft keyboard is up. On a coarse-pointer host the visual viewport
+ * is the truth: Android WebViews move — and can drop — activeElement while their
+ * own long-press gesture runs, and reading that as "the keyboard is closed" made
+ * a long press dismiss a keyboard the user had just opened. Focus is still the
+ * fallback, so hosts that cannot report an IME keep the old behaviour.
+ */
+function terminalImeIsOpen() {
+  if ((coarsePointerMedia.matches || isHarmonyHost) && softKeyboardLayout.active) {
+    return true;
+  }
+  return terminalHasFocus();
+}
+
 function softKeyboardIsVisible() {
   if (!terminalHasFocus()) {
     return false;
@@ -4637,7 +4672,7 @@ function bind() {
     event.stopPropagation();
     const x = event.clientX || terminalTouch.startX;
     const y = event.clientY || terminalTouch.startY;
-    if (beginTerminalLongPress(x, y)) {
+    if (beginTerminalLongPress(x, y) && terminalTouch.blurOnEnd) {
       suppressTerminalFocus(1200);
     }
   });
