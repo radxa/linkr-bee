@@ -2668,8 +2668,37 @@ function beginTerminalLongPress(clientX, clientY) {
   return true;
 }
 
+/* The WebView's contextmenu backup can arrive without a touchstart the state
+ * machine accepted (a second finger, or a WebView that only reports the hold
+ * this way). Arm the gesture so the touchend that follows still owns — and
+ * therefore closes — the selection it is about to make.
+ */
+function armTerminalHoldFallback(clientX, clientY) {
+  if (terminalTouch.active || !state.term) {
+    return;
+  }
+  clearTerminalTouchTimer();
+  terminalTouch.active = true;
+  terminalTouch.startX = clientX;
+  terminalTouch.startY = clientY;
+  terminalTouch.startTime = performance.now();
+  terminalTouch.lastY = clientY;
+  terminalTouch.moved = false;
+  terminalTouch.scrolling = false;
+  terminalTouch.longPress = false;
+  terminalTouch.selectionBase = null;
+  terminalTouch.blurOnEnd = !terminalImeIsOpen();
+  terminalTouch.cancelled = false;
+  hideTerminalSelectionHandles();
+  state.term.clearSelection();
+}
+
 function onTerminalTouchStart(event) {
-  if (!state.connected || !state.term || event.touches.length !== 1) {
+  // Not gated on state.connected: the transcript stays selectable and scrollable
+  // while the terminal is disconnected. Skipping the state machine there left a
+  // selection from the contextmenu backup path with no owner, so nothing ever
+  // cleared it and every later tap hit a swallowed click.
+  if (!state.term || event.touches.length !== 1) {
     return;
   }
   const touch = event.touches[0];
@@ -2699,6 +2728,13 @@ function onTerminalTouchStart(event) {
   if (domSelection?.rangeCount) {
     domSelection.removeAllRanges();
   }
+  // Also stop the WebView from starting its own long-press text selection. With
+  // no connection the textarea never takes focus, so the press lands on the page
+  // and Android opens its selection mode instead: that swallows every later
+  // touch (taps, buttons, the back gesture) until the app is restarted. The
+  // gesture is ours end to end — tap focus, scrolling and selection all run in
+  // this handler — so the default is never the right thing here.
+  event.preventDefault();
   // Clear our own selection UI first: clearSelection() fires the change event,
   // and the endpoints must already be gone so the guard does not reassert the
   // previous selection.
@@ -2770,6 +2806,11 @@ function onTerminalTouchMove(event) {
 
 function finishTerminalTouch(event) {
   if (!terminalTouch.active) {
+    // A gesture that never armed the state machine (a second finger, or a
+    // WebView that only reported the hold through contextmenu) must not leave
+    // the selection guard armed for the rest of the session.
+    terminalTouch.longPress = false;
+    terminalTouch.suppressClick = false;
     return;
   }
   const wasScrolling = terminalTouch.scrolling;
@@ -4649,7 +4690,10 @@ function bind() {
     window.requestAnimationFrame(() => state.term?.focus());
   });
   elements.terminalOutput.addEventListener("touchstart", onTerminalTouchStart, {
-    passive: true,
+    // Not passive: the handler cancels the default so a WebView cannot start its
+    // own long-press selection, which would swallow the rest of the session's
+    // touches. Scrolling and tapping are driven from these handlers.
+    passive: false,
   });
   elements.terminalOutput.addEventListener("touchmove", onTerminalTouchMove, {
     passive: false,
@@ -4672,6 +4716,7 @@ function bind() {
     event.stopPropagation();
     const x = event.clientX || terminalTouch.startX;
     const y = event.clientY || terminalTouch.startY;
+    armTerminalHoldFallback(x, y);
     if (beginTerminalLongPress(x, y) && terminalTouch.blurOnEnd) {
       suppressTerminalFocus(1200);
     }

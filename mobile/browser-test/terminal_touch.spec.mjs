@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 
-async function openTerminal(page, { android = false } = {}) {
+async function openTerminal(page, { android = false, connected = true } = {}) {
   if (android) {
     await page.addInitScript(() => {
       // The Capacitor bootstrap only installs LinkrNativeBle on a native
@@ -23,7 +23,7 @@ async function openTerminal(page, { android = false } = {}) {
   });
   await page.goto("/");
   await page.waitForFunction(() => window.__terminalTest?.state.term);
-  await page.evaluate(async () => {
+  await page.evaluate(async (connected) => {
     const { state, setConnected } = window.__terminalTest;
     window.sent = [];
     state.mode = "ws";
@@ -31,14 +31,14 @@ async function openTerminal(page, { android = false } = {}) {
       readyState: 1,
       send: (bytes) => window.sent.push(new TextDecoder().decode(bytes)),
     };
-    setConnected(true);
+    setConnected(connected);
     await new Promise((resolve) => state.term.write(
       Array.from({ length: 120 }, (_, i) =>
         `line ${String(i).padStart(3, "0")} abcdefghijklmnopqrstuvwxyz\r\n`).join(""),
       resolve,
     ));
     state.term.blur();
-  });
+  }, connected);
 }
 
 async function touchDrag(context, page, { startY, deltaY }) {
@@ -555,4 +555,49 @@ test("native Android keeps keyboard resizes local instead of sending stty", asyn
   await expect(page.locator("html")).toHaveClass(/soft-keyboard-open/);
   await expect.poll(() => page.evaluate(() => window.__terminalTest.state.term.rows)).toBeLessThan(40);
   expect(await page.evaluate(() => window.sent.filter((text) => text.startsWith("stty ")))).toEqual([]);
+});
+
+test("a long press while disconnected can be dismissed and repeated", async ({ page }) => {
+  // Nothing is connected, so the textarea never takes focus and a phone WebView
+  // reports the hold through its contextmenu backup path. That path used to
+  // start a selection while the touch state machine was skipped, and the
+  // selection then stuck: the tap that should dismiss it hit a swallowed click,
+  // and no later long press could move it.
+  await openTerminal(page, { connected: false });
+  expect(await page.evaluate(() => window.__terminalTest.state.connected)).toBe(false);
+
+  const box = await page.locator(".xterm-screen").boundingBox();
+  const rows = await page.evaluate(() => window.__terminalTest.state.term.rows);
+  const rowHeight = box.height / rows;
+  const copy = page.locator(".terminal-selection-copy");
+
+  const longPressAt = async (y) => {
+    await page.evaluate(({ x, y: clientY }) => {
+      document.querySelector(".xterm-screen").dispatchEvent(new MouseEvent("contextmenu", {
+        bubbles: true,
+        cancelable: true,
+        clientX: x,
+        clientY,
+      }));
+    }, { x: box.x + 40, y });
+    await page.waitForTimeout(80);
+  };
+
+  await longPressAt(box.y + rowHeight * 2);
+  const first = await page.evaluate(() => window.__terminalTest.state.term.getSelection());
+  expect(first).not.toBe("");
+  await expect(copy).toBeVisible();
+
+  // A tap somewhere else must dismiss the selection instead of being eaten.
+  await page.touchscreen.tap(box.x + 220, box.y + rowHeight * 6);
+  await page.waitForTimeout(200);
+  await expect(copy).toBeHidden();
+  expect(await page.evaluate(() => window.__terminalTest.state.term.getSelection())).toBe("");
+
+  // And a second long press has to move the selection to the new row.
+  await longPressAt(box.y + rowHeight * 4);
+  const second = await page.evaluate(() => window.__terminalTest.state.term.getSelection());
+  expect(second).not.toBe("");
+  expect(second).not.toBe(first);
+  await expect(copy).toBeVisible();
 });
