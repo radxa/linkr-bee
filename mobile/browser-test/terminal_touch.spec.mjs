@@ -601,3 +601,79 @@ test("a long press while disconnected can be dismissed and repeated", async ({ p
   expect(second).not.toBe(first);
   await expect(copy).toBeVisible();
 });
+
+/* Android resizes only the visual viewport when its IME opens or closes, and
+ * the app reads that height to decide whether the keyboard is up. Define the
+ * getter so a spec can walk the same heights a phone reports. */
+async function setVisualViewportHeight(page, height) {
+  await page.evaluate((next) => {
+    Object.defineProperty(visualViewport, "height", {
+      configurable: true,
+      get: () => next,
+    });
+    visualViewport.dispatchEvent(new Event("resize"));
+  }, height);
+  // The layout pass runs in a requestAnimationFrame callback.
+  await page.waitForTimeout(80);
+}
+
+test("a tap brings back a keyboard Android dismissed without blurring", async ({ page }) => {
+  // Android's own hide button removes the IME and leaves the textarea focused,
+  // and a long press plus Copy ends in the same state. focus() is a no-op on a
+  // focused element, so the tap has to cycle the focus or the terminal cannot be
+  // typed into again.
+  await openTerminal(page);
+  await page.evaluate(() => window.__terminalTest.state.term.focus());
+  await expect.poll(() => page.evaluate(() => document.activeElement?.className || ""))
+    .toContain("xterm-helper-textarea");
+
+  await setVisualViewportHeight(page, 420);
+  await setVisualViewportHeight(page, 844);
+  const keyboardButton = page.locator("#focusTerminalButton");
+  await expect(keyboardButton).toHaveAttribute("aria-pressed", "false");
+  expect(await page.evaluate(() => document.activeElement?.className || ""))
+    .toContain("xterm-helper-textarea");
+
+  await page.evaluate(() => {
+    window.__terminalBlurs = 0;
+    window.__terminalTest.state.term.textarea.addEventListener("blur", () => {
+      window.__terminalBlurs += 1;
+    });
+  });
+  const box = await page.locator(".xterm-screen").boundingBox();
+  await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
+
+  // Exactly one blurred focus: that focus change is what reopens the IME.
+  await expect.poll(() => page.evaluate(() => window.__terminalBlurs)).toBe(1);
+  await expect.poll(() => page.evaluate(() => document.activeElement?.className || ""))
+    .toContain("xterm-helper-textarea");
+});
+
+test("a tap while the IME animates open leaves the keyboard alone", async ({ page }) => {
+  // The visual viewport reports a partial height loss until the IME finishes
+  // opening. Reading that moment as "the keyboard is down" would make a tap
+  // dismiss a keyboard the user had just opened, so only a viewport that has
+  // fully recovered counts as dismissed.
+  await openTerminal(page);
+  await page.evaluate(() => window.__terminalTest.state.term.focus());
+  await expect.poll(() => page.evaluate(() => document.activeElement?.className || ""))
+    .toContain("xterm-helper-textarea");
+
+  await setVisualViewportHeight(page, 420);
+  // 760 is between "no keyboard" and the 20 % threshold: the IME is mid-flight.
+  await setVisualViewportHeight(page, 760);
+
+  await page.evaluate(() => {
+    window.__terminalBlurs = 0;
+    window.__terminalTest.state.term.textarea.addEventListener("blur", () => {
+      window.__terminalBlurs += 1;
+    });
+  });
+  const box = await page.locator(".xterm-screen").boundingBox();
+  await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
+  await page.waitForTimeout(200);
+
+  expect(await page.evaluate(() => window.__terminalBlurs)).toBe(0);
+  expect(await page.evaluate(() => document.activeElement?.className || ""))
+    .toContain("xterm-helper-textarea");
+});

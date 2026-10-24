@@ -2303,6 +2303,44 @@ function blurTerminalIfFocusSuppressed() {
   }
 }
 
+/* Pending half of a focus cycle: see focusTerminalThroughIme(). Kept outside the
+ * terminalTouch state because a panel switch has to cancel it too. */
+let terminalFocusCycleTimer = 0;
+
+function cancelTerminalFocusCycle() {
+  if (terminalFocusCycleTimer) {
+    clearTimeout(terminalFocusCycleTimer);
+    terminalFocusCycleTimer = 0;
+  }
+}
+
+/* Hand the keyboard back after a gesture. A textarea that kept focus cannot be
+ * reopened with focus() -- Android only shows an IME on a focus change -- so a
+ * dismissed keyboard is cycled through blur() and a focus on the next tick.
+ * `force` is for the explicit keyboard button: the user asked for the keyboard,
+ * so it cycles even when the IME state cannot be read as dismissed.
+ */
+function focusTerminalThroughIme({ force = false } = {}) {
+  cancelTerminalFocusCycle();
+  if (!state.connected) {
+    return;
+  }
+  if (!terminalHasFocus()) {
+    state.term?.focus();
+    return;
+  }
+  if (!force && terminalImeState() !== "hidden") {
+    return;
+  }
+  state.term?.blur();
+  terminalFocusCycleTimer = window.setTimeout(() => {
+    terminalFocusCycleTimer = 0;
+    if (state.connected) {
+      state.term?.focus();
+    }
+  }, 40);
+}
+
 function terminalCellAt(clientX, clientY) {
   const term = state.term;
   const screen = elements.terminalOutput.querySelector(".xterm-screen");
@@ -2677,6 +2715,10 @@ function armTerminalHoldFallback(clientX, clientY) {
   if (terminalTouch.active || !state.term) {
     return;
   }
+  // Mirror touchstart: hold focus off for the whole gesture, otherwise the
+  // WebView's delayed focus after this hold pops the keyboard open and nothing
+  // in this path ever closes it again.
+  suppressTerminalFocus(5000);
   clearTerminalTouchTimer();
   terminalTouch.active = true;
   terminalTouch.startX = clientX;
@@ -2703,6 +2745,7 @@ function onTerminalTouchStart(event) {
   }
   const touch = event.touches[0];
   clearTerminalTouchTimer();
+  cancelTerminalFocusCycle();
   // Hold focus off for the whole gesture. A tap releases it in touchend, while
   // a scroll or long press keeps it suppressed so WebView cannot flash the
   // keyboard before we know which gesture this is.
@@ -2808,9 +2851,10 @@ function finishTerminalTouch(event) {
   if (!terminalTouch.active) {
     // A gesture that never armed the state machine (a second finger, or a
     // WebView that only reported the hold through contextmenu) must not leave
-    // the selection guard armed for the rest of the session.
+    // the guards armed for the rest of the session: suppressClick never expires
+    // on its own, so a stale one swallows every later tap on the terminal.
     terminalTouch.longPress = false;
-    terminalTouch.suppressClick = false;
+    releaseTerminalFocusSuppression();
     return;
   }
   const wasScrolling = terminalTouch.scrolling;
@@ -2856,23 +2900,18 @@ function finishTerminalTouch(event) {
       }
     } else {
       // The keyboard was already open and must stay open. Release the guard
-      // that touchstart armed, otherwise the next focusin is killed, and take
-      // focus back if the WebView moved it during its own long-press handling.
+      // that touchstart armed, otherwise the next focusin is killed, and hand
+      // the keyboard back if the WebView moved focus away during its own
+      // long-press handling.
       releaseTerminalFocusSuppression();
-      window.requestAnimationFrame(() => {
-        if (state.connected && !terminalHasFocus()) {
-          state.term?.focus();
-        }
-      });
+      window.requestAnimationFrame(() => focusTerminalThroughIme());
     }
     event.preventDefault();
     return;
   }
   if (!wasMoved) {
     releaseTerminalFocusSuppression();
-    window.requestAnimationFrame(() => {
-      if (state.connected) state.term?.focus();
-    });
+    window.requestAnimationFrame(() => focusTerminalThroughIme());
   }
 }
 
@@ -4181,6 +4220,12 @@ const mobileMedia = window.matchMedia("(max-width: 900px)");
 let sidebarReturnFocus = null;
 const softKeyboardLayout = {
   active: false,
+  // Whether the IME has actually been up on this host: "hidden" is only
+  // reported after a keyboard that was observed open went away again.
+  keyboardSeen: false,
+  // The height the visual viewport lost in the last measurement. Zero means it
+  // is back at full height, so no IME animation is in flight.
+  heightLoss: 0,
   fullHeight: 0,
   viewportWidth: 0,
   raf: 0,
@@ -4207,20 +4252,51 @@ function terminalHasFocus() {
   return Boolean(active && elements.terminalOutput.contains(active));
 }
 
-/* Whether the soft keyboard is up. On a coarse-pointer host the visual viewport
- * is the truth: Android WebViews move — and can drop — activeElement while their
- * own long-press gesture runs, and reading that as "the keyboard is closed" made
- * a long press dismiss a keyboard the user had just opened. Focus is still the
- * fallback, so hosts that cannot report an IME keep the old behaviour.
+/* One reading of the soft keyboard, so the gesture code and the keyboard button
+ * cannot disagree about it:
+ *
+ *   open   -- the IME is showing, or this host cannot report one and the
+ *             textarea holds focus
+ *   hidden -- a touch host: the textarea still holds focus but the viewport is
+ *             back at full height, so Android dismissed the IME (its own hide
+ *             button, or a long press). focus() cannot bring it back in that
+ *             state; only a focus change shows it again.
+ *   closed -- nothing holds focus
+ *
+ * On a coarse-pointer host the visual viewport is the truth: Android WebViews
+ * move — and can drop — activeElement while their own long-press gesture runs,
+ * and reading that as "the keyboard is closed" made a long press dismiss a
+ * keyboard the user had just opened. "hidden" also requires that the keyboard
+ * has been up before and that the viewport has fully recovered: while the IME
+ * animates open the height loss is already visible but still short of the
+ * threshold, and that moment is not "hidden".
  */
-function terminalImeIsOpen() {
-  if ((coarsePointerMedia.matches || isHarmonyHost) && softKeyboardLayout.active) {
-    return true;
+function terminalImeState() {
+  const focused = terminalHasFocus();
+  if (!(coarsePointerMedia.matches || isHarmonyHost)) {
+    return focused ? "open" : "closed";
   }
-  return terminalHasFocus();
+  if (softKeyboardLayout.active) {
+    return "open";
+  }
+  if (!focused) {
+    return "closed";
+  }
+  const threshold = Math.max(120, softKeyboardLayout.fullHeight * 0.2);
+  const settled =
+    softKeyboardLayout.keyboardSeen &&
+    softKeyboardLayout.heightLoss < threshold * 0.25;
+  return settled ? "hidden" : "open";
+}
+
+function terminalImeIsOpen() {
+  return terminalImeState() !== "closed";
 }
 
 function softKeyboardIsVisible() {
+  // This one answers about the terminal's own keyboard, so it stays gated on
+  // focus: with the textarea blurred there is nothing for the button to act on,
+  // even while the WebView still reports an IME for another field.
   if (!terminalHasFocus()) {
     return false;
   }
@@ -4264,6 +4340,14 @@ function syncSoftKeyboardLayout() {
     (terminalHasFocus() || agentPanel?.hasInputFocus() ||
       (elements.controlsPanel.contains(document.activeElement) && document.activeElement.matches("input, textarea")) ||
       softKeyboardLayout.active);
+
+  // Every measurement updates these, not only the ones that flip `active`:
+  // terminalImeState() reads the recovered height to tell a dismissed keyboard
+  // from one that is still animating open.
+  softKeyboardLayout.heightLoss = heightLoss;
+  if (active) {
+    softKeyboardLayout.keyboardSeen = true;
+  }
 
   // iOS/Android WebViews may resize only the visual viewport, leaving dvh
   // unchanged. Size the workspace to the area actually above the keyboard.
@@ -4401,6 +4485,7 @@ function setMobileSidebarOpen(open, { restoreFocus = true } = {}) {
   if (open) {
     // Close the IME before the drawer slides in. Otherwise the keyboard resize
     // and the terminal refit underneath run during the slide and make it stutter.
+    cancelTerminalFocusCycle();
     state.term?.blur();
     // The selection dots float above the terminal; they must not sit on top of
     // the drawer.
@@ -4633,15 +4718,11 @@ function bind() {
     if (softKeyboardIsVisible()) {
       state.term?.blur();
       elements.focusTerminalButton.setAttribute("aria-pressed", "false");
-    } else if (terminalHasFocus()) {
-      // The IME was dismissed with its own hide button while the textarea kept
-      // focus. Calling focus() again would be a no-op, so cycle the focus.
-      state.term?.blur();
-      window.setTimeout(() => {
-        state.term?.focus();
-      }, 40);
     } else {
-      state.term?.focus();
+      // The user asked for the keyboard. This focuses the textarea, or cycles a
+      // focus it already holds, because focus() alone cannot reopen the IME that
+      // Android dismissed with its own hide button.
+      focusTerminalThroughIme({ force: true });
     }
     syncKeyboardButtonState();
     window.setTimeout(syncKeyboardButtonState, 350);
@@ -5045,7 +5126,7 @@ function init() {
   try { keyStorage = localStorage; } catch { keyStorage = { getItem: () => null, setItem: () => { throw new Error("Storage unavailable"); } }; }
   terminalKeyPreferences = createTerminalKeyPreferences({
     bar: elements.terminalKeyBar, getLang: () => lang, storage: keyStorage,
-    onCustomize: () => { resetModifiers(); hideTerminalSelectionHandles(); state.term?.blur(); },
+    onCustomize: () => { resetModifiers(); hideTerminalSelectionHandles(); cancelTerminalFocusCycle(); state.term?.blur(); },
   });
   agentPanel = createAgentPanel({
     button: $("agentButton"), getLang: () => lang,
