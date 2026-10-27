@@ -13,7 +13,10 @@ usage() {
 Usage: $(basename "$0") [--port DEVICE] [--image FILE] [--chip CHIP]
        [--address OFFSET] [--baud RATE]
 
-Flash a Linkr Bee ESP32-WROOM-32, ESP32-C3 or ESP32-C5 image without erasing settings.
+Flash a Linkr Bee ESP32-WROOM-32, ESP32-CAM, ESP32-C3 or ESP32-C5 image
+without erasing settings. The ESP32-CAM has no USB-serial bridge: connect a
+3.3 V USB-UART adapter to U0T/U0R (GPIO1/GPIO3) and hold GPIO0 low while
+resetting to enter the ROM downloader.
 CHIP and OFFSET are inferred for standard artifact filenames.
 Environment overrides: LINKR_IMAGE, LINKR_CHIP, LINKR_FLASH_ADDRESS,
 LINKR_PORT, LINKR_BAUD.
@@ -96,6 +99,7 @@ if [ -z "$CHIP" ]; then
         *esp32c3*) CHIP=esp32c3 ;;
         *esp32c5*) CHIP=esp32c5 ;;
         *esp32-wroom-32*) CHIP=esp32 ;;
+        *esp32-cam*) CHIP=esp32 ;;
         *)
             echo "Cannot infer chip from image name; pass --chip." >&2
             exit 1

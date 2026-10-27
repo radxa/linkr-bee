@@ -50,6 +50,7 @@ class FlashFirmwareTests(unittest.TestCase):
     def test_release_image_names_select_chip_and_address(self):
         for slug, chip, address in [
             ("esp32-wroom-32", "esp32", "0x1000"),
+            ("esp32-cam", "esp32", "0x1000"),
             ("esp32c3-supermini", "esp32c3", "0x0"),
             ("esp32c3-devkitm", "esp32c3", "0x0"),
             ("esp32c3-devkitc", "esp32c3", "0x0"),

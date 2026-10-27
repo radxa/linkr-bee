@@ -30,7 +30,11 @@ LOG_MODULE_REGISTER(linkr_ble_mgmt, LOG_LEVEL_INF);
 #define LINKR_MGMT_FRAGMENT_MAX 244
 
 #define LINKR_MGMT_CAPABILITIES                                               \
-	(LINKR_MGMT_CAP_DEVICE_ID | LINKR_MGMT_CAP_RELIABLE_UART |             \
+	(LINKR_MGMT_CAP_DEVICE_ID |                                            \
+	 (IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_RELIABLE_UART) ?                  \
+		LINKR_MGMT_CAP_RELIABLE_UART : 0) |                             \
+	 (IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_PREFER_NUS) ?                     \
+		LINKR_MGMT_CAP_PREFER_NUS : 0) |                                \
 	 (IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_WIFI) ?                            \
 		(LINKR_MGMT_CAP_WIFI | LINKR_MGMT_CAP_ASYNC_EVENTS) : 0) |      \
 	 (IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_WEBDAV) ?                          \

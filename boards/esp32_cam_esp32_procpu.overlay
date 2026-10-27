@@ -1,0 +1,104 @@
+/*
+ * Linkr Bee - Ai-Thinker ESP32-CAM (ESP32-S module, Xtensa dual-core)
+ *
+ * The ESP32-CAM has exactly one exposed UART pair, UART0 on GPIO1 (TX) and
+ * GPIO3 (RX). It has no USB-UART bridge: the same pair is used both by the
+ * ROM downloader when flashing and by the bridge once the firmware runs.
+ * Console output would share UART0 with the bridge. That is not acceptable on
+ * this board: log bytes would be typed into the target's shell and would race
+ * the bridge's own writes. The board config disables the UART console and the
+ * UART log backend so the bridge owns the port; diagnostics are available over
+ * BLE (@i?). The ROM bootloader still prints during flashing and reset.
+ *
+ * UART2 exists in the SoC but is not brought out on this board, so the bridge
+ * is UART0 here instead of the WROOM-32's UART2.
+ *
+ * Activity LED: none. This board does have a red status LED on GPIO33 and a
+ * white camera-flash LED on GPIO4, but neither is usable as a normal activity
+ * indicator once the camera assembly is fitted and the GPIOs are no longer
+ * exposed. Disable both board LED nodes so the firmware does not drive them.
+ *
+ * There is no user key, pairing key or factory-reset key on this board, so
+ * those aliases are deliberately absent. The camera and SD-card interfaces
+ * are disabled: this firmware is a serial bridge, not a camera application.
+ */
+
+/ {
+	chosen {
+		zephyr,linkr-ble-uart = &uart0;
+	};
+};
+
+/*
+ * UART0 is the bridge: TX on GPIO1, RX on GPIO3. This is the wiring the
+ * target already uses and the same pair the ROM downloader uses, so after
+ * flashing the CH340 must stay idle (or be unplugged): its TX shares GPIO3
+ * with the target's TX. A previous build moved RX to GPIO16 (the exposed
+ * U2RXD pad) to isolate the programmer, but GPIO16 belongs to PSRAM and must
+ * be freed before PSRAM is enabled, so the default here stays on GPIO3.
+ */
+&uart0 {
+	status = "okay";
+	current-speed = <115200>;
+	pinctrl-0 = <&uart0_default>;
+	pinctrl-names = "default";
+};
+
+/* Neither LED is usable as an activity light: the red status LED and the white
+ * camera-flash LED are both on the board, but the camera assembly covers the
+ * GPIOs. Disable both nodes so no activity-LED code is built and the firmware
+ * never claims an indicator this board does not expose. */
+&led0 {
+	status = "disabled";
+};
+
+&led1 {
+	status = "disabled";
+};
+
+/* The bridge does not use the SD-card slot, the camera SCCB bus or the SPI
+ * pins the board shares with SD. Disable them so their state and pin mux do
+ * not compete with the UART ring and BLE queues. */
+&sdhc {
+	status = "disabled";
+};
+
+&sdhc1 {
+	status = "disabled";
+};
+
+&i2c0 {
+	status = "disabled";
+};
+
+&spi2 {
+	status = "disabled";
+};
+
+/* Keep test markers out of the default coredump sector. The ESP32-CAM uses
+ * the same 4 MB partition layout as the WROOM-32, so the marker can live in
+ * the last sector of the storage partition. */
+&storage_partition {
+	reg = <0x3b0000 0x2f000>;
+};
+
+&flash0 {
+	partitions {
+		linkr_test_marker_partition: partition@3df000 {
+			label = "linkr-test-marker";
+			reg = <0x3df000 0x1000>;
+		};
+	};
+};
+
+/* Enable the onboard WiFi node used by the single Linkr firmware. */
+&wifi {
+	status = "okay";
+};
+
+/* The ESP32-CAM module fitted here has a 2 MiB PSRAM part. The SoC dtsi
+ * leaves psram0 at size 0, which makes the PSRAM type choice unsatisfiable;
+ * declare the real size so the driver and Kconfig agree. */
+&psram0 {
+	size = <0x200000>;
+};

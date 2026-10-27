@@ -28,8 +28,13 @@ LOG_MODULE_REGISTER(linkr_ble_security, LOG_LEVEL_INF);
 #error "ESP32-C2/C5/C6/H2 pairing requires controller security and encryption support"
 #endif
 
+/* Boards without a pairing key leave linkr-pairing undefined. Keep the GPIO
+ * out of the image entirely when the authorization gate is disabled, so a new
+ * board only has to describe the hardware it actually has. */
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH)
 static const struct gpio_dt_spec pairing_gpio =
 	GPIO_DT_SPEC_GET(DT_ALIAS(linkr_pairing), gpios);
+#endif
 
 static enum bt_security_err pairing_accept(
 	struct bt_conn *conn, const struct bt_conn_pairing_feat *const feat)
@@ -39,11 +44,12 @@ static enum bt_security_err pairing_accept(
 	/* Applies to every new key exchange, including replacement of a bond.
 	 * Existing LTK encryption does not invoke this callback. A GPIO read
 	 * failure must fail closed, not be mistaken for an active-low input. */
-	if (IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH) &&
-	    gpio_pin_get_dt(&pairing_gpio) != 1) {
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH)
+	if (gpio_pin_get_dt(&pairing_gpio) != 1) {
 		LOG_WRN("Pairing denied: hold the pairing GPIO low before requesting pairing");
 		return BT_SECURITY_ERR_PAIR_NOT_ALLOWED;
 	}
+#endif
 	LOG_INF("Pairing authorized");
 	return BT_SECURITY_ERR_SUCCESS;
 }
@@ -93,11 +99,11 @@ int linkr_ble_security_init(void)
 {
 	int err;
 
-	if (IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH)) {
-		if (!gpio_is_ready_dt(&pairing_gpio)) return -ENODEV;
-		err = gpio_pin_configure_dt(&pairing_gpio, GPIO_INPUT);
-		if (err) return err;
-	}
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH)
+	if (!gpio_is_ready_dt(&pairing_gpio)) return -ENODEV;
+	err = gpio_pin_configure_dt(&pairing_gpio, GPIO_INPUT);
+	if (err) return err;
+#endif
 	err = bt_conn_auth_cb_register(&auth_callbacks);
 	if (err) return err;
 	return bt_conn_auth_info_cb_register(&auth_info_callbacks);

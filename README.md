@@ -77,7 +77,7 @@ Browser / desktop / mobile / Linkr
                  │
           Bluetooth LE or WiFi
                  │
-        Linkr Bee accessory (ESP32-C3 / ESP32-C5)
+        Linkr Bee accessory (ESP32-C3 / C5 / classic ESP32)
                  │
              3.3 V UART
                  │
@@ -85,7 +85,7 @@ Browser / desktop / mobile / Linkr
 ```
 
 - A Linkr Bee accessory: ESP32-C3 Super Mini, ESP32-C3 DevKitM, ESP32-C3 DevKitC,
-  or ESP32-C5 DevKitC.
+  ESP32-C5 DevKitC, ESP32-WROOM-32, or ESP32-CAM.
 - A target with a UART console, and three wires: target TX to accessory RX, target RX
   to accessory TX, and a shared ground.
 - A host running a compatible browser, a desktop terminal client, or a phone app
@@ -201,7 +201,8 @@ network. Use LAN mode on a network you trust.
 - The Bluetooth LE link is encrypted and bonded. On C3/C5 each new host is
   authorized once by holding **GPIO1** to GND during pairing. WROOM disables the
   physical pairing check by default; GPIO4 is optional when
-  `CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=y` is enabled.
+  `CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=y` is enabled. ESP32-CAM has no
+  pairing key and pairs without a GPIO press.
 - Eight hosts are remembered across reboots and are not evicted automatically, so
   remove an unused host or factory-reset before adding a ninth.
 - Pairing uses LE Secure Connections Just Works, which has no man-in-the-middle
@@ -209,6 +210,8 @@ network. Use LAN mode on a network you trust.
 - Factory reset clears every bond and setting. Hold **GPIO0 to GND** on ESP32-C3, or
   **GPIO28** on ESP32-C5, while the board boots, for at least two seconds. On an
   ESP32-C3 Super Mini the BOOT pin is not GPIO0, so check the board wiring first.
+  ESP32-CAM has no reset key; erase the settings region at `0x3b0000` (length
+  `0x2f000`) with `esptool erase-region`.
 - Per-client steps and recovery: [Bluetooth pairing](docs/BLE_PAIRING.md) (Chinese).
 
 ## Troubleshooting

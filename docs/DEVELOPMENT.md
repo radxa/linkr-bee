@@ -118,12 +118,19 @@ For ESP32-C5 DevKitC:
 west build -b esp32c5_devkitc/esp32c5/hpcore linkr-bee
 ```
 
+For ESP32-CAM (classic ESP32, bridge on UART0):
+
+```sh
+west build -b esp32_cam/esp32/procpu linkr-bee
+```
+
 ### GitHub Actions build
 
 The workflow in `.github/workflows/build.yml` builds each board's default
 WiFi + BLE configuration for `esp32c3_supermini`, `esp32c3_devkitm`,
-`esp32c3_devkitc`, `esp32c5_devkitc/esp32c5/hpcore`, and
-`esp32_devkitc/esp32/procpu` (ESP32-WROOM-32). It runs on pushes to `main`,
+`esp32c3_devkitc`, `esp32c5_devkitc/esp32c5/hpcore`,
+`esp32_devkitc/esp32/procpu` (ESP32-WROOM-32), and
+`esp32_cam/esp32/procpu` (ESP32-CAM). It runs on pushes to `main`,
 pull requests, and manual dispatches using Zephyr v4.4.1 with Zephyr SDK
 1.0.1. To keep runner disk usage bounded, each job installs only the
 toolchain its board needs — `riscv64-zephyr-elf` for the RISC-V targets and
@@ -146,6 +153,7 @@ linkr-bee-esp32c3-devkitm.bin
 linkr-bee-esp32c3-devkitc.bin
 linkr-bee-esp32c5-devkitc.bin
 linkr-bee-esp32-wroom-32.bin
+linkr-bee-esp32-cam.bin
 ```
 
 On macOS or Linux, extract the artifact, install
@@ -163,7 +171,7 @@ If more than one serial device is connected, select it explicitly:
 ```
 
 The script infers the target from the standard image name and writes C3 at
-`0x0`, C5 at `0x2000`, or WROOM at `0x1000` without a full-chip erase. Only
+`0x0`, C5 at `0x2000`, or WROOM/CAM at `0x1000` without a full-chip erase. Only
 image sectors are rewritten, so normal upgrades preserve the BLE identity and
 saved configuration. Use the board-specific factory-reset input when those settings
 must be cleared. The artifact also contains `FLASHING.txt`,
@@ -178,6 +186,11 @@ The app reads the UART from the devicetree chosen node
 the ESP32-C5 DevKitC overlay binds it to `uart1` on GPIO11/12.
 If no bridge-specific chosen node is present, the app falls back to
 `zephyr,shell-uart`, then `zephyr,console`.
+
+The ESP32-CAM overlay also binds the bridge to `uart0`. The board exposes only
+one UART pair (GPIO1 TX / GPIO3 RX), and its ROM downloader uses the same pair,
+so flashing and bridging share it. `uart2` exists in the SoC but is not brought
+out on this board.
 
 On `esp32c3_supermini`, `uart0` is enabled for bridge traffic:
 
@@ -348,6 +361,18 @@ The shipped configuration enables
 `CONFIG_LINKR_BLE_BRIDGE_UART_RX_DROP_NO_CONN=y` on every board. After a BLE
 session disconnects, UART capture continues feeding WebSocket clients and the
 log uploader; bytes discarded from BLE delivery are not replayed on reconnect.
+
+The ESP32-CAM build enables
+`CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE=y`. Its single UART-to-BLE thread used
+to block in the Reliable UART indication, and because the same thread feeds the
+LAN bridge and log ring, a slow central also starved a LAN-only TUI or browser.
+With decoupling the thread stages each chunk for those sinks and hands the BLE
+copy to a small queue and a dedicated sender thread, so the UART ring keeps
+draining while one indication is in flight. A full queue disconnects the
+central after the in-flight chunk instead of skipping a sequence number, which
+lets it resynchronise; LAN output is unaffected. Its UART RX ring is 20480
+bytes so the queue fits beside it. ESP32-WROOM-32 keeps the upstream
+synchronous path and its 16384-byte ring; C3 and C5 are unchanged too.
 
 ### Pairing GPIO, persistence, and factory reset
 
@@ -1230,7 +1255,7 @@ hardware.
 
 | Layer | Verified in this repository | Still requires hardware |
 | --- | --- | --- |
-| Firmware builds | `esp32c3_supermini`, `esp32c3_devkitm`, `esp32c3_devkitc`, and `esp32c5_devkitc/esp32c5/hpcore` build in CI under Zephyr v4.4.1, with the per-generation controller security symbols asserted | — |
+| Firmware builds | `esp32c3_supermini`, `esp32c3_devkitm`, `esp32c3_devkitc`, `esp32c5_devkitc/esp32c5/hpcore`, `esp32_devkitc/esp32/procpu`, and `esp32_cam/esp32/procpu` build in CI under Zephyr v4.4.1, with the per-generation controller security symbols asserted | ESP32-CAM runtime validation on physical hardware |
 | Host protocol tests | `tests/` compiles and drives the production management, security, target-binding, WebDAV, and HCI-order code paths, including the C3/C5 build guards | Real SMP pairing, NVS persistence, radio behaviour |
 | BLE terminal | Web, Python, and C clients, plus the browser regression suite for Reliable UART sequencing, reassembly, and session boundaries | Pairing, MTU negotiation, and reconnect behaviour per platform |
 | WiFi, LAN bridge, WebDAV | Host tests and the browser suite; the WS token handshake is covered on both sides | Association, BLE/WiFi coexistence, upload against a real endpoint |

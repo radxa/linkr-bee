@@ -234,6 +234,13 @@ jobs:
             toolchain: xtensa-espressif_esp32_zephyr-elf
             flash_address: "0x1000"
             factory_reset: GPIO27 to GND via external jumper
+          - name: ESP32-CAM
+            board: esp32_cam/esp32/procpu
+            slug: esp32-cam
+            chip: esp32
+            toolchain: xtensa-espressif_esp32_zephyr-elf
+            flash_address: "0x1000"
+            factory_reset: no onboard key; erase the settings region at 0x3b0000 (0x2f000 bytes) with esptool
 
     steps:
       - name: Check out repository
@@ -299,13 +306,22 @@ jobs:
           grep -qx 'CONFIG_TASK_WDT_HW_FALLBACK=y' "${config}"
           grep -qx 'CONFIG_TASK_WDT_CHANNELS=6' "${config}"
           grep -qx 'CONFIG_TASK_WDT_MIN_TIMEOUT=5000' "${config}"
-          grep -qx 'CONFIG_TASK_WDT_HW_FALLBACK_DELAY=5000' "${config}"
-          grep -qx '# CONFIG_TASK_WDT_DUMMY is not set' "${config}"
-          if grep -qx 'CONFIG_SOC_SERIES_ESP32=y' "${config}"; then
-            grep -qx '# CONFIG_LINKR_BLE_BRIDGE_WEBDAV is not set' "${config}"
-          else
+          if [ "${{ matrix.slug }}" = "esp32-cam" ]; then
+            # The CAM upload path needs more headroom, and its PSRAM holds the
+            # WebDAV ring even though it is a classic ESP32.
+            grep -qx 'CONFIG_TASK_WDT_HW_FALLBACK_DELAY=10000' "${config}"
             grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WEBDAV=y' "${config}"
+            grep -qx 'CONFIG_LINKR_BLE_BRIDGE_PREFER_NUS=y' "${config}"
+          else
+            grep -qx 'CONFIG_TASK_WDT_HW_FALLBACK_DELAY=5000' "${config}"
+            if grep -qx 'CONFIG_SOC_SERIES_ESP32=y' "${config}"; then
+              grep -qx '# CONFIG_LINKR_BLE_BRIDGE_WEBDAV is not set' "${config}"
+            else
+              grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WEBDAV=y' "${config}"
+            fi
+            grep -qx '# CONFIG_LINKR_BLE_BRIDGE_PREFER_NUS is not set' "${config}"
           fi
+          grep -qx '# CONFIG_TASK_WDT_DUMMY is not set' "${config}"
           grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE=y' "${config}"
           grep -qx 'CONFIG_LINKR_BLE_BRIDGE_UART_RX_DROP_NO_CONN=y' "${config}"
           grep -qx 'CONFIG_WIFI=y' "${config}"

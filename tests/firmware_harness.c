@@ -11,6 +11,9 @@
 
 #define ARG_UNUSED(x) (void)(x)
 #define WEBDAV_UPLOAD_CHUNK 512
+/* The embedded build may place the upload chunk in PSRAM. The host test has
+ * no such section; the storage location is not part of the logic under test. */
+#define LINKR_EXT_RAM_BSS
 #define WEBDAV_UPLOAD_INTERVAL_MS 1000
 #define URL_MAX 192
 #define CRED_MAX 64

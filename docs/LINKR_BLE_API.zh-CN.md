@@ -65,7 +65,7 @@ Protocol Info 固定 10 字节，全部多字节整数为 little-endian：
 | ---: | ---: | --- |
 | 0 | 1 | API major，当前 `1` |
 | 1 | 1 | API minor，当前 `0` |
-| 2 | 2 | 单条逻辑 payload 最大长度，当前 `512` |
+| 2 | 2 | 单条逻辑 payload 最大长度，当前 `768` |
 | 4 | 4 | capability bitmap |
 | 8 | 2 | 保留，必须忽略 |
 
@@ -114,7 +114,7 @@ flags：bit 0 `FINAL`、bit 1 `ERROR`、bit 2 `ASYNC`。未知位必须忽略。
 
 第一片必须包含完整 12 字节头，头后可带部分 payload。后续 ATT write 或
 indication 只携带剩余 payload，不重复头。接收方按 `payload_len` 重组；超过
-两秒仍未收完的 Command 会被固件丢弃。逻辑 payload 最大 512 字节。
+两秒仍未收完的 Command 会被固件丢弃。逻辑 payload 最大 768 字节。
 
 固件每次只重组一条 Command，客户端必须串行执行各片 write。不同请求可在
 前一请求收到 response 后继续发送。Response 与 Event 的每一片均使用 confirmed

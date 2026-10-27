@@ -19,6 +19,72 @@
 #include "ble_uart_reliable.h"
 #include "watchdog.h"
 
+#if !IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_RELIABLE_UART)
+
+/*
+ * The raw NUS channel is the whole protocol on boards that disable this
+ * service. Keep the exported surface so the rest of the bridge compiles and
+ * simple mode is selected everywhere: no service to discover, no framing to
+ * reassemble, no sequence to get out of step.
+ */
+void linkr_uart_reliable_diag(uint32_t *total, uint32_t *retry, uint32_t *busy,
+			      uint32_t *nomem, uint32_t *slept_ms,
+			      uint32_t *timeout, uint32_t *wait_max_ms)
+{
+	if (total) {
+		*total = 0;
+	}
+	if (retry) {
+		*retry = 0;
+	}
+	if (busy) {
+		*busy = 0;
+	}
+	if (nomem) {
+		*nomem = 0;
+	}
+	if (slept_ms) {
+		*slept_ms = 0;
+	}
+	if (timeout) {
+		*timeout = 0;
+	}
+	if (wait_max_ms) {
+		*wait_max_ms = 0;
+	}
+}
+
+int linkr_uart_reliable_init(linkr_uart_reliable_write_fn write_fn)
+{
+	ARG_UNUSED(write_fn);
+	return 0;
+}
+
+void linkr_uart_reliable_disconnected(struct bt_conn *conn)
+{
+	ARG_UNUSED(conn);
+}
+
+bool linkr_uart_reliable_mode(void)
+{
+	return false;
+}
+
+void linkr_uart_reliable_nus_selected(void)
+{
+}
+
+int linkr_uart_reliable_send(struct bt_conn *conn, const uint8_t *data,
+			     uint16_t len)
+{
+	ARG_UNUSED(conn);
+	ARG_UNUSED(data);
+	ARG_UNUSED(len);
+	return -ENOTCONN;
+}
+
+#else /* CONFIG_LINKR_BLE_BRIDGE_RELIABLE_UART */
+
 LOG_MODULE_REGISTER(linkr_ble_uart_reliable, LOG_LEVEL_INF);
 
 #define RX_TIMEOUT_MS 2000
@@ -229,8 +295,22 @@ static ssize_t rx_write(struct bt_conn *conn,
 			if (!err) {
 				rx_next_sequence = sequence_next(rx_next_sequence);
 			}
+			/* -ENOMEM means nothing was enqueued. Do not acknowledge it:
+			 * the peer would advance its sequence and treat the retry as
+			 * a duplicate, permanently losing the frame. */
 		} else if (rx_state.sequence != previous_sequence) {
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_PREFER_NUS)
+			/* The peer's sequence does not match ours, usually because a
+			 * previous session ended with the two sides disagreeing.
+			 * Re-baseline on the sequence the peer actually sent, but
+			 * only after the UART accepted the whole frame. */
+			err = uart_write_fn(rx_state.payload, rx_state.expected);
+			if (!err) {
+				rx_next_sequence = sequence_next(rx_state.sequence);
+			}
+#else
 			err = -EILSEQ;
+#endif
 		}
 		rx_reset_locked();
 		if (err) {
@@ -440,3 +520,5 @@ int linkr_uart_reliable_send(struct bt_conn *conn, const uint8_t *data,
 	tx_next_sequence = sequence_next(tx_next_sequence);
 	return 0;
 }
+
+#endif /* CONFIG_LINKR_BLE_BRIDGE_RELIABLE_UART */

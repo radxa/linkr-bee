@@ -20,10 +20,10 @@
 //! **Writes are sized, not streamed.** An ATT write is a single packet whose
 //! size was agreed when the connection was made, and a payload longer than
 //! that is refused rather than carried. So the write side segments every
-//! payload into [`MTU_WRITE_LIMIT`] pieces. That number is deliberately
-//! conservative: asking the stack for the negotiated MTU is possible, but an
-//! answer that is wrong by a few bytes fails at every write rather than
-//! nowhere, so a fixed ceiling we know fits is the safer default.
+//! payload into pieces no larger than the connection's current ATT payload
+//! ([`write_limit`]), with [`MTU_WRITE_LIMIT`] as the upper bound. Reading the
+//! MTU matters: a new link starts at 23 bytes and only grows after the ATT
+//! exchange.
 
 use std::collections::VecDeque;
 use std::io;
@@ -146,8 +146,9 @@ pub fn is_linkr_device_id(id: &[u8]) -> bool {
 /// Ceiling for one ATT write.
 ///
 /// 250 is the largest attribute value BLE 4.2 can carry and 3 bytes of that
-/// is write-command overhead. Every link the device opens negotiates at or
-/// below 247, so 244 leaves room without ever asking. See the module note.
+/// is write-command overhead. This is an upper bound only: the negotiated MTU
+/// can be as low as the 23-byte default, so [`write_limit`] asks the platform
+/// per frame and never writes a piece larger than the link accepts.
 pub const MTU_WRITE_LIMIT: usize = 244;
 
 /// A Bluetooth address is twelve hexadecimal digits, as in `EE:C7:42:34:48:CF`.
@@ -417,6 +418,25 @@ fn segment(payload: &[u8], limit: usize) -> Vec<Vec<u8>> {
         return Vec::new();
     }
     payload.chunks(limit).map(|piece| piece.to_vec()).collect()
+}
+
+/// Largest ATT payload this connection currently accepts.
+///
+/// [`MTU_WRITE_LIMIT`] is only a ceiling, not a promise. A fresh link starts
+/// at the ATT default of 23 bytes (20 payload) until the MTU exchange
+/// completes, and a host that negotiates less than 247 stays below the
+/// ceiling. Writing a 244-byte piece into a 23-byte link is refused by the
+/// stack; on the bridge that surfaces as an unanswered write and the input
+/// path looks dead. Ask the platform for the real MTU on every frame instead
+/// of assuming the best case, and fall back to the default payload while the
+/// exchange is still in flight.
+fn write_limit(peripheral: &Peripheral) -> usize {
+    let mtu = usize::from(peripheral.mtu());
+    if mtu > 3 {
+        (mtu - 3).min(MTU_WRITE_LIMIT)
+    } else {
+        20
+    }
 }
 
 /// One thing the interface asks the radio to send.
@@ -1392,7 +1412,8 @@ async fn carry(
                 match frame {
                     Some(Frame::Stream(bytes)) => {
                         let Some(sink) = sink.as_ref() else { continue };
-                        for piece in segment(&bytes, MTU_WRITE_LIMIT) {
+                        let limit = write_limit(peripheral);
+                        for piece in segment(&bytes, limit) {
                             // Without response is the throughput choice: NUS is
                             // handed to the Link Layer with whatever credit it
                             // has, and waiting for an acknowledgement per packet
@@ -1417,7 +1438,8 @@ async fn carry(
                     // per session and none on the path a keystroke takes.
                     Some(Frame::Management(frame)) => {
                         let Some(command) = command.as_ref() else { continue };
-                        for piece in segment(&frame, MTU_WRITE_LIMIT) {
+                        let limit = write_limit(peripheral);
+                        for piece in segment(&frame, limit) {
                             if retry_busy(|| async {
                                 peripheral
                                     .write(command, &piece, WriteType::WithResponse)

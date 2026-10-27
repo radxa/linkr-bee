@@ -20,7 +20,11 @@ extern "C" {
 #define LINKR_MGMT_API_MAJOR 1
 #define LINKR_MGMT_API_MINOR 0
 #define LINKR_MGMT_HEADER_SIZE 12
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_PREFER_NUS)
+#define LINKR_MGMT_MAX_PAYLOAD 768
+#else
 #define LINKR_MGMT_MAX_PAYLOAD 512
+#endif
 
 #define LINKR_MGMT_CAP_WIFI BIT(0)
 #define LINKR_MGMT_CAP_WEBDAV BIT(1)
@@ -28,6 +32,9 @@ extern "C" {
 #define LINKR_MGMT_CAP_DEVICE_ID BIT(3)
 #define LINKR_MGMT_CAP_ASYNC_EVENTS BIT(4)
 #define LINKR_MGMT_CAP_RELIABLE_UART BIT(5)
+/* Board asks clients to use the raw NUS pipe even though the reliable
+ * service is still present for clients that explicitly select it. */
+#define LINKR_MGMT_CAP_PREFER_NUS BIT(6)
 
 #define LINKR_MGMT_FLAG_FINAL BIT(0)
 #define LINKR_MGMT_FLAG_ERROR BIT(1)

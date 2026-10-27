@@ -24,6 +24,10 @@
 #include <zephyr/drivers/hwinfo.h>
 #include <zephyr/drivers/uart.h>
 #include <zephyr/kernel.h>
+
+#if IS_ENABLED(CONFIG_ESP_SPIRAM)
+#include <esp_psram.h>
+#endif
 #include <zephyr/logging/log.h>
 #include <zephyr/settings/settings.h>
 #include <zephyr/storage/flash_map.h>
@@ -137,6 +141,13 @@ static struct k_mutex uart_config_lock;
 static struct k_work_delayable advertise_work;
 static atomic_t advertise_refresh_req;
 static atomic_t nus_notify_enabled;
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE)
+/* Why the last BLE link ended. With the UART console disabled this is the
+ * only way to tell a firmware-initiated teardown (0x13) from a controller or
+ * peer timeout without attaching a separate debug port. */
+static atomic_t ble_disconnects;
+static atomic_t ble_last_disconnect_reason;
+#endif
 static uint8_t linkr_identity = BT_ID_DEFAULT;
 static atomic_t wifi_scan_request_id;
 #if LINKR_UART_AUTOBAUD
@@ -164,6 +175,11 @@ static struct {
 } mgmt_capture;
 #if !IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY)
 static atomic_t uart_rx_dropped;
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE)
+/* Never cleared: the per-loop value above is useful in a log line, but a
+ * post-hoc @i? needs the count since boot. */
+static atomic_t uart_rx_dropped_total;
+#endif
 static atomic_t uart_reliable_drop_no_conn;
 #endif
 /* Bytes linkr_uart_write() refused because ble_to_uart_queue was full.
@@ -172,6 +188,15 @@ static atomic_t uart_reliable_drop_no_conn;
  * was a LOG_WRN that the board's ERR-only log level swallowed, so upstream
  * loss was completely unobservable on this board. */
 static atomic_t uart_queue_dropped;
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE)
+/* Bytes that left the BLE/WS queue for the bridge UART. This separates a
+ * sender that never ran from a UART that never put the bytes on the wire. */
+static atomic_t uart_tx_bytes;
+/* Bytes the bridge UART actually delivered to the RX ring. A flat value while
+ * the target is clearly printing means the line or the RX pin is the problem,
+ * not the BLE delivery path. */
+static atomic_t uart_rx_bytes;
+#endif
 static struct uart_config active_uart_config = {
 	.baudrate = CONFIG_LINKR_BLE_BRIDGE_UART_BAUD_RATE,
 	.parity = DEFAULT_UART_PARITY,
@@ -190,7 +215,12 @@ static struct uart_config active_uart_config = {
  * STRUCT_SECTION_ITERABLE entry, same static initializer, same alignment)
  * with only the buffer's placement changed: contents never need to survive
  * reset. */
-static uint8_t __aligned(4)
+#if IS_ENABLED(CONFIG_ESP_SPIRAM)
+#define LINKR_EXT_RAM_BSS __attribute__((section(".ext_ram.bss")))
+#else
+#define LINKR_EXT_RAM_BSS
+#endif
+static uint8_t __aligned(4) LINKR_EXT_RAM_BSS
 	ble_to_uart_storage[sizeof(struct bridge_packet) *
 			    CONFIG_LINKR_BLE_BRIDGE_BLE_TO_UART_QUEUE_DEPTH];
 STRUCT_SECTION_ITERABLE(k_msgq, ble_to_uart_queue) =
@@ -206,6 +236,29 @@ static uint8_t uart_rx_storage[UART_RX_BUFFER_SIZE];
 struct ring_buf uart_rx_ring =
 	RING_BUF_INIT(uart_rx_storage, UART_RX_BUFFER_SIZE);
 K_SEM_DEFINE(uart_rx_sem, 0, 1);
+
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE) && \
+	!IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY)
+/* One UART chunk on its way to BLE. The item is copied into the queue, so
+ * the UART thread can reuse its own buffer immediately and is never held up
+ * by an indication round trip. */
+struct ble_tx_chunk {
+	uint16_t len;
+	uint8_t data[UART_RX_CHUNK];
+};
+static uint8_t __aligned(4) LINKR_EXT_RAM_BSS
+	ble_tx_storage[sizeof(struct ble_tx_chunk) *
+		       CONFIG_LINKR_BLE_BRIDGE_BLE_TX_QUEUE_DEPTH];
+STRUCT_SECTION_ITERABLE(k_msgq, ble_tx_queue) =
+	Z_MSGQ_INITIALIZER(ble_tx_queue, ble_tx_storage,
+			   sizeof(struct ble_tx_chunk),
+			   CONFIG_LINKR_BLE_BRIDGE_BLE_TX_QUEUE_DEPTH);
+/* Chunks the queue refused. A sequence number cannot be skipped, so the
+ * sender disconnects the central after the in-flight chunk instead of
+ * letting it latch a desynchronised stream. */
+static atomic_t ble_tx_dropped;
+static atomic_t ble_tx_overflow;
+#endif
 
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY) || \
 	IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_BLE_DIAG_MARKER)
@@ -813,10 +866,16 @@ static void uart_rx_irq_callback(const struct device *dev, void *user_data)
 		}
 #endif
 
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE)
+		atomic_add(&uart_rx_bytes, rx_len);
+#endif
 		uint32_t written = ring_buf_put(&uart_rx_ring, buf, rx_len);
 
 		if (written < (uint32_t)rx_len) {
 			atomic_add(&uart_rx_dropped, rx_len - written);
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE)
+			atomic_add(&uart_rx_dropped_total, rx_len - written);
+#endif
 		}
 
 		k_sem_give(&uart_rx_sem);
@@ -933,6 +992,22 @@ static void ble_name_advertise_refresh(void)
 }
 #endif
 
+#if IS_ENABLED(CONFIG_BT_GATT_CLIENT)
+static struct bt_gatt_exchange_params mtu_exchange_params;
+
+static void mtu_exchange_complete(struct bt_conn *conn, uint8_t err,
+				  struct bt_gatt_exchange_params *params)
+{
+	ARG_UNUSED(params);
+
+	if (err) {
+		LOG_WRN("BLE MTU exchange failed: 0x%02x", err);
+		return;
+	}
+	LOG_INF("BLE MTU exchange complete: %u", bt_gatt_get_mtu(conn));
+}
+#endif
+
 static void connected(struct bt_conn *conn, uint8_t err)
 {
 	if (err) {
@@ -950,6 +1025,17 @@ static void connected(struct bt_conn *conn, uint8_t err)
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_BLE_DIAG_MARKER)
 	ble_diag.connected_count++;
 	schedule_ble_diag_marker_write();
+#endif
+#if IS_ENABLED(CONFIG_BT_GATT_CLIENT)
+	/* The central normally starts the ATT MTU exchange, but some clients wait
+	 * until after service discovery and then immediately write terminal input.
+	 * Request the larger MTU from the peripheral side so those first writes are
+	 * not limited to the 20-byte default and rejected as too long. */
+	mtu_exchange_params.func = mtu_exchange_complete;
+	err = bt_gatt_exchange_mtu(conn, &mtu_exchange_params);
+	if (err && err != -EALREADY) {
+		LOG_WRN("BLE MTU exchange request failed: %d", err);
+	}
 #endif
 	LOG_INF("BLE connected; requesting encryption");
 	linkr_ble_security_connected(conn);
@@ -982,6 +1068,10 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 	ble_diag.disconnected_count++;
 	ble_diag.notify_enabled = 0;
 	schedule_ble_diag_marker_write();
+#endif
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE)
+	atomic_inc(&ble_disconnects);
+	atomic_set(&ble_last_disconnect_reason, reason);
 #endif
 	LOG_INF("BLE disconnected: 0x%02x", reason);
 	/* Persistent advertising normally resumes automatically. Scheduling an
@@ -1499,6 +1589,12 @@ static void heap_status_response(struct bt_conn *conn)
 	    sys_heap_runtime_stats_get(&heaps[0].heap, &stats) != 0) {
 		return;
 	}
+#if IS_ENABLED(CONFIG_ESP_SPIRAM)
+	(void)send_control_response(conn,
+				    "@info mem psram=%u initialized=%u\r\n",
+				    (unsigned int)esp_psram_get_size(),
+				    (unsigned int)esp_psram_is_initialized());
+#endif
 	(void)send_control_response(conn,
 				    "@info heap free=%u used=%u peak=%u\r\n",
 				    (unsigned int)stats.free_bytes,
@@ -1511,17 +1607,38 @@ static void diagnostics_response(struct bt_conn *conn)
 {
 	char status[192];
 	uint32_t dropped = 0;
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE)
+	uint32_t dropped_total = 0;
+#endif
 	uint32_t dropped_no_conn = 0;
 	uint32_t buffered = ring_buf_size_get(&uart_rx_ring);
 	bt_security_t security = bt_conn_get_security(conn);
 
 #if !IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY)
 	dropped = (uint32_t)atomic_get(&uart_rx_dropped);
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE)
+	dropped_total = (uint32_t)atomic_get(&uart_rx_dropped_total);
+#endif
 	dropped_no_conn = (uint32_t)atomic_get(&uart_reliable_drop_no_conn);
 #endif
 	(void)send_control_response(conn, "@info fw version=%s zephyr=%s\r\n",
 				    CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION,
 				    KERNEL_VERSION_STRING);
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE)
+	uint32_t reset_cause = 0;
+
+	(void)hwinfo_get_reset_cause(&reset_cause);
+	(void)send_control_response(conn,
+				    "@info sys uptime_ms=%lld owner=%u security=%u reset=0x%x\r\n",
+				    (long long)k_uptime_get(), 0U,
+				    (unsigned int)security,
+				    (unsigned int)reset_cause);
+	(void)send_control_response(conn,
+				    "@info uart dropped=%u dropped_total=%u dropped_no_conn=%u buffer=%u/%u rx=%u\r\n",
+				    dropped, dropped_total, dropped_no_conn, buffered,
+				    UART_RX_BUFFER_SIZE,
+				    (unsigned int)atomic_get(&uart_rx_bytes));
+#else
 	(void)send_control_response(conn,
 				    "@info sys uptime_ms=%lld owner=%u security=%u\r\n",
 				    (long long)k_uptime_get(), 0U,
@@ -1529,6 +1646,7 @@ static void diagnostics_response(struct bt_conn *conn)
 	(void)send_control_response(conn,
 				    "@info uart dropped=%u dropped_no_conn=%u buffer=%u/%u\r\n",
 				    dropped, dropped_no_conn, buffered, UART_RX_BUFFER_SIZE);
+#endif
 
 	(void)linkr_wifi_diagnostics(status, sizeof(status));
 	(void)send_control_response(conn, "@info wifi %s\r\n", status);
@@ -1539,8 +1657,29 @@ static void diagnostics_response(struct bt_conn *conn)
 	/* Third drop point: BLE/WS RX -> UART. Its own group so the six web
 	 * rows stay untouched (extra groups are already tolerated by the TUI
 	 * and the web parser, both key on the group name). */
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE)
+	(void)send_control_response(conn,
+				    "@info queue dropped=%u tx_bytes=%u depth=%u\r\n",
+				    (unsigned int)atomic_get(&uart_queue_dropped),
+				    (unsigned int)atomic_get(&uart_tx_bytes),
+				    (unsigned int)k_msgq_num_used_get(&ble_to_uart_queue));
+#else
 	(void)send_control_response(conn, "@info queue dropped=%u\r\n",
 				    (unsigned int)atomic_get(&uart_queue_dropped));
+#endif
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE) && \
+	!IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY)
+	(void)send_control_response(conn,
+				    "@info bletx dropped=%u uart_total=%u depth=%u mtu=%u\r\n",
+				    (unsigned int)atomic_get(&ble_tx_dropped),
+				    (unsigned int)atomic_get(&uart_rx_dropped_total),
+				    (unsigned int)k_msgq_num_used_get(&ble_tx_queue),
+				    (unsigned int)bt_gatt_get_mtu(conn));
+	(void)send_control_response(conn,
+				    "@info link disc=%u last_reason=0x%02x\r\n",
+				    (unsigned int)atomic_get(&ble_disconnects),
+				    (unsigned int)atomic_get(&ble_last_disconnect_reason));
+#endif
 	{
 		/* Whether the 40-92 ms handoff stalls come from the -EBUSY/-ENOMEM
 		 * retry backoff (slept_ms) or from waiting on the peer (wait_max_ms).
@@ -2203,6 +2342,9 @@ static void ble_to_uart_thread(void)
 		}
 #endif
 
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE)
+		atomic_add(&uart_tx_bytes, packet.len);
+#endif
 		signal_uart_activity();
 	}
 }
@@ -2288,6 +2430,26 @@ static int uart_forward_chunk(const uint8_t *data, uint16_t len,
 		linkr_ws_feed(data, len);
 		*accounted = true;
 	}
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE)
+	{
+		struct ble_tx_chunk chunk;
+
+		BUILD_ASSERT(sizeof(chunk.data) >= UART_RX_CHUNK);
+		if (len > sizeof(chunk.data)) {
+			len = sizeof(chunk.data);
+		}
+		chunk.len = len;
+		memcpy(chunk.data, data, len);
+		if (k_msgq_put(&ble_tx_queue, &chunk, K_NO_WAIT) != 0) {
+			atomic_inc(&ble_tx_dropped);
+			atomic_set(&ble_tx_overflow, 1);
+		}
+	}
+	/* err belongs to the synchronous branch below; this path hands the
+	 * chunk to the sender thread and always reports success. */
+	(void)err;
+	return 0;
+#else
 	if (!linkr_uart_reliable_mode()) {
 		/* NUS is the compatibility, best-effort path. Preserve its previous
 		 * behavior: UART capture must not stall when no NUS central exists. */
@@ -2322,6 +2484,7 @@ static int uart_forward_chunk(const uint8_t *data, uint16_t len,
 		LOG_WRN("Reliable UART delivery retry: %d", err);
 	}
 	return err;
+#endif /* CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE */
 }
 #endif
 
@@ -2392,6 +2555,70 @@ static void uart_to_ble_thread(void)
 	}
 #endif
 }
+
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE) && \
+	!IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY)
+static void ble_tx_thread(void)
+{
+	k_sem_take(&bridge_start_sem, K_FOREVER);
+
+	for (;;) {
+		struct ble_tx_chunk chunk;
+		int err;
+
+		linkr_watchdog_feed(LINKR_WDT_UART_RX);
+		k_msgq_get(&ble_tx_queue, &chunk, K_FOREVER);
+
+		do {
+			if (!linkr_uart_reliable_mode()) {
+				/* No reliable selection for this session: use the NUS
+				 * compatibility channel. Anchoring on reliable_mode rather
+				 * than on a restored NUS subscription lets a client that
+				 * explicitly selects Reliable UART keep receiving output
+				 * even if its previous NUS CCC was restored by bonding. */
+				(void)nus_send_chunk(chunk.data, chunk.len);
+				err = 0;
+			} else {
+				err = reliable_send_chunk(chunk.data, chunk.len);
+				if (err == -ENOTCONN) {
+					/* Nobody subscribed to the reliable
+					 * indications. If this central selected the
+					 * legacy NUS channel instead, deliver there
+					 * rather than dropping a live terminal just
+					 * because the previous session left the
+					 * reliable mode flag set. */
+					if (nus_send_chunk(chunk.data, chunk.len) == 0) {
+						err = 0;
+					} else if (IS_ENABLED(
+							   CONFIG_LINKR_BLE_BRIDGE_UART_RX_DROP_NO_CONN)) {
+						atomic_inc(&uart_reliable_drop_no_conn);
+						err = 0;
+					}
+				} else if (err == -EINVAL) {
+					LOG_WRN("Dropping %u UART bytes the reliable path cannot carry",
+						chunk.len);
+					err = 0;
+				}
+			}
+			if (err) {
+				LOG_WRN("Reliable UART delivery retry: %d", err);
+				k_sleep(K_MSEC(10));
+			}
+		} while (err);
+
+		if (atomic_cas(&ble_tx_overflow, 1, 0)) {
+			/* The queue overflowed while this thread was busy with an
+			 * indication handshake. Dropping the newest chunk (counted in
+			 * ble_tx_dropped) loses a burst of target output, but tearing
+			 * the link down loses the whole session: every pending GATT
+			 * write fails at once, and clients that treat a write failure
+			 * as ambiguous latch until they reconnect. Keep the link and
+			 * let the next chunk through. */
+			LOG_WRN("BLE TX queue overflow; dropped target output");
+		}
+	}
+}
+#endif
 
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_TX)
 static void uart_test_tx_thread(void)
@@ -2522,6 +2749,11 @@ K_THREAD_DEFINE(ble_to_uart_tid, 1024, ble_to_uart_thread, NULL, NULL, NULL,
 		7, 0, 0);
 K_THREAD_DEFINE(uart_to_ble_tid, 2048, uart_to_ble_thread, NULL, NULL, NULL,
 		7, 0, 0);
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE) && \
+	!IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY)
+K_THREAD_DEFINE(ble_tx_tid, 1024, ble_tx_thread, NULL, NULL, NULL,
+		8, 0, 0);
+#endif
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_TX)
 K_THREAD_DEFINE(uart_test_tx_tid, 1024, uart_test_tx_thread, NULL, NULL, NULL,
 		7, 0, 0);
@@ -2698,6 +2930,13 @@ int main(void)
 	advertise_schedule(K_NO_WAIT);
 	k_sem_give(&bridge_start_sem);
 	k_sem_give(&bridge_start_sem);
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE) && \
+	!IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY)
+	/* The decoupled BLE sender is a third bridge thread. It waits on the same
+	 * start semaphore; without its own give it never runs, the BLE TX queue
+	 * fills, and UART output is dropped even though LAN and WebDAV work. */
+	k_sem_give(&bridge_start_sem);
+#endif
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_TX)
 	k_sem_give(&bridge_start_sem);
 #endif

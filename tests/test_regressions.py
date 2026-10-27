@@ -17,15 +17,20 @@ from unittest.mock import AsyncMock, patch
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def extract(source, start_marker, end_marker, required):
+def extract(source, start_marker, end_marker, required, include_end=False):
     """Slice a production block by literal anchors.
 
     A moved anchor should fail loudly rather than quietly compile a different
     function, so the intended definitions are asserted to be inside the block.
     Truncation itself cannot pass unnoticed: the harness compiles with -Werror.
+    Set include_end when the end anchor is a preprocessor line that balances a
+    conditional opened inside the block.
     """
     start = source.index(start_marker)
-    block = source[start:source.index(end_marker, start)]
+    stop = source.index(end_marker, start)
+    if include_end:
+        stop += len(end_marker)
+    block = source[start:stop]
     for name in required:
         if f"{name}(" not in block:
             raise AssertionError(f"{name} is missing from the extracted block")
@@ -50,8 +55,9 @@ class FirmwareTests(unittest.TestCase):
         upload = extract(wifi, "static void upload_thread(void *a", "\n/* ---",
                          ["upload_thread"])
         main = (ROOT / "src/main.c").read_text()
-        forward = extract(main, "static int uart_forward_chunk(", "\n#endif",
-                          ["uart_forward_chunk"])
+        forward = extract(main, "static int uart_forward_chunk(",
+                          "\n#endif /* CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE */\n}",
+                          ["uart_forward_chunk"], include_end=True)
         (directory / "production_functions.inc").write_text(setters + upload + forward)
         config = dict(
             line.split("=", 1) for line in (ROOT / "prj.conf").read_text().splitlines()

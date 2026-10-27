@@ -145,7 +145,19 @@ struct wifi_scan_cache_entry {
 static struct wifi_scan_cache_entry scan_cache[WIFI_SCAN_MAX_RESULTS];
 static size_t scan_cache_count;
 
+/* The WebDAV staging ring is several kilobytes written only by the upload
+ * path, never from an ISR, so it belongs in PSRAM on boards that have it.
+ * Keep the fallback in ordinary BSS for boards without external RAM. */
+#if IS_ENABLED(CONFIG_ESP_SPIRAM)
+/* .ext_ram.bss is zeroed by esp_init_psram(), so it must not also carry the
+ * .noinit section attribute: two section attributes conflict. */
+#define LINKR_EXT_RAM_BSS __attribute__((section(".ext_ram.bss"), aligned(4)))
+static uint8_t LINKR_EXT_RAM_BSS log_ring_data[LOG_RING_SIZE];
+struct ring_buf log_ring = RING_BUF_INIT(log_ring_data, LOG_RING_SIZE);
+#else
+#define LINKR_EXT_RAM_BSS
 RING_BUF_DECLARE(log_ring, LOG_RING_SIZE);
+#endif
 static struct k_mutex log_lock;
 /* Serializes a configuration change with an in-flight HTTP PUT. */
 static struct k_mutex upload_lock;
@@ -153,6 +165,10 @@ static struct k_mutex upload_lock;
 #define UPLOAD_STACK  CONFIG_LINKR_BLE_BRIDGE_LOG_UPLOAD_STACK
 #define UPLOAD_PRIO   6
 static struct k_thread upload_thread_data;
+/* Keep the uploader stack in internal RAM. Its ring and chunk are data and
+ * live in PSRAM, but a thread stack that can be scheduled while the flash
+ * cache is off is not safe there; the uploader stopping after a WiFi connect
+ * looked exactly like that. */
 static K_THREAD_STACK_DEFINE(upload_stack, UPLOAD_STACK);
 
 struct linkr_wifi_settings {
@@ -1643,7 +1659,7 @@ static void upload_thread(void *a, void *b, void *c)
     ARG_UNUSED(b);
     ARG_UNUSED(c);
 
-    static uint8_t chunk[WEBDAV_UPLOAD_CHUNK];
+    static uint8_t LINKR_EXT_RAM_BSS chunk[WEBDAV_UPLOAD_CHUNK];
     size_t pending_total = 0;
     atomic_val_t pending_generation = 0;
     uint32_t pending_sequence = 0;

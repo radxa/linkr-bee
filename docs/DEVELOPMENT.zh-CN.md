@@ -106,12 +106,18 @@ ESP32-C5 DevKitC：
 west build -b esp32c5_devkitc/esp32c5/hpcore linkr-bee
 ```
 
+ESP32-CAM（经典 ESP32，桥接使用 UART0）：
+
+```sh
+west build -b esp32_cam/esp32/procpu linkr-bee
+```
+
 ### GitHub Actions 构建与刷写
 
-`.github/workflows/build.yml` 使用矩阵构建五块板的默认 WiFi + BLE 配置：
+`.github/workflows/build.yml` 使用矩阵构建六块板的默认 WiFi + BLE 配置：
 `esp32c3_supermini`、`esp32c3_devkitm`、`esp32c3_devkitc`、
-`esp32c5_devkitc/esp32c5/hpcore` 与 `esp32_devkitc/esp32/procpu`
-（ESP32-WROOM-32）。它会在 `main` push、pull request 和手动触发时运行，
+`esp32c5_devkitc/esp32c5/hpcore`、`esp32_devkitc/esp32/procpu`
+（ESP32-WROOM-32）与 `esp32_cam/esp32/procpu`（ESP32-CAM）。它会在 `main` push、pull request 和手动触发时运行，
 使用 Zephyr v4.4.1 与 Zephyr SDK 1.0.1；每个 job 只安装该板需要的工具链
 （RISC-V 目标用 `riscv64-zephyr-elf`，WROOM 用
 `xtensa-espressif_esp32_zephyr-elf`），不拉取完整 CI 镜像。
@@ -136,7 +142,7 @@ dry-run，只执行组装、不修改 GitHub release。
 ```
 
 脚本会按标准镜像名自动选择芯片，并将 C3 写入 `0x0`、C5 写入 `0x2000`、
-WROOM 写入 `0x1000`，
+WROOM / CAM 写入 `0x1000`，
 但不执行整片擦除。它只重写镜像覆盖的扇区，因此普通升级会保留 BLE identity
 和已保存配置；需要清除它们时使用板型对应的恢复出厂输入。artifact 还包含
 `FLASHING.txt`、`firmware.json`、ELF、linker map、
@@ -146,7 +152,9 @@ WROOM 写入 `0x1000`，
 
 应用从 devicetree chosen 节点 `zephyr,linkr-ble-uart` 读取 UART。提供的
 ESP32-C3 overlay 将其绑定到 `uart0`；ESP32-C5 DevKitC overlay 将其绑定到
-GPIO11/12 上的 `uart1`。若不存在桥专用 chosen 节点，应用回退到
+GPIO11/12 上的 `uart1`。ESP32-CAM overlay 同样绑定 `uart0`：该板只引出
+GPIO1 TX / GPIO3 RX 这一对串口，ROM 下载器和桥接共用它，因此烧录和运行使用
+同一对线；芯片内部的 UART2 没有引出。若不存在桥专用 chosen 节点，应用回退到
 `zephyr,shell-uart`，再回退到 `zephyr,console`。
 
 在 `esp32c3_supermini` 上，`uart0` 用于桥流量：
@@ -268,6 +276,16 @@ Web 终端(`web/`)的「连接」卡片里有 BLE/局域网切换;局域网模�
 出厂构建在所有板型上启用 `CONFIG_LINKR_BLE_BRIDGE_UART_RX_DROP_NO_CONN=y`。
 BLE 会话断开后，UART 采集继续向 WebSocket 客户端和日志上传器转发；
 BLE 路径丢弃的数据不会在重连后补发。
+
+ESP32-CAM 构建启用
+`CONFIG_LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE=y`。原先唯一的 UART-to-BLE 线程会
+阻塞在 Reliable UART indication 上，而它同时负责喂给局域网桥和日志环，所以
+中心设备调度慢时，只用局域网的 TUI 或浏览器也会缺字节。解耦后该线程只把数据
+送入日志、WebSocket 和一个小队列，BLE 副本由独立发送线程处理，indication
+等待期间 UART 环照常排空。队列满时，发送线程会在当前 chunk 发完后断开中心
+设备，让客户端重新同步，而不是静默跳过序号；局域网输出不受影响。该板型的
+UART RX 环为 20480 字节，以便队列与它一起放下。ESP32-WROOM-32 保持上游的
+同步路径和 16384 字节 RX 环不变，C3/C5 也不变。
 
 ### 配对 GPIO、持久化与恢复出厂
 
@@ -991,7 +1009,7 @@ C3、C5 已验证启动和故障恢复时无此告警；其他支持板型目前
 
 | 层次 | 本仓库已验证 | 仍需硬件验证 |
 | --- | --- | --- |
-| 固件构建 | `esp32c3_supermini`、`esp32c3_devkitm`、`esp32c3_devkitc` 与 `esp32c5_devkitc/esp32c5/hpcore` 在 CI 中以 Zephyr v4.4.1 构建，并断言各代控制器的安全符号 | — |
+| 固件构建 | `esp32c3_supermini`、`esp32c3_devkitm`、`esp32c3_devkitc`、`esp32c5_devkitc/esp32c5/hpcore`、`esp32_devkitc/esp32/procpu` 与 `esp32_cam/esp32/procpu` 在 CI 中以 Zephyr v4.4.1 构建，并断言各代控制器的安全符号 | ESP32-CAM 真机运行验证 |
 | 协议主机测试 | `tests/` 编译并驱动生产代码中的管理协议、安全配对门禁、目标绑定、WebDAV 与 HCI 顺序逻辑，含 C3/C5 构建约束 | 真实 SMP 配对、NVS 持久化、射频行为 |
 | BLE 终端 | Web、Python、C 三套客户端，以及浏览器回归套件覆盖 Reliable UART 序号、重组与会话边界 | 各平台的配对、MTU 协商与重连行为 |
 | WiFi、局域网桥、WebDAV | 主机测试与浏览器套件；WS 令牌握手两侧均有覆盖 | 关联过程、BLE/WiFi 共存、真实端点上传 |

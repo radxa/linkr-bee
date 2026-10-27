@@ -84,6 +84,54 @@ config LINKR_BLE_BRIDGE_UART_IDLE_MS
 	help
 	  Flush a partially-filled UART RX packet after this idle period.
 
+config LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE
+	bool "Keep the LAN/log bridge independent of BLE delivery"
+	default n
+	help
+	  Normally the single UART-to-BLE thread feeds the log ring and the
+	  WebSocket bridge and then blocks in the Reliable UART indication.
+	  When the central schedules that indication slowly, the thread stops
+	  draining the UART ring for every chunk, so a LAN-only TUI or Web
+	  client sees the same lost bytes as the BLE client.
+
+	  With this option the thread stages the chunk for logging and the
+	  WebSocket bridge and hands the BLE copy to a small queue and a
+	  separate sender thread. The UART ring keeps draining even while BLE
+	  waits. If the queue fills, the BLE central is disconnected after the
+	  in-flight chunk so it can resynchronise instead of silently losing a
+	  sequence number; LAN output is unaffected.
+
+	  Enable only on a board whose memory budget has been checked.
+
+config LINKR_BLE_BRIDGE_BLE_TX_QUEUE_DEPTH
+	int "BLE TX queue depth for the decoupled path"
+	default 8
+	range 2 32
+	depends on LINKR_BLE_BRIDGE_BLE_TX_DECOUPLE
+	help
+	  Number of UART chunks that may wait for the BLE sender. At the
+	  default 8 x 232 bytes this is about 160 ms of UART at 115200.
+
+config LINKR_BLE_BRIDGE_PREFER_NUS
+	bool "Prefer the raw NUS channel for terminal bytes"
+	default n
+	depends on BT
+	help
+	  Advertise that clients should use the Nordic UART Service for the
+	  terminal data path even though the reliable UART service is still
+	  exposed. The ESP32-CAM uses this: its single UART and bonding history
+	  make the raw byte pipe the dependable choice, while other boards keep
+	  the reliable channel.
+config LINKR_BLE_BRIDGE_RELIABLE_UART
+	bool "Expose the reliable UART GATT service"
+	default y
+	help
+	  The reliable UART service adds framing, sequence numbers, confirmed
+	  indications and reassembly on top of the raw NUS channel. Disable it
+	  to expose only NUS: a plain byte pipe with no header, sequence or
+	  reassembly state that a client can get stuck in. Clients that do not
+	  find the service fall back to NUS automatically.
+
 config LINKR_BLE_BRIDGE_UART_RX_BUFFER_SIZE
 	int "UART RX buffering before BLE transmission"
 	default 16384
@@ -477,7 +525,7 @@ config LINKR_BLE_BRIDGE_WEBDAV_UPLOAD_CHUNK
 config LINKR_BLE_BRIDGE_LOG_RING_SIZE
 	int "WebDAV log staging ring buffer size in bytes"
 	default 8192
-	range 512 32767
+	range 512 262144
 	depends on LINKR_BLE_BRIDGE_WEBDAV
 	help
 	  Bytes of UART RX data staged for periodic WebDAV upload. When the

@@ -43,11 +43,13 @@ static int gpio_value, gpio_reads, configured_error, request_error, disconnects;
 static int security_requested;
 static bool gpio_ready = true;
 static const struct bt_conn_auth_cb *registered_auth;
-static bool gpio_is_ready_dt(const struct gpio_dt_spec *p) { (void)p; return gpio_ready; }
-static int gpio_pin_configure_dt(const struct gpio_dt_spec *p, int mode)
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH)
+static inline bool gpio_is_ready_dt(const struct gpio_dt_spec *p) { (void)p; return gpio_ready; }
+static inline int gpio_pin_configure_dt(const struct gpio_dt_spec *p, int mode)
 { (void)p; assert(mode == GPIO_INPUT); return configured_error; }
-static int gpio_pin_get_dt(const struct gpio_dt_spec *p)
+static inline int gpio_pin_get_dt(const struct gpio_dt_spec *p)
 { (void)p; gpio_reads++; return gpio_value; }
+#endif
 static int bt_conn_auth_cb_register(const struct bt_conn_auth_cb *cb)
 { registered_auth = cb; return 0; }
 static int bt_conn_auth_info_cb_register(struct bt_conn_auth_info_cb *cb)

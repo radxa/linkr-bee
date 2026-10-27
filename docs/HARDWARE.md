@@ -1,4 +1,4 @@
-# ESP32-C3 / ESP32-C5 硬件需求规格（Linkr Bee）
+# ESP32-C3 / ESP32-C5 / 经典 ESP32 硬件需求规格（Linkr Bee）
 
 > 基于 C3/C5 board overlay、`src/main.c`、`prj.conf`、`Kconfig` 整理。
 > C3 Super Mini 是当前硬件基线；C5 DevKitC 使用文中单独列出的差异配置。
@@ -120,6 +120,7 @@ ESP32-C5 DevKitC 差异：
 - esp32c3_devkitm / esp32c3_devkitc（overlay 已提供，引脚同上）
 - esp32c5_devkitc/esp32c5/hpcore（UART1 GPIO11/12，USB Serial/JTAG console，GPIO28 恢复出厂）
 - **esp32_devkitc/esp32/procpu**（ESP32-WROOM-32，Xtensa 双核，已验证）
+- **esp32_cam/esp32/procpu**（ESP32-CAM / ESP32-S 模块，Xtensa 双核，共用同一套固件源码）
 
 ### ESP32-WROOM-32 (Xtensa) 差异
 
@@ -173,6 +174,45 @@ GPIO2 是板载蓝色活动 LED，低有效，UART 收发时闪烁；`gpio-leds`
 NVS 后，已绑定主机无需 GPIO4 即可加密重连并读写管理服务；GPIO13 按键、GPIO27
 恢复出厂接线和 GPIO2 活动 LED 仍需在 WROOM-32 实机操作验收。默认提交配置中
 autobaud 与 GPIO4 授权均为 `n`。
+
+### ESP32-CAM（ESP32-S 模块）差异
+
+ESP32-CAM 与 WROOM-32 属于同一代经典 ESP32，源码和功能通用，但板级硬件不同，
+因此使用独立镜像 `linkr-bee-esp32-cam.bin`。
+
+| 项 | ESP32-CAM |
+|----|-----------|
+| SoC | 经典 ESP32（ESP32-S 模块，Xtensa 双核） |
+| Flash | 4MB，分区布局与 WROOM-32 相同 |
+| USB 串口 | 无板载 USB-UART，需外接 3.3V USB-TTL |
+| 桥接 UART | **UART0**，GPIO1 TX / GPIO3 RX |
+| 烧录 | 同一对 UART0；GPIO0 拉低后复位进入 ROM 下载模式 |
+| Console | 与桥共用 UART0，日志会出现在目标串口线上 |
+| 活动 LED | 无。板上有 GPIO33 红色状态灯和 GPIO4 白色闪光灯，但装上相机组件后 GPIO 不再引出，两者都不作为动作指示；固件关闭两个 LED 节点 |
+| 用户按键 | 无；配对授权默认关闭，无恢复出厂按键 |
+| 相机 / SD 卡 | 固件中关闭，不占用 DRAM 和外设 |
+| PSRAM | 固件中关闭，内存使用内部 DRAM |
+| WebDAV | 关闭（与 WROOM-32 相同） |
+
+UART2 在芯片内部存在，但没有引出到 ESP32-CAM 排针，所以桥接只能使用 UART0。
+烧录时 USB-TTL 接 U0T/U0R，GPIO0 接 GND 后复位；烧录完成后释放 GPIO0，
+同一对线直接作为桥接串口连接目标 SBC。
+
+板上有 GPIO33 红色状态灯和 GPIO4 白色闪光灯（相机补光），但相机组件装上后 GPIO
+不再方便引出，因此 CAM 镜像不做 LED 动作指示，串口收发状态以数据本身为准。
+
+构建与刷写：
+
+```sh
+west build -b esp32_cam/esp32/procpu /path/to/linkr-bee
+tools/flash_firmware.sh --image linkr-bee-esp32-cam.bin --port /dev/ttyUSB0
+```
+
+恢复出厂（没有按键）：清除设置分区 `0x3b0000`、长度 `0x2f000`：
+
+```sh
+esptool --chip esp32 --port /dev/ttyUSB0 erase-region 0x3b0000 0x2f000
+```
 
 **DRAM 约束与优化：**
 
@@ -243,6 +283,10 @@ tools/flash_firmware.sh --image build/zephyr/zephyr.bin --chip esp32c5
 # ESP32-WROOM-32 (Xtensa 双核)
 west build -b esp32_devkitc/esp32/procpu /path/to/linkr-bee
 west flash --runner esp32
+
+# ESP32-CAM (经典 ESP32，桥接 UART0)
+west build -b esp32_cam/esp32/procpu /path/to/linkr-bee
+tools/flash_firmware.sh --image build/zephyr/zephyr.bin --chip esp32 --port /dev/ttyUSB0
 ```
 
 前置条件：west manifest 含 `modules/hal_espressif`（提供 WiFi blobs）。
@@ -254,3 +298,4 @@ west flash --runner esp32
 | 2026-07-07 | v1.0 | 初版，对应已验证固件（含 WiFi/WebDAV） |
 | 2026-09-16 | v1.1 | 新增 ESP32-WROOM-32 (Xtensa) 支持 |
 | 2026-10-21 | v1.2 | WROOM 增加按需自动波特率（默认关闭，可选 `@a`/GPIO13 按键）、默认关闭 GPIO4 配对授权、恢复 GPIO2 活动 LED；所有板型默认广播 `Linkr Bee XXXX`（硬件 MAC 后四位），支持 `@n` 自定义名 |
+| 2026-10-25 | v1.3 | 新增 ESP32-CAM（ESP32-S 模块）独立镜像：桥接与烧录共用 UART0，关闭相机、SD 卡与 PSRAM |
