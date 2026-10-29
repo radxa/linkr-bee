@@ -10,6 +10,10 @@
 #include <string.h>
 
 #define ARG_UNUSED(x) (void)(x)
+/* src/ext_ram.h turns this into a section attribute only on PSRAM-capable
+ * Zephyr targets; a host build has no external RAM, so it expands to nothing. */
+#define LINKR_EXT_RAM_BSS
+#define __aligned(x) __attribute__((aligned(x)))
 #define WEBDAV_UPLOAD_CHUNK 512
 #define WEBDAV_UPLOAD_INTERVAL_MS 1000
 #define URL_MAX 192

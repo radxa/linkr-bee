@@ -64,6 +64,32 @@ for board in $boards; do
     grep -qx '# CONFIG_ESP32_BT_LE_SM_LEGACY is not set' "$config"
     grep -qx 'CONFIG_ESP32_BT_LE_LL_CFG_FEAT_LE_ENCRYPTION=y' "$config"
     grep -qx 'CONFIG_ESP32_BT_LE_CRYPTO_STACK_MBEDTLS=y' "$config"
+    # The released C5 image runs from the module's 8 MB PSRAM. Assert the
+    # layout, never the byte counts: sizes move with every feature, but an
+    # image that silently loses PSRAM, or starts serving the WiFi adapter heap
+    # from it, is a regression either way. docs/C5_PSRAM.md records why.
+    grep -qx 'CONFIG_ESP_SPIRAM=y' "$config"
+    grep -qx 'CONFIG_ESP_SPIRAM_SIZE=8388608' "$config"
+    grep -qx 'CONFIG_SPIRAM_TYPE_ESPPSRAM64=y' "$config"
+    grep -qx 'CONFIG_SPIRAM_MODE_QUAD=y' "$config"
+    grep -qx 'CONFIG_SPIRAM_SPEED_80M=y' "$config"
+    grep -qx '# CONFIG_ESP_SPIRAM_MEMTEST is not set' "$config"
+    grep -qx 'CONFIG_ESP_WIFI_HEAP_SYSTEM=y' "$config"
+    grep -qx '# CONFIG_ESP_WIFI_HEAP_SPIRAM is not set' "$config"
+    grep -qx '# CONFIG_ESP32_WIFI_NET_ALLOC_SPIRAM is not set' "$config"
+    # The migrated buffers have to actually land in external RAM:
+    # .ext_ram.bss is mapped into the 0x42xxxxxx region on this SoC, while
+    # internal SRAM sits at 0x408xxxxx. A missing symbol means nothing was
+    # migrated at all.
+    ext_ram_start=$(awk '/_ext_ram_bss_start = ABSOLUTE/ {print $1; exit}' \
+      "$build_dir/zephyr/zephyr.map")
+    case "$ext_ram_start" in
+      0x42*) ;;
+      *)
+        echo "PSRAM buffers are not in external RAM (got '${ext_ram_start:-nothing}')" >&2
+        exit 1
+        ;;
+    esac
   fi
   grep -qx 'CONFIG_BT_SMP_APP_PAIRING_ACCEPT=y' "$config"
   grep -qx 'CONFIG_BT_BONDING_REQUIRED=y' "$config"

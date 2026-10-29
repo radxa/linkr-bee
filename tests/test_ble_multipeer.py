@@ -47,6 +47,10 @@ class BleMultipeerTests(unittest.TestCase):
             subprocess.run([
                 *shlex.split(os.environ.get("CC", "cc")), "-std=c11", "-Wall", "-Wextra", "-Werror",
                 "-Wno-unused-function", "-Wno-unused-variable", "-DCONFIG_BT_MAX_CONN=2",
+                # The production blocks below carry the firmware's PSRAM placement
+                # macro; on a host build there is no external RAM, so it expands to
+                # nothing (src/ext_ram.h does the same when CONFIG_ESP_SPIRAM is off).
+                "-DLINKR_EXT_RAM_BSS=",
                 *(["-DTEST_RELIABLE"] if reliable else []), "-I", str(path), "-I", str(ROOT / "src"),
                 str(ROOT / "tests/ble_multipeer_harness.c"), "-o", str(binary),
             ], check=True)
