@@ -299,6 +299,75 @@ export function sanitizeSlotName(value, maxBytes = BOARD_SLOT_NAME_MAX_BYTES) {
   return kept.trim();
 }
 
+/* ---- Paired-device labels ---- */
+/* A label is free text stored in the board's NVS, keyed by the bond's identity
+ * address. Like saved IR names it travels hex-encoded over the management
+ * channel so spaces and non-ASCII bytes need no quoting. The byte cap mirrors
+ * the firmware default. */
+export const BOND_LABEL_MAX_BYTES = 48;
+const BOND_ID = /^[01]\/(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/;
+
+function bondAddress(value) {
+  const id = String(value ?? "");
+  if (!BOND_ID.test(id)) {
+    invalid("bond address must be 0/ or 1/ followed by six hex octets");
+  }
+  return id;
+}
+
+/* "@linkr bonds label <type>/<addr>" — read one label. */
+export function bondLabelQueryCommand({ id = "" } = {}) {
+  return `@linkr bonds label ${bondAddress(id)}`;
+}
+
+/* "@linkr bonds label <type>/<addr> <hex>", or `... clear` when empty. */
+export function bondLabelSetCommand({ id = "", label = "" } = {}) {
+  const address = bondAddress(id);
+  const text = sanitizeBondLabel(label);
+  return text
+    ? `@linkr bonds label ${address} ${utf8ToHex(text)}`
+    : `@linkr bonds label ${address} clear`;
+}
+
+/* "OK bonds label=1/AA:..:FF hex=e5aea2" or "... none". */
+export function parseBondLabel(text) {
+  const line = replyLines(text).find((candidate) => /^OK\s+bonds\s+label=/i.test(candidate));
+  if (!line) return null;
+  const match = line.match(/^OK\s+bonds\s+label=([01]\/[0-9A-F:]{17})\s+(none|hex=([0-9a-f]*))$/i);
+  if (!match) return null;
+  const id = match[1].toUpperCase();
+  if (match[2].toLowerCase() === "none") {
+    return { id, label: "", empty: true };
+  }
+  let label;
+  try {
+    label = hexToUtf8(match[3] || "");
+  } catch {
+    return null;
+  }
+  return { id, label, empty: label.length === 0 };
+}
+
+/* Same rules as saved-slot names: collapse whitespace, strip control bytes (a
+ * label reaches the terminal and the CLI), and truncate on a code-point
+ * boundary so the board's byte cap is never split mid-character. */
+export function sanitizeBondLabel(value, maxBytes = BOND_LABEL_MAX_BYTES) {
+  const text = String(value ?? "")
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const encoder = new TextEncoder();
+  let used = 0;
+  let kept = "";
+  for (const point of text) {
+    const bytes = encoder.encode(point).length;
+    if (used + bytes > maxBytes) break;
+    used += bytes;
+    kept += point;
+  }
+  return kept.trim();
+}
+
 export function utf8ToHex(text) {
   const bytes = new TextEncoder().encode(String(text ?? ""));
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");

@@ -741,6 +741,32 @@ config LINKR_BLE_BRIDGE_AI_CONFIG_MAX
 	  The blob is uploaded in chunks over the management channel; 960 bytes
 	  covers a long endpoint, a model id, a token and several headers.
 
+# --------------------------------------------------------------------------
+# Paired-device labels
+# --------------------------------------------------------------------------
+# A bonded host shows up in the paired-device list under its identity address.
+# The owner can give it a display label (e.g. "Alice's phone") stored in NVS
+# next to the bond; the Bluetooth stack owns the bond table itself and cannot
+# carry extra fields, so the two are joined by address.
+
+config LINKR_BLE_BRIDGE_BOND_LABEL_MAX
+	int "Maximum paired-device label length in bytes"
+	depends on SETTINGS
+	default 48
+	range 8 64
+	help
+	  Each pairing can carry a free-text display label (UTF-8) so the owner
+	  can tell "my phone" from "that laptop". It is stored in NVS under the
+	  bond's identity address and removed with the pairing. 48 bytes fits
+	  about sixteen Chinese characters or a full phone name; the label
+	  travels as hex over the management channel, so 64 bytes would double
+	  to 128 characters on the wire, still inside the 512-byte reply.
+
+	  The web and TUI clients cap their own input at 48 bytes because the
+	  reply protocol does not report this value. Keep the default unless
+	  those clients are changed too: a smaller value makes their writes
+	  fail, and a larger value is unreachable from them.
+
 config LINKR_BLE_BRIDGE_IR_LEARN
 	bool "Infrared learning (capture and replay arbitrary remotes)"
 	depends on LINKR_BLE_BRIDGE_IR

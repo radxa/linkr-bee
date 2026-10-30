@@ -53,6 +53,9 @@ static bool linkr_aux_command(const char *body, char *out, size_t n) {
 static bool linkr_bond_command(const void *conn, const char *body, char *out, size_t n) {
  (void)conn; (void)body; (void)out; (void)n; return false;
 }
+static bool linkr_bond_is_readonly(const char *body) {
+ (void)body; return false;
+}
 static bool dispatch_aux(const void *conn, const char *body, uint32_t queued) {
  mgmt_capture.epoch = queued;
 """ + dispatch + "\n return false;\n}\n")

@@ -54,6 +54,12 @@ pub enum NetworkRow {
     BleNameDefault,
     /// `@n?`.
     BleNameStatus,
+    /// Read the bonded hosts and their labels again.
+    PairedRefresh,
+    /// The `index`th bonded host: Enter renames it.
+    Paired(usize),
+    /// The `index`th bonded host: Enter removes the pairing, after a card.
+    PairedRemove(usize),
 }
 
 /// Every row that is always there, in the order the view draws them.
@@ -78,41 +84,68 @@ pub const ROWS: [NetworkRow; 13] = [
 /// keyboard too: the walk is the drawing's order.
 const WIFI_ROWS: usize = 5;
 
+/// The variable parts of the walk: which dynamic blocks are present and how
+/// long they are.
+#[derive(Clone, Copy, Debug)]
+struct Shape {
+    connected: bool,
+    results: usize,
+    bonds: usize,
+    paired: bool,
+    labels: bool,
+}
+
+/// How many rows the walk has: the fixed table, the scan results, and — when
+/// the firmware has the paired-device commands — a refresh row, one removal
+/// per bonded host, and a rename row too when labels are supported.
+fn walk_len(shape: Shape) -> usize {
+    ROWS.len()
+        + shape.results
+        + if shape.paired {
+            1 + shape.bonds * (1 + usize::from(shape.labels))
+        } else {
+            0
+        }
+}
+
 impl NetworkRow {
     /// Whether the keyboard can stand here right now.
     ///
     /// A scan result is left out while a network is joined: picking one names
     /// the network to join, and with a network already joined there is nothing
     /// left to name it for.
-    fn reachable(self, connected: bool, results: usize) -> bool {
+    fn reachable(self, shape: Shape) -> bool {
         match self {
-            NetworkRow::ScanResult(index) => !connected && index < results,
+            NetworkRow::ScanResult(index) => !shape.connected && index < shape.results,
+            NetworkRow::Paired(index) => shape.paired && shape.labels && index < shape.bonds,
+            NetworkRow::PairedRemove(index) => shape.paired && index < shape.bonds,
+            NetworkRow::PairedRefresh => shape.paired,
             _ => true,
         }
     }
 
     /// The next row down, wrapping.
-    fn next(self, connected: bool, results: usize) -> NetworkRow {
-        self.step(1, connected, results)
+    fn next(self, shape: Shape) -> NetworkRow {
+        self.step(1, shape)
     }
 
     /// The next row up, wrapping.
-    fn previous(self, connected: bool, results: usize) -> NetworkRow {
-        self.step(-1, connected, results)
+    fn previous(self, shape: Shape) -> NetworkRow {
+        self.step(-1, shape)
     }
 
     /// Walk `direction` rows, skipping the ones not reachable now.
-    fn step(self, direction: isize, connected: bool, results: usize) -> NetworkRow {
-        let count = ROWS.len() + results;
-        let here = self.position(results).min(count - 1);
+    fn step(self, direction: isize, shape: Shape) -> NetworkRow {
+        let count = walk_len(shape);
+        let here = self.position(shape).min(count - 1);
         let mut offset = 1;
         // Bounded by the walk's own length, so a walk with no reachable row
         // but this one comes back here rather than spinning.
         while offset <= count {
             let index =
                 (here as isize + direction * offset as isize).rem_euclid(count as isize) as usize;
-            let candidate = Self::at(index, results);
-            if candidate.reachable(connected, results) {
+            let candidate = Self::at(index, shape);
+            if candidate.reachable(shape) {
                 return candidate;
             }
             offset += 1;
@@ -125,9 +158,18 @@ impl NetworkRow {
     /// A result that is no longer on the list — the next scan is already
     /// replacing it — stands where the first would have: the walk goes on
     /// from there rather than falling off the table.
-    fn position(self, results: usize) -> usize {
+    fn position(self, shape: Shape) -> usize {
+        let results = shape.results;
         match self {
             NetworkRow::ScanResult(index) => WIFI_ROWS + index.min(results.saturating_sub(1)),
+            NetworkRow::PairedRefresh => ROWS.len() + results,
+            NetworkRow::Paired(index) | NetworkRow::PairedRemove(index) => {
+                let per_bond = 1 + usize::from(shape.labels);
+                let column = index.min(shape.bonds.saturating_sub(1));
+                let base = ROWS.len() + results + 1 + column * per_bond;
+                base + usize::from(matches!(self, NetworkRow::PairedRemove(_)))
+                    * usize::from(shape.labels)
+            }
             row => {
                 let base = ROWS
                     .iter()
@@ -143,15 +185,38 @@ impl NetworkRow {
     }
 
     /// The row at a place in the walk.
-    fn at(index: usize, results: usize) -> NetworkRow {
+    fn at(index: usize, shape: Shape) -> NetworkRow {
         if index < WIFI_ROWS {
             ROWS[index]
-        } else if index < WIFI_ROWS + results {
+        } else if index < WIFI_ROWS + shape.results {
             NetworkRow::ScanResult(index - WIFI_ROWS)
         } else {
-            ROWS[index - results]
+            let row = index - shape.results;
+            if row < ROWS.len() {
+                ROWS[row]
+            } else if !shape.paired || row == ROWS.len() {
+                NetworkRow::PairedRefresh
+            } else {
+                let slot = row - ROWS.len() - 1;
+                let per_bond = 1 + usize::from(shape.labels);
+                let column = slot / per_bond;
+                let within = slot % per_bond;
+                if shape.labels && within == 0 {
+                    NetworkRow::Paired(column)
+                } else {
+                    NetworkRow::PairedRemove(column)
+                }
+            }
         }
     }
+}
+
+/// One bonded host, as the view shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BondEntry {
+    pub id: String,
+    pub is_self: bool,
+    pub label: Option<String>,
 }
 
 /// Everything the network view knows. Filled by the session layer; read here
@@ -168,6 +233,18 @@ pub struct NetworkState {
     pub ssid_input: String,
     /// Scan results, as the device reported them.
     pub scan_results: Vec<String>,
+    /// Bonded hosts, once `@linkr bonds?` has answered; `None` until then.
+    pub bonds: Option<Vec<BondEntry>>,
+    /// Whether the firmware knows the paired-device commands. True until it
+    /// answers `unknown command`, which hides only this section.
+    pub paired_supported: bool,
+    /// Whether the firmware knows `bonds label`; a board with the list but no
+    /// labels still shows the addresses and removal, just not rename.
+    pub labels_supported: bool,
+    /// The last `bonds?` header said a delayed removal is still pending.
+    pub bonds_pending: bool,
+    /// The last removal's result; non-zero means it failed.
+    pub bonds_result: i64,
     /// A read or action is in flight.
     pub loading: bool,
     /// The last failure, already worded for the reader.
@@ -184,6 +261,11 @@ impl Default for NetworkState {
             ble_name: None,
             ssid_input: String::new(),
             scan_results: Vec::new(),
+            bonds: None,
+            paired_supported: true,
+            labels_supported: true,
+            bonds_pending: false,
+            bonds_result: 0,
             loading: false,
             error: None,
             focus: NetworkRow::Ssid,
@@ -197,16 +279,27 @@ impl NetworkState {
         self.wifi.as_ref().is_some_and(|w| w.state == "connected")
     }
 
+    /// The dynamic blocks the walk is built from right now.
+    fn shape(&self) -> Shape {
+        Shape {
+            connected: self.wifi_connected(),
+            results: self.scan_results.len(),
+            bonds: self.bonds.as_ref().map(|bonds| bonds.len()).unwrap_or(0),
+            paired: self.paired_supported,
+            labels: self.labels_supported,
+        }
+    }
+
     /// Move the focus down one reachable row.
     pub fn focus_next(&mut self) {
-        let connected = self.wifi_connected();
-        self.focus = self.focus.next(connected, self.scan_results.len());
+        let shape = self.shape();
+        self.focus = self.focus.next(shape);
     }
 
     /// Move the focus up one reachable row.
     pub fn focus_previous(&mut self) {
-        let connected = self.wifi_connected();
-        self.focus = self.focus.previous(connected, self.scan_results.len());
+        let shape = self.shape();
+        self.focus = self.focus.previous(shape);
     }
 
     /// Keep the keyboard on a row that is still there.
@@ -218,13 +311,35 @@ impl NetworkState {
     /// arrow key somewhere the user did not come from, so it lands on the row
     /// that asked for the scan instead.
     pub fn settle_focus(&mut self) {
-        let NetworkRow::ScanResult(index) = self.focus else {
-            return;
-        };
-        if self.scan_results.is_empty() || self.wifi_connected() {
-            self.focus = NetworkRow::Scan;
-        } else if index >= self.scan_results.len() {
-            self.focus = NetworkRow::ScanResult(self.scan_results.len() - 1);
+        let shape = self.shape();
+        match self.focus {
+            NetworkRow::ScanResult(index) => {
+                if self.scan_results.is_empty() || self.wifi_connected() {
+                    self.focus = NetworkRow::Scan;
+                } else if index >= self.scan_results.len() {
+                    self.focus = NetworkRow::ScanResult(self.scan_results.len() - 1);
+                }
+            }
+            NetworkRow::PairedRefresh => {
+                if !shape.paired {
+                    self.focus = NetworkRow::Scan;
+                }
+            }
+            NetworkRow::Paired(index) if !shape.paired || !shape.labels || index >= shape.bonds => {
+                self.focus = if shape.paired {
+                    NetworkRow::PairedRefresh
+                } else {
+                    NetworkRow::Scan
+                };
+            }
+            NetworkRow::PairedRemove(index) if !shape.paired || index >= shape.bonds => {
+                self.focus = if shape.paired {
+                    NetworkRow::PairedRefresh
+                } else {
+                    NetworkRow::Scan
+                };
+            }
+            _ => {}
         }
     }
 }
@@ -422,8 +537,8 @@ fn document(
     // A live connection replaces the form with the connected summary; a
     // connected network's name is shown where the input field was.
     let connected = state.wifi_connected();
-    let results = state.scan_results.len();
-    let on = |row: NetworkRow| state.focus == row && row.reachable(connected, results);
+    let shape = state.shape();
+    let on = |row: NetworkRow| state.focus == row && row.reachable(shape);
     // The placeholder is the rule the interface uses for "nothing here", in the
     // set the terminal has — the same mark the diagnostics grid shows.
     let empty = theme.glyphs().dash();
@@ -619,6 +734,90 @@ fn document(
         ));
     }
 
+    // Paired devices: the hosts bonded to the bridge, each with its label.
+    lines.push(Line::from(""));
+    lines.push(heading(s.net_paired_section, width, theme));
+    if !state.paired_supported {
+        lines.push(note(
+            &format!("  {}", s.net_paired_unsupported),
+            width,
+            theme,
+        ));
+    } else {
+        targets.push((NetworkRow::PairedRefresh, lines.len()));
+        if on(NetworkRow::PairedRefresh) {
+            focused_line = lines.len();
+        }
+        lines.push(action_row(
+            s.net_paired_refresh,
+            s.net_ble_only,
+            on(NetworkRow::PairedRefresh),
+            width,
+            theme,
+        ));
+        match state.bonds.as_deref() {
+            None => lines.push(note(&format!("  {}", s.net_paired_not_read), width, theme)),
+            Some([]) => lines.push(note(&format!("  {}", s.net_paired_empty), width, theme)),
+            Some(bonds) => {
+                for (index, bond) in bonds.iter().enumerate() {
+                    // The address is always shown: two unnamed hosts are still
+                    // two different rows, and the removal card names one.
+                    let mut word = match bond.label.as_deref().filter(|name| !name.is_empty()) {
+                        Some(label) => {
+                            format!("{label}{}{}", theme.glyphs().dot_sep(), bond.id)
+                        }
+                        None => bond.id.clone(),
+                    };
+                    if bond.is_self {
+                        word.push(' ');
+                        word.push_str(theme.glyphs().dot_sep());
+                        word.push(' ');
+                        word.push_str(s.net_paired_self);
+                    }
+                    if state.labels_supported {
+                        targets.push((NetworkRow::Paired(index), lines.len()));
+                        if on(NetworkRow::Paired(index)) {
+                            focused_line = lines.len();
+                        }
+                        lines.push(action_row(
+                            &word,
+                            "",
+                            on(NetworkRow::Paired(index)),
+                            width,
+                            theme,
+                        ));
+                    } else {
+                        lines.push(note(&format!("  {word}"), width, theme));
+                    }
+                    targets.push((NetworkRow::PairedRemove(index), lines.len()));
+                    if on(NetworkRow::PairedRemove(index)) {
+                        focused_line = lines.len();
+                    }
+                    lines.push(action_row(
+                        s.net_paired_remove,
+                        "",
+                        on(NetworkRow::PairedRemove(index)),
+                        width,
+                        theme,
+                    ));
+                }
+            }
+        }
+        if state.bonds_pending {
+            lines.push(note(&format!("  {}", s.net_paired_pending), width, theme));
+        } else if state.bonds_result != 0 {
+            lines.push(note(&format!("  {}", s.net_paired_failed), width, theme));
+        } else if !state.labels_supported {
+            lines.push(note(
+                &format!("  {}", s.net_paired_labels_unsupported),
+                width,
+                theme,
+            ));
+        } else {
+            lines.push(note(&format!("  {}", s.net_paired_hint), width, theme));
+        }
+    }
+
     lines.push(Line::from(""));
     lines.push(note(&theme.fold(s.net_keys_hint), width, theme));
     (lines, focused_line, targets)
@@ -636,8 +835,7 @@ pub fn target_at(app: &App, width: u16, height: u16, row: u16) -> Option<Network
     targets
         .into_iter()
         .find(|(target, index)| {
-            *index == offset + row as usize
-                && target.reachable(app.network.wifi_connected(), app.network.scan_results.len())
+            *index == offset + row as usize && target.reachable(app.network.shape())
         })
         .map(|(target, _)| target)
 }
@@ -751,6 +949,42 @@ fn activate(app: &mut App) {
                     text: why,
                     level: crate::event::NoticeLevel::Error,
                 });
+            }
+        }
+        NetworkRow::PairedRefresh => {
+            if let Err(why) = app.refresh_bonds() {
+                app.push_notice(crate::app::Notice {
+                    text: why,
+                    level: crate::event::NoticeLevel::Error,
+                });
+            }
+        }
+        NetworkRow::Paired(index) => {
+            if !app.network.labels_supported {
+                return;
+            }
+            if let Some(bond) = app
+                .network
+                .bonds
+                .as_ref()
+                .and_then(|bonds| bonds.get(index))
+            {
+                let address = bond.id.clone();
+                let current = bond.label.clone();
+                dialogs::prompt_bond_label(app, &address, current.as_deref(), bond.is_self);
+            }
+        }
+        NetworkRow::PairedRemove(index) => {
+            if let Some(bond) = app
+                .network
+                .bonds
+                .as_ref()
+                .and_then(|bonds| bonds.get(index))
+            {
+                dialogs::ask(
+                    app,
+                    ConfirmAction::Accessory(format!("@linkr bonds remove {}", bond.id)),
+                );
             }
         }
     }
@@ -904,13 +1138,14 @@ mod tests {
             NetworkRow::BleNameRename,
             NetworkRow::BleNameDefault,
             NetworkRow::BleNameStatus,
+            NetworkRow::PairedRefresh,
             NetworkRow::Ssid,
         ] {
             state.focus_next();
             assert_eq!(state.focus, expected);
         }
         state.focus_previous();
-        assert_eq!(state.focus, NetworkRow::BleNameStatus);
+        assert_eq!(state.focus, NetworkRow::PairedRefresh);
 
         // With a network joined the results are unreachable, and the walk
         // never lands on one.
@@ -937,9 +1172,103 @@ mod tests {
     fn the_focus_wraps_at_both_ends() {
         let mut state = NetworkState::default();
         state.focus_previous();
-        assert_eq!(state.focus, NetworkRow::BleNameStatus);
+        assert_eq!(state.focus, NetworkRow::PairedRefresh);
         state.focus_next();
         assert_eq!(state.focus, NetworkRow::Ssid);
+    }
+
+    /// Every row stands where the walk can find it again, whatever mix of scan
+    /// results and bonded hosts is present.
+    #[test]
+    fn every_row_is_found_where_it_stands() {
+        for connected in [false, true] {
+            for results in [0usize, 1, 3] {
+                for bonds in [0usize, 1, 3] {
+                    for paired in [false, true] {
+                        for labels in [false, true] {
+                            let shape = Shape {
+                                connected,
+                                results,
+                                bonds,
+                                paired,
+                                labels,
+                            };
+                            for index in 0..walk_len(shape) {
+                                let row = NetworkRow::at(index, shape);
+                                assert_eq!(row.position(shape), index, "{shape:?} {row:?}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The paired-device section lists the bonded hosts under their labels and
+    /// keeps both of its actions on the walk.
+    #[test]
+    fn the_paired_section_lists_hosts_with_their_labels() {
+        let mut a = app(Lang::En);
+        a.network.bonds = Some(vec![
+            BondEntry {
+                id: "0/AA:BB:CC:DD:EE:01".into(),
+                is_self: true,
+                label: Some("Alice".into()),
+            },
+            BondEntry {
+                id: "1/AA:BB:CC:DD:EE:02".into(),
+                is_self: false,
+                label: None,
+            },
+        ]);
+        let text = body_text(&lines(&a, &Theme::DARK, 80));
+        assert!(text.contains("Paired devices"), "{text}");
+        assert!(text.contains("Alice"), "{text}");
+        assert!(text.contains("0/AA:BB:CC:DD:EE:01"), "{text}");
+        assert!(text.contains("1/AA:BB:CC:DD:EE:02"), "{text}");
+        assert!(text.contains("[Refresh paired devices]"), "{text}");
+        assert!(text.contains("[Remove this pairing]"), "{text}");
+    }
+
+    /// Without label support the list and removal stay; only rename goes.
+    #[test]
+    fn a_firmware_without_labels_keeps_the_list_and_removal() {
+        let mut a = app(Lang::En);
+        a.network.labels_supported = false;
+        a.network.bonds = Some(vec![BondEntry {
+            id: "1/AA:BB:CC:DD:EE:02".into(),
+            is_self: false,
+            label: Some("Alice".into()),
+        }]);
+        let text = body_text(&lines(&a, &Theme::DARK, 80));
+        assert!(text.contains("1/AA:BB:CC:DD:EE:02"), "{text}");
+        assert!(text.contains("[Remove this pairing]"), "{text}");
+        assert!(
+            text.contains("this firmware has no label command"),
+            "{text}"
+        );
+
+        let mut state = NetworkState {
+            bonds: a.network.bonds.clone(),
+            labels_supported: false,
+            focus: NetworkRow::BleNameStatus,
+            ..NetworkState::default()
+        };
+        state.focus_next();
+        assert_eq!(state.focus, NetworkRow::PairedRefresh);
+        state.focus_next();
+        assert_eq!(state.focus, NetworkRow::PairedRemove(0));
+    }
+
+    /// A firmware without the pairing commands hides the whole section.
+    #[test]
+    fn a_firmware_without_pairing_management_hides_the_section() {
+        let mut a = app(Lang::En);
+        a.network.paired_supported = false;
+        let text = body_text(&lines(&a, &Theme::DARK, 80));
+        assert!(text.contains("Paired devices"), "{text}");
+        assert!(text.contains("no pairing management"), "{text}");
+        assert!(!text.contains("[Refresh paired devices]"), "{text}");
     }
 
     /// A scan's results are rows the keyboard can stand on: they are drawn

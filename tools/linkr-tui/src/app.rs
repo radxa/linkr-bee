@@ -33,6 +33,16 @@ use crate::{dialogs, palette};
 /// link cannot exist without the chrome having a word for it.
 pub use crate::transport::LinkKind as Transport;
 
+/// A board's way of saying it does not know a command.
+///
+/// The firmware's generic refusal is `ERR unknown command`; an optional block
+/// that is compiled out says `unsupported`. Both mean the same thing to a
+/// capability probe: hide the controls, do not report a failure.
+fn is_unsupported_error(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("unknown command") || error.contains("unsupported")
+}
+
 /// Whether this session has a LAN token in hand, for the sidebar to say.
 ///
 /// Three states rather than a bool, because "no token" and "there is no token
@@ -772,6 +782,19 @@ pub struct App {
     /// The scan whose answer has not arrived, or that is owed another attempt
     /// after being refused. See [`ScanRetry`].
     pub scan_retry: Option<ScanRetry>,
+    /// Identity addresses whose paired-device labels are still to be read after
+    /// a `bonds?` answer. One management question at a time, so they queue.
+    pub bond_label_queue: VecDeque<String>,
+    /// A link came up while the network view was open, and the paired-device
+    /// list has not been read yet. It waits for a free question slot.
+    pub bonds_read_pending: bool,
+    /// When a delayed removal is due to be read back; see [`App::pump`].
+    pub bond_refresh_due: Option<Instant>,
+    /// Whether the label command in flight is the automatic "this host has no
+    /// label yet" report, whose refusal is not worth a notice.
+    pub bond_self_write: bool,
+    /// Whether this link has already tried to report this host's label.
+    pub bond_self_reported: bool,
     /// The LAN access state `@s?` reported, token included.
     pub lan_status: LanStatus,
     /// Whether a token is in hand, which is what the sidebar shows.
@@ -988,6 +1011,11 @@ impl Default for App {
             ble_name_read_pending: false,
             lan_token_read_pending: false,
             scan_retry: None,
+            bond_label_queue: VecDeque::new(),
+            bonds_read_pending: false,
+            bond_refresh_due: None,
+            bond_self_write: false,
+            bond_self_reported: false,
             lan_status: LanStatus::default(),
             lan_captured: LanCapture::default(),
             lan_host: String::new(),
@@ -1592,6 +1620,29 @@ impl App {
             self.focus = Focus::Terminal;
         }
         self.save_settings();
+        self.read_bonds_when_opened();
+    }
+
+    /// Read the paired-device drawer when the network view opens.
+    ///
+    /// It is not an automatic read on every link: only the network view shows
+    /// the list, and a question asked of a board nobody is looking at is
+    /// traffic with no reader. A question already in flight takes priority;
+    /// the read is queued for the next free slot instead of replacing it.
+    fn read_bonds_when_opened(&mut self) {
+        if self.view != View::Network || !self.ble_connected() || !self.network.paired_supported {
+            return;
+        }
+        // A removal already has a read scheduled after the board's delayed
+        // unpair; reading now would show the row it is about to delete.
+        if self.bond_refresh_due.is_some() {
+            return;
+        }
+        if self.waiting_on_device() {
+            self.bonds_read_pending = true;
+            return;
+        }
+        let _ = self.refresh_bonds();
     }
 
     /// Whether a typed key belongs to the pane: the rail is not focused, and
@@ -1709,6 +1760,7 @@ impl App {
     pub fn next_view(&mut self) {
         let index = View::ALL.iter().position(|v| *v == self.view).unwrap_or(0);
         self.view = View::ALL[(index + 1) % View::ALL.len()];
+        self.read_bonds_when_opened();
     }
 
     /// Step to the previous view in the rota, wrapping at the start.
@@ -1716,6 +1768,7 @@ impl App {
         let index = View::ALL.iter().position(|v| *v == self.view).unwrap_or(0);
         let last = View::ALL.len() - 1;
         self.view = View::ALL[(index + last) % View::ALL.len()];
+        self.read_bonds_when_opened();
     }
 
     // --- the link ----------------------------------------------------------
@@ -2550,6 +2603,7 @@ impl App {
         self.state = ConnectionState::Disconnected;
         self.wifi_write = None;
         self.scan_retry = None;
+        self.clear_bond_view();
         // The lock a dial took out went with the dial: with the link down
         // there is nothing left for it to protect, and switching the transport
         // is exactly what hanging up is for. A transport the command line
@@ -2577,7 +2631,28 @@ impl App {
         self.transport_locked = self.transport_pinned;
         self.wifi_write = None;
         self.scan_retry = None;
+        self.clear_bond_view();
         ended
+    }
+
+    /// Forget everything the network view learned about paired hosts.
+    ///
+    /// Called on every link ending and every transport switch: a list from the
+    /// board that was just left must not be shown as if it belonged to the next
+    /// one, and a board that does not support the commands must be re-probed.
+    fn clear_bond_view(&mut self) {
+        self.bond_label_queue.clear();
+        self.bonds_read_pending = false;
+        self.bond_refresh_due = None;
+        self.bond_self_write = false;
+        self.bond_self_reported = false;
+        self.network.bonds = None;
+        self.network.bonds_pending = false;
+        self.network.bonds_result = 0;
+        self.network.paired_supported = true;
+        self.network.labels_supported = true;
+        self.network.loading = false;
+        self.network.error = None;
     }
 
     /// One pump: fold whatever the link produced into the frame, and announce
@@ -2932,6 +3007,9 @@ impl App {
         // And so is a scan nobody answered, for the same reason: the gate it
         // was refused by clears on its own.
         self.send_due_scan_retry(now);
+        // A delayed removal answers `OK bonds queued`; the list is read back
+        // after the firmware's own 500 ms window, not before it.
+        self.send_due_bond_refresh(now);
         // A program that asks a question — where is the cursor, how wide is the
         // screen — blocks until it hears back, so the emulator's answers go out
         // on the tick that produced them. Always *after* the feed: an answer is
@@ -2986,6 +3064,7 @@ impl App {
             // a time.
             self.ble_name_read_pending = self.ble_connected();
             self.lan_token_read_pending = self.ble_connected();
+            self.bonds_read_pending = self.ble_connected() && self.view == View::Network;
         } else if was_live && !now_live {
             // A quiet dial that died before it was ever announced has nothing
             // left to be quiet about; the next connection is its own news.
@@ -3027,6 +3106,7 @@ impl App {
             self.ble_name_write_pending = false;
             self.ble_name_read_pending = false;
             self.lan_token_read_pending = false;
+            self.clear_bond_view();
             // And the half-typed line goes with it.
             self.pending_line.clear();
         }
@@ -3453,7 +3533,13 @@ impl App {
                 self.diagnostics.loading = true;
                 self.diagnostics.error = None;
             }
-            Query::Uart | Query::Wifi | Query::WifiScan | Query::Webdav | Query::BleName => {
+            Query::Uart
+            | Query::Wifi
+            | Query::WifiScan
+            | Query::Webdav
+            | Query::BleName
+            | Query::Bonds
+            | Query::BondLabel => {
                 self.network.loading = true;
                 self.network.error = None;
             }
@@ -3514,6 +3600,84 @@ impl App {
         self.send_accessory(&command, Query::Webdav)
     }
 
+    /// Read the bonded hosts. Their labels are read one address at a time
+    /// after the list arrives, so the fixed reply buffer never has to hold
+    /// them all.
+    pub fn refresh_bonds(&mut self) -> Result<(), String> {
+        self.bond_label_queue.clear();
+        self.bond_refresh_due = None;
+        self.bond_self_write = false;
+        self.ask_device(Query::Bonds)
+    }
+
+    /// Store a display label for one bonded host and read it back.
+    pub fn set_bond_label(&mut self, address: &str, label: &str) -> Result<(), String> {
+        let command = accessory::bond_label_set_command(address, label);
+        self.send_accessory(&command, Query::BondLabel)
+    }
+
+    /// Ask the bridge to remove one pairing.
+    ///
+    /// The approval card owns this one: removing a pairing drops a connection.
+    /// Its `OK bonds queued` is not a label: the answer path schedules a read
+    /// after the firmware's delayed unpair instead of folding a label, see
+    /// [`App::apply_reply`].
+    pub fn remove_bond(&mut self, address: &str) -> Result<(), String> {
+        self.send_accessory(&format!("@linkr bonds remove {address}"), Query::BondLabel)
+    }
+
+    /// Ask for the next queued label, if the link is still up.
+    fn ask_next_bond_label(&mut self) {
+        if !self.ble_connected() {
+            self.bond_label_queue.clear();
+            return;
+        }
+        let Some(address) = self.bond_label_queue.pop_front() else {
+            self.maybe_report_self_label();
+            return;
+        };
+        let command = accessory::bond_label_query_command(&address);
+        if let Err(why) = self.send_accessory(&command, Query::BondLabel) {
+            self.network.error = Some(why);
+            self.bond_label_queue.clear();
+        }
+    }
+
+    /// Report the local user name for this host's own pairing when the board
+    /// stores no label yet.
+    ///
+    /// The web client does the same with the browser's user agent. A label the
+    /// owner already stored is never touched, and a read-only refusal is
+    /// silent: this is a convenience, not a setting the user asked for.
+    fn maybe_report_self_label(&mut self) {
+        if self.bond_self_reported
+            || !self.ble_connected()
+            || !self.network.labels_supported
+            || self.waiting_on_device()
+        {
+            return;
+        }
+        let Some(bonds) = self.network.bonds.as_deref() else {
+            return;
+        };
+        let Some(own) = bonds.iter().find(|bond| bond.is_self) else {
+            return;
+        };
+        self.bond_self_reported = true;
+        if own.label.as_deref().is_some_and(|label| !label.is_empty()) {
+            return;
+        }
+        let name = crate::user::preferred_name();
+        if name.is_empty() {
+            return;
+        }
+        let address = own.id.clone();
+        match self.set_bond_label(&address, &name) {
+            Ok(()) => self.bond_self_write = true,
+            Err(why) => self.network.error = Some(why),
+        }
+    }
+
     /// Set the advertised BLE name and read it back.
     ///
     /// The read is the confirmation: the bridge advertises what it stored, and
@@ -3551,6 +3715,12 @@ impl App {
             b"@w" => Query::Wifi,
             b"@d" => Query::Webdav,
             b"@n" => Query::BleName,
+            b"@linkr" => {
+                if let Some(address) = command.strip_prefix("@linkr bonds remove ") {
+                    return self.remove_bond(address);
+                }
+                return Err(self.strings().net_bad_command.to_string());
+            }
             _ => return Err(self.strings().net_bad_command.to_string()),
         };
         self.ble_name_write_pending = query == Query::BleName;
@@ -3604,7 +3774,7 @@ impl App {
         if let Some(previous) = self.talk.waiting() {
             self.stop_waiting(previous);
         }
-        let (id, _) = self.talk.ask(query, now);
+        let id = self.talk.ask_id(query, now);
         let frame = match crate::protocol::encode_management_request(id, command.as_bytes()) {
             Ok(frame) => frame,
             Err(why) => {
@@ -3639,10 +3809,14 @@ impl App {
             Query::WifiScan => self.strings().net_scan,
             _ => self.strings().net_status,
         };
-        self.push_notice(Notice {
-            text: format!("{prefix} {shown}"),
-            level: NoticeLevel::Info,
-        });
+        // Paired-device labels are read in a quiet series after the list; a
+        // notice per address would bury the log. The rows show the result.
+        if !command.starts_with("@linkr bonds ") {
+            self.push_notice(Notice {
+                text: format!("{prefix} {shown}"),
+                level: NoticeLevel::Info,
+            });
+        }
         Ok(())
     }
 
@@ -3676,6 +3850,43 @@ impl App {
             }
             if reply.query == Query::BleName {
                 self.ble_name_write_pending = false;
+            }
+            // A board without the paired-device commands should lose the
+            // section, not keep an empty one with a refresh button that can
+            // only fail. The same rule for the label subcommand: the list and
+            // removal still work, so only rename goes.
+            if reply.query == Query::Bonds && is_unsupported_error(&reply.status.error) {
+                self.network.paired_supported = false;
+                self.network.bonds = None;
+                self.network.bonds_pending = false;
+                self.network.bonds_result = 0;
+                self.bonds_read_pending = false;
+                self.network.error = None;
+                return;
+            }
+            // The automatic "this host has no label" write is best effort: a
+            // read-only refusal leaves the address showing and says nothing.
+            if reply.query == Query::BondLabel && self.bond_self_write {
+                self.bond_self_write = false;
+                self.network.error = None;
+                return;
+            }
+            if reply.query == Query::BondLabel {
+                let error = reply.status.error.to_ascii_lowercase();
+                if error.contains("unknown command") || error.contains("unsupported") {
+                    self.bond_label_queue.clear();
+                    self.network.labels_supported = false;
+                    self.network.error = None;
+                    self.network.settle_focus();
+                    return;
+                }
+                // The bond went away between the list and its label read.
+                // That is not the end of the series; the next address is.
+                if error.contains("not found") {
+                    self.ask_next_bond_label();
+                    return;
+                }
+                self.bond_label_queue.clear();
             }
             // Whatever the refusal was, a scan it named is not owed anything
             // by it: the record goes, so that a scan asked later starts with
@@ -3828,6 +4039,66 @@ impl App {
                     self.network.ble_name = Some(status);
                 }
             }
+            Query::Bonds => {
+                if let Some(list) = accessory::parse_bonds(&text) {
+                    let bonds: Vec<crate::views::network::BondEntry> = list
+                        .peers
+                        .into_iter()
+                        .map(|peer| crate::views::network::BondEntry {
+                            id: peer.id,
+                            is_self: peer.is_self,
+                            label: None,
+                        })
+                        .collect();
+                    self.network.bonds_pending = list.pending;
+                    self.network.bonds_result = list.result;
+                    self.network.paired_supported = true;
+                    self.bond_label_queue = if self.network.labels_supported {
+                        bonds.iter().map(|bond| bond.id.clone()).collect()
+                    } else {
+                        VecDeque::new()
+                    };
+                    self.network.bonds = Some(bonds);
+                    self.network.settle_focus();
+                    self.ask_next_bond_label();
+                }
+            }
+            Query::BondLabel => {
+                if let Some(parsed) = accessory::parse_bond_label(&text) {
+                    self.bond_self_write = false;
+                    self.network.labels_supported = true;
+                    if let Some(bonds) = self.network.bonds.as_mut() {
+                        if let Some(entry) = bonds
+                            .iter_mut()
+                            .find(|bond| bond.id.eq_ignore_ascii_case(&parsed.id))
+                        {
+                            entry.label = parsed.label;
+                        }
+                    }
+                    self.ask_next_bond_label();
+                } else if text.trim() == "OK bonds queued" {
+                    // Removal is accepted but the firmware unplugs 500 ms
+                    // later. Read the list after that window, not now.
+                    self.bond_label_queue.clear();
+                    self.network.bonds_pending = true;
+                    self.bond_refresh_due = Some(Instant::now() + Duration::from_millis(700));
+                    self.push_notice(Notice {
+                        text: self.strings().net_paired_pending.to_string(),
+                        level: NoticeLevel::Info,
+                    });
+                } else {
+                    // An `OK` that is neither a label nor the removal
+                    // acknowledgement (for example a label stored by another
+                    // client as invalid UTF-8). Do not re-read the list: that
+                    // would loop on the same unreadable label forever.
+                    self.bond_label_queue.clear();
+                    if self.bond_self_write {
+                        self.bond_self_write = false;
+                        return;
+                    }
+                    self.network.error = Some(self.strings().net_paired_bad_reply.to_string());
+                }
+            }
             // `@s?` is the only place the bridge reports its LAN access
             // token, and a client that does not ask has no way to learn one.
             // Capturing it here — during the BLE session that is already open
@@ -3890,6 +4161,21 @@ impl App {
         if self.lan_token_read_pending {
             self.lan_token_read_pending = false;
             let _ = self.ensure_lan_token();
+            // The token read owns the slot now; the bond read waits for the
+            // next free one rather than being dropped.
+            if self.waiting_on_device() {
+                return;
+            }
+        }
+        if self.bonds_read_pending {
+            self.bonds_read_pending = false;
+            if self.view == View::Network
+                && self.network.paired_supported
+                && self.bond_refresh_due.is_none()
+                && !self.waiting_on_device()
+            {
+                let _ = self.refresh_bonds();
+            }
         }
     }
 
@@ -4152,6 +4438,28 @@ impl App {
         }
     }
 
+    /// Read the paired-device list again after the firmware's delayed removal
+    /// window has passed.
+    ///
+    /// A removal answers `OK bonds queued` before it runs; reading immediately
+    /// would show the row that is about to disappear and read its label again.
+    fn send_due_bond_refresh(&mut self, now: Instant) {
+        let Some(at) = self.bond_refresh_due else {
+            return;
+        };
+        if !self.ble_connected() {
+            self.bond_refresh_due = None;
+            return;
+        }
+        if now < at || self.waiting_on_device() {
+            return;
+        }
+        self.bond_refresh_due = None;
+        if self.network.paired_supported {
+            let _ = self.refresh_bonds();
+        }
+    }
+
     /// Give up on an `@event wifi` ending that never came, at `now`.
     ///
     /// Uncertain bridges are read, not waited out: when the window passes,
@@ -4217,9 +4525,13 @@ impl App {
     fn stop_waiting(&mut self, query: Query) {
         match query {
             Query::Diagnostics => self.diagnostics.loading = false,
-            Query::Uart | Query::Wifi | Query::WifiScan | Query::Webdav | Query::BleName => {
-                self.network.loading = false
-            }
+            Query::Uart
+            | Query::Wifi
+            | Query::WifiScan
+            | Query::Webdav
+            | Query::BleName
+            | Query::Bonds
+            | Query::BondLabel => self.network.loading = false,
             Query::Lan => self.lan_status.loading = false,
         }
     }
@@ -8011,6 +8323,170 @@ mod tests {
             "the shelf keeps the name the board reports, not the old one"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// The TUI reports the local user name for this host when the board has no
+    /// label, and a read-only refusal is silent rather than an error.
+    #[test]
+    fn this_hosts_label_is_reported_when_the_board_has_none() {
+        let previous = std::env::var("LINKR_USER_NAME").ok();
+        std::env::set_var("LINKR_USER_NAME", "Auto Tester");
+        let (mut app, _wire) = connected_over_ble(Lang::En);
+        app.talk.reset();
+        app.network.bonds = Some(vec![crate::views::network::BondEntry {
+            id: "0/AA:BB:CC:DD:EE:01".into(),
+            is_self: true,
+            label: None,
+        }]);
+        app.ask_next_bond_label();
+        assert_eq!(app.talk.waiting(), Some(Query::BondLabel));
+        assert!(app.bond_self_write);
+        assert!(app.bond_self_reported);
+
+        app.apply_reply(
+            crate::device::Reply {
+                query: Query::BondLabel,
+                status: crate::accessory::reply_status("ERR control=readonly"),
+                lines: vec!["ERR control=readonly".to_string()],
+            },
+            "",
+        );
+        assert!(!app.bond_self_write);
+        assert!(app.network.error.is_none(), "a refusal is not an error");
+        match previous {
+            Some(value) => std::env::set_var("LINKR_USER_NAME", value),
+            None => std::env::remove_var("LINKR_USER_NAME"),
+        }
+    }
+
+    /// A label the owner already stored is never replaced by the local name.
+    #[test]
+    fn an_existing_label_is_not_overwritten() {
+        let (mut app, _wire) = connected_over_ble(Lang::En);
+        app.talk.reset();
+        app.network.bonds = Some(vec![crate::views::network::BondEntry {
+            id: "0/AA:BB:CC:DD:EE:01".into(),
+            is_self: true,
+            label: Some("Alice".into()),
+        }]);
+        app.ask_next_bond_label();
+        assert_eq!(app.talk.waiting(), None);
+        assert!(app.bond_self_reported);
+        assert!(!app.bond_self_write);
+    }
+
+    /// A removal is acknowledged before the board unpairs. The list is read
+    /// back on the delayed window, not immediately, or the row that is about
+    /// to go would still be there and no feedback would say otherwise.
+    #[test]
+    fn a_removal_is_read_back_after_the_boards_delay() {
+        let (mut app, _wire) = connected_over_ble(Lang::En);
+        app.talk.reset();
+        app.network.bonds = Some(vec![crate::views::network::BondEntry {
+            id: "0/AA:BB:CC:DD:EE:01".into(),
+            is_self: false,
+            label: Some("Alice".into()),
+        }]);
+        app.apply_reply(
+            crate::device::Reply {
+                query: Query::BondLabel,
+                status: crate::accessory::reply_status("OK bonds queued"),
+                lines: vec!["OK bonds queued".to_string()],
+            },
+            "",
+        );
+        assert!(
+            app.network.bonds_pending,
+            "the row says a removal is pending"
+        );
+        assert!(app.bond_refresh_due.is_some(), "the read is scheduled");
+        assert_eq!(
+            app.talk.waiting(),
+            None,
+            "the list is not read before the firmware runs"
+        );
+
+        app.send_due_bond_refresh(Instant::now() + Duration::from_secs(1));
+        assert_eq!(
+            app.talk.waiting(),
+            Some(Query::Bonds),
+            "the scheduled read asks for the list again"
+        );
+    }
+
+    /// An unreadable label reply stops the label series instead of asking for
+    /// the list again. Re-reading would loop forever on the same bad label.
+    #[test]
+    fn an_unreadable_label_stops_the_series() {
+        let (mut app, _wire) = connected_over_ble(Lang::En);
+        app.talk.reset();
+        app.network.bonds = Some(vec![crate::views::network::BondEntry {
+            id: "0/AA:BB:CC:DD:EE:01".into(),
+            is_self: false,
+            label: None,
+        }]);
+        app.bond_label_queue.push_back("0/AA:BB:CC:DD:EE:01".into());
+        app.apply_reply(
+            crate::device::Reply {
+                query: Query::BondLabel,
+                status: crate::accessory::reply_status(
+                    "OK bonds label=0/AA:BB:CC:DD:EE:01 hex=c328",
+                ),
+                lines: vec!["OK bonds label=0/AA:BB:CC:DD:EE:01 hex=c328".to_string()],
+            },
+            "",
+        );
+        assert!(app.bond_label_queue.is_empty());
+        assert_eq!(
+            app.network.error.as_deref(),
+            Some(app.strings().net_paired_bad_reply)
+        );
+        assert_eq!(app.talk.waiting(), None);
+    }
+
+    /// A board without the pairing commands loses the section rather than
+    /// keeping an empty one with a refresh that can only fail.
+    #[test]
+    fn an_unsupported_bond_command_hides_the_section() {
+        let (mut app, _wire) = connected_over_ble(Lang::En);
+        app.network.bonds = Some(vec![crate::views::network::BondEntry {
+            id: "0/AA:BB:CC:DD:EE:01".into(),
+            is_self: true,
+            label: None,
+        }]);
+        app.apply_reply(
+            crate::device::Reply {
+                query: Query::Bonds,
+                status: crate::accessory::reply_status("ERR unknown command"),
+                lines: vec!["ERR unknown command".to_string()],
+            },
+            "",
+        );
+        assert!(!app.network.paired_supported);
+        assert!(app.network.bonds.is_none());
+        assert!(app.network.error.is_none(), "not a failure to report");
+    }
+
+    /// A link ending forgets the previous board's pairing list and re-probes
+    /// capabilities on the next one.
+    #[test]
+    fn a_link_ending_forgets_the_paired_devices() {
+        let mut app = App::default();
+        app.network.bonds = Some(vec![crate::views::network::BondEntry {
+            id: "0/AA:BB:CC:DD:EE:01".into(),
+            is_self: true,
+            label: Some("Alice".into()),
+        }]);
+        app.network.paired_supported = false;
+        app.network.labels_supported = false;
+        app.network.bonds_pending = true;
+        app.network.bonds_result = -2;
+        app.clear_bond_view();
+        assert!(app.network.bonds.is_none());
+        assert!(app.network.paired_supported);
+        assert!(app.network.labels_supported);
+        assert!(!app.network.bonds_pending);
+        assert_eq!(app.network.bonds_result, 0);
     }
 
     /// A rename made here is confirmed by the board, and the answer is the

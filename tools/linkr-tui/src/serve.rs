@@ -110,6 +110,9 @@ pub const OPERATIONS: &[&str] = &[
     "webdav-off",
     "ble-name",
     "lan",
+    "bonds",
+    "bond-label",
+    "bond-remove",
     "exec",
     "loopback-test",
     "state",
@@ -178,6 +181,9 @@ fn is_ble_only(op: &str) -> bool {
             | "wifi-scan"
             | "lan"
             | "ble-name"
+            | "bonds"
+            | "bond-label"
+            | "bond-remove"
     )
 }
 
@@ -436,6 +442,9 @@ pub fn report_state(app: &App, format: Format) {
 fn accepted_fields(op: &str) -> Option<&'static [&'static str]> {
     match op {
         "info" | "lan" | "state" | "quit" | "wifi-off" | "wifi-scan" | "webdav-off" => Some(&[]),
+        "bonds" => Some(&[]),
+        "bond-label" => Some(&["id", "label"]),
+        "bond-remove" => Some(&["id"]),
         "uart" => Some(&["value"]),
         "wifi" => Some(&["ssid", "pass"]),
         "webdav" => Some(&["url"]),
@@ -495,6 +504,22 @@ fn action_for(request: &Request) -> Result<Action, String> {
     match request.op.as_str() {
         "info" => requests.queries.push(Query::Diagnostics),
         "lan" => requests.queries.push(Query::Lan),
+        "bonds" => requests.queries.push(Query::Bonds),
+        "bond-label" => {
+            let id = request.string_wanted("id")?.to_string();
+            if !crate::accessory::bond_id_valid(&id) {
+                return Err("bond-label wants a <type>/<address> identity".to_string());
+            }
+            let label = request.text("label").unwrap_or_default().to_string();
+            requests.bond_label = Some((id, label));
+        }
+        "bond-remove" => {
+            let id = request.string_wanted("id")?.to_string();
+            if !crate::accessory::bond_id_valid(&id) {
+                return Err("bond-remove wants a <type>/<address> identity".to_string());
+            }
+            requests.bond_remove = Some(id);
+        }
         // A read, and a write when a value rides along: the session's
         // spelling of `--query-uart` and `--uart <spec>`.
         "uart" => match request.value("value") {
@@ -1331,7 +1356,8 @@ mod tests {
         assert_eq!(
             operations_json(),
             "[\"info\",\"uart\",\"wifi\",\"wifi-off\",\"wifi-scan\",\"webdav\",\
-             \"webdav-off\",\"ble-name\",\"lan\",\"exec\",\"loopback-test\",\"state\",\"quit\"]"
+             \"webdav-off\",\"ble-name\",\"lan\",\"bonds\",\"bond-label\",\
+             \"bond-remove\",\"exec\",\"loopback-test\",\"state\",\"quit\"]"
         );
     }
 }

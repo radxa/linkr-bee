@@ -74,7 +74,8 @@ An open overlay consumes clicks on its background. A click on a conversation
 in history resumes it without deleting any saved thread.
 
 The everyday interface has three workspaces: terminal, network and assistant.
-The network page retains WiFi, WebDAV and Bluetooth naming. Startup splash,
+The network page retains WiFi, WebDAV, Bluetooth naming and the paired-device
+drawer. Startup splash,
 traffic waveforms and the clock remain available. The theme picker offers dark
 and light. Empty quick-send/monitor sections stay hidden, and the application
 ships no fixed shell-command presets. Existing custom sends still use their
@@ -151,7 +152,7 @@ three rules:
 | `cli.rs` | One table of flags read twice — as usage text and as a completion script for bash, zsh and fish — plus the scanner, the script runner, the escape-byte parser and the loopback test |
 | `serve.rs` | The resident session: the request grammar, the one-link loop, and the begin/end frame a caller correlates its answers by |
 | `trace.rs` | `--log-file` and `--debug-io`: what the device said, appended; what went both ways, traced. Secrets are redacted before they reach either |
-| `views/network.rs` | The WiFi, WebDAV and BLE-name form: thirteen rows the keyboard walks, each action raising an approval card that names the change rather than the command |
+| `views/network.rs` | The WiFi, WebDAV, BLE-name and paired-device form: the rows the keyboard walks, each action raising an approval card that names the change rather than the command |
 
 `views/` is where a view lives: a *model* (what the device said, as plain data)
 and a *painter* (a pure function from `&App` plus a pane width to lines). The
@@ -269,6 +270,16 @@ card asks for approval, so Chinese and emoji are accepted and a name the board
 would refuse never leaves the host. The write is confirmed by the board and
 read back, and the row then says whether the name is the MAC-derived default
 or a custom one.
+
+The same view carries a paired-device drawer: `@linkr bonds?` lists the saved
+identities and each label is read one address at a time, so the fixed reply
+buffer never holds them all. The drawer is read when the network view opens,
+shows the address (not just an "unnamed" word), and hides itself when the
+firmware has no pairing commands. When the board stores no label for this
+host, the drawer reports the local user name once; an existing label is never
+replaced, and a read-only refusal is silent. A removal says it is queued and reads the
+list back after the board's delayed unpair, rather than showing the row that is
+about to disappear.
 
 `--no-terminal` is implied by any flag that asks for something: a command line
 naming `--query-info` wants an answer, not an interface. Each request is sent

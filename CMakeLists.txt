@@ -26,6 +26,7 @@ target_sources(app PRIVATE
   src/ble_peers.c
   src/target_binding.c
   src/bond_manager.c
+  src/bond_label.c
   src/ble_security.c
   src/ble_nus.c
   src/ble_mgmt.c

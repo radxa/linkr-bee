@@ -131,6 +131,19 @@ west build -b linkr_bee_x1_0 linkr-bee
 组装固件 ZIP、Web 包、APK 与桌面压缩包。也可以在 tag 上手动词发一次
 dry-run，只执行组装、不修改 GitHub release。
 
+桌面矩阵始终构建 Linux 与 Windows 目标。两个 macOS 目标可选：只有仓库变量
+`ENABLE_MACOS` 为 `true` 时才构建，因为托管的 macOS runner 不一定分配得到，
+而排队后被取消的目标会让整个 run 失败，并拖住其他平台的压缩包。
+`tools/assemble_release.py` 接受带或不带 macOS 产物的发布，但缺少任一
+Linux 或 Windows 目标时会拒绝组装。
+
+发布之后组件还会继续前进：APK 打包的是同一提交构建的 Web 终端，固件也会跟随
+固件源码。手动触发 “Refresh release assets”
+（`.github/workflows/release-refresh.yml`，填 tag 并勾选 `apk` / `firmware`）
+会用当前 ref 重新构建选中的产物并替换到该发布上，由
+`tools/refresh_release.py` 同步改写 `release-manifest.json` 与 `SHA256SUMS`。
+没有勾选的资产不会被改动。
+
 从完成的 Actions run 下载与目标板匹配的 artifact，解压后在 macOS 或 Linux 安装
 [`esptool`](https://docs.espressif.com/projects/esptool/en/latest/)，
 连接设备并执行：
@@ -446,6 +459,26 @@ UTF-8 会被拒绝。当前固件的名称只用于显示：主机必须按 Mana
 
 桌面与手机客户端先向板子查询（`@n?`），并区分 MAC 默认名与自定义名；写入后
 由板子确认并回读。C 客户端把板子的回答打印到标准输出。
+
+### 配对设备标签
+
+`@linkr bonds?` 列出已保存的身份；每个标签单独用
+`@linkr bonds label <type>/<address>` 读取，固定的回复缓冲区因此不需要一次装下
+所有标签。
+
+| 客户端 | 列表 | 改名 | 删除 |
+| --- | --- | --- | --- |
+| `bee`（TUI） | 网络视图 → *刷新已配对设备* | 同一视图的主机行 | 同一视图 → *删除此配对* |
+| `bee-cli` | `--query-bonds` / `query bonds` | `--rename-bond <id>=<label>` / `bond <id> <label>` | `--remove-bond <id>` / `unbond <id>` |
+| `bee --serve` | `{"op":"bonds"}` | `{"op":"bond-label","id":"…","label":"…"}` | `{"op":"bond-remove","id":"…"}` |
+| Web / 手机 | 连接面板 → *已配对设备* | 行上的 *改名* | *删除配对* |
+
+标签只用于显示，最多 48 个 UTF-8 字节，按身份地址存在 NVS 中，删除配对时一并
+清除。Web 和手机编辑器在板子没有标签时自动上报浏览器所属的系统；TUI 在板子没有
+标签时为当前主机自动上报一次本机用户名。保留
+`@linkr bonds name <label>` / `@linkr bonds names?` 作为只写自己配对的兼容形式，
+主机无需控制权即可命名自己；`bonds label <type>/<address>` 是管理任意配对的完整
+形式。不支持这些命令的旧固件在 Web/TUI 中隐藏该区域，而不是留下不可用的控件。
 
 ### UART 命令
 
@@ -932,10 +965,7 @@ http://127.0.0.1:8765/
 - 用 `@u?` 和 `@u=...` 查询或设置 UART 模式
 - 调整换行和 BLE 写入块大小
 - 在系统等宽字体与常见本地 Nerd Font 之间切换，并预览 Powerline/Nerd
-  字形；所选字体会按当前浏览器来源持久化。Nerd 字体本身不内置；唯一内置的是
-  BabelStone Pseudographica 子集（`web/fonts/`），覆盖 Unicode 13/16 的
-  legacy computing 区块，因为桌面等宽字体栈会把这些 ANSI art 字形渲染成
-  `.notdef`
+  字形；所选字体会按当前浏览器来源持久化，但网页不内置字体文件
 - 通过 xterm.js 渲染终端控制序列，包括光标移动、行擦除、readline 重绘、16 色、256 色和真彩色 SGR
 - 全屏显示终端，并在 viewport 或控制面板宽度变化时自动重新计算行列
 - 识别常见 Bash/BusyBox 的 `$ ` 和 `# ` 提示符，登录后通过

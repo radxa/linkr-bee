@@ -3,270 +3,9 @@
 #include <string.h>
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/kernel.h>
-#include <zephyr/settings/settings.h>
 #include <zephyr/sys/printk.h>
 #include "bond_manager.h"
-
-/* ---- per-bond host labels ------------------------------------------------ */
-
-/* A label is the name a host reports for itself, stored next to the bond it
- * owns so the management card can say "longlong-mbp" instead of an address.
- * One blob covers all bonds: a fixed layout beats a settings key per bond, which
- * would need dynamic key names and a key parser. Bump the version when the
- * layout changes; an unknown version or a short read is discarded. */
-#define LABEL_SLOTS 8U			/* keep equal to CONFIG_BT_MAX_PAIRED */
-#define LABEL_MAX 32U			/* UTF-8 bytes, never cut mid-character */
-#define LABEL_KEY "linkr_bond/labels"
-#define LABEL_VERSION 2U
-#define LABEL_ADDR BT_ADDR_STR_LEN	/* "AA:BB:CC:DD:EE:FF" plus NUL */
-#define LABEL_SLOT (1U + LABEL_ADDR + 1U + LABEL_MAX + 1U)
-#define LABEL_BLOB (2U + (LABEL_SLOTS * LABEL_SLOT))
-
-static uint8_t label_blob[LABEL_BLOB];
-static bool label_ready;
-
-static uint8_t *label_slot(size_t index)
-{
-	return label_blob + 2U + (index * LABEL_SLOT);
-}
-
-static void labels_reset(void)
-{
-	memset(label_blob, 0, sizeof(label_blob));
-	label_blob[0] = LABEL_VERSION;
-	label_blob[1] = 0U;
-}
-
-static void labels_load(void)
-{
-	ssize_t length = settings_load_one(LABEL_KEY, label_blob, sizeof(label_blob));
-
-	if (length < 0 || (size_t)length != sizeof(label_blob) ||
-	    label_blob[0] != LABEL_VERSION || label_blob[1] > LABEL_SLOTS) {
-		labels_reset();
-		return;
-	}
-	/* Settings may contain a torn or incompatible record. Validate all string
-	 * bounds before label_find()/name_line() use strcmp or %s. */
-	for (size_t i = 0; i < label_blob[1]; i++) {
-		const uint8_t *slot = label_slot(i);
-		const uint8_t *address = slot + 1U;
-		const char *name = (const char *)(slot + 2U + LABEL_ADDR);
-		size_t len = slot[1U + LABEL_ADDR];
-		bool valid = slot[0] <= 1U && address[LABEL_ADDR - 1U] == 0U &&
-			len > 0U && len <= LABEL_MAX;
-
-		for (size_t j = 0; j < LABEL_ADDR - 1U; j++) {
-			uint8_t c = address[j];
-			valid = valid && (j % 3U == 2U ? c == ':' :
-				((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F')));
-		}
-		if (valid) {
-			valid = name[len] == '\0' && memchr(name, '\0', len) == NULL;
-			for (size_t j = 0; j < len; j++) {
-				unsigned char c = (unsigned char)name[j];
-				valid = valid && c >= 0x20U && c != 0x7fU && c != '"' && c != '\\';
-			}
-		}
-		if (!valid) {
-			labels_reset();
-			return;
-		}
-	}
-}
-
-static void labels_ensure(void)
-{
-	if (!label_ready) {
-		labels_load();
-		label_ready = true;
-	}
-}
-
-static int labels_save(void)
-{
-	int err = settings_save_one(LABEL_KEY, label_blob, sizeof(label_blob));
-
-	/* A failed write leaves the RAM copy ahead of the flash copy. Drop the cache
-	 * so the next reader reloads what is actually stored. */
-	if (err != 0) {
-		label_ready = false;
-	}
-	return err;
-}
-
-/* Trim a host-provided name into something the listing can carry. Control
- * characters, quotes and backslashes would break the line format; runs of
- * spaces are collapsed, and a UTF-8 sequence cut by the length cap is dropped
- * whole rather than left half-written. */
-static size_t label_clean(const char *in, char *out, size_t cap)
-{
-	size_t len = 0U;
-
-	if (in == NULL || out == NULL || cap < 2U) {
-		return 0U;
-	}
-	for (; *in != '\0' && len + 1U < cap; in++) {
-		unsigned char c = (unsigned char)*in;
-
-		if (c == '\t') {
-			c = ' ';
-		}
-		if (c < 0x20U || c == 0x7fU || c == '"' || c == '\\') {
-			continue;
-		}
-		if (c == ' ' && (len == 0U || out[len - 1U] == ' ')) {
-			continue;
-		}
-		out[len++] = (char)c;
-	}
-	while (len > 0U && out[len - 1U] == ' ') {
-		len--;
-	}
-	if (*in != '\0' && len > 0U) {
-		/* The cap stopped us mid-character; is the last one complete? */
-		size_t start = len;
-
-		while (start > 0U && ((unsigned char)out[start - 1U] & 0xc0U) == 0x80U) {
-			start--;
-		}
-		if (start > 0U) {
-			unsigned char lead = (unsigned char)out[start - 1U];
-			size_t need = (lead >= 0xf0U) ? 4U : (lead >= 0xe0U) ? 3U :
-				      (lead >= 0xc0U) ? 2U : 1U;
-
-			if (len - (start - 1U) < need) {
-				len = start - 1U;
-			}
-		}
-	}
-	out[len] = '\0';
-	return len;
-}
-
-static int label_find(uint8_t type, const char *address)
-{
-	for (size_t i = 0; i < label_blob[1]; i++) {
-		const uint8_t *slot = label_slot(i);
-
-		if (slot[0] == type && !strcmp((const char *)(slot + 1U), address)) {
-			return (int)i;
-		}
-	}
-	return -1;
-}
-
-static void label_drop(size_t index)
-{
-	uint8_t count = label_blob[1];
-
-	if (index >= count) {
-		return;
-	}
-	for (size_t i = index; i + 1U < count; i++) {
-		memcpy(label_slot(i), label_slot(i + 1U), LABEL_SLOT);
-	}
-	memset(label_slot(count - 1U), 0, LABEL_SLOT);
-	label_blob[1] = (uint8_t)(count - 1U);
-}
-
-static int label_set(uint8_t type, const char *address, const char *name)
-{
-	char clean[LABEL_MAX + 1U];
-	size_t len = label_clean(name, clean, sizeof(clean));
-	int index = label_find(type, address);
-	uint8_t *slot;
-
-	if (len == 0U) {
-		return -EINVAL;
-	}
-	if (index < 0) {
-		uint8_t count = label_blob[1];
-
-		if (count >= LABEL_SLOTS) {
-			return -ENOSPC;
-		}
-		index = (int)count;
-		label_blob[1] = (uint8_t)(count + 1U);
-	}
-	slot = label_slot((size_t)index);
-	/* Reconnects report the same label; do not wear flash for an unchanged name. */
-	if (slot[1U + LABEL_ADDR] == len &&
-	    !memcmp(slot + 2U + LABEL_ADDR, clean, len + 1U)) {
-		return 0;
-	}
-	slot[0] = type;
-	snprintk((char *)(slot + 1U), LABEL_ADDR, "%s", address);
-	slot[1U + LABEL_ADDR] = (uint8_t)len;
-	memcpy(slot + 2U + LABEL_ADDR, clean, len + 1U);
-	return labels_save();
-}
-
-struct live_bonds {
-	uint8_t count;
-	struct {
-		uint8_t type;
-		char address[LABEL_ADDR];
-	} items[LABEL_SLOTS];
-};
-
-static void collect_bond(const struct bt_bond_info *bond, void *data)
-{
-	struct live_bonds *live = data;
-	char address[BT_ADDR_STR_LEN];
-
-	if (live->count >= LABEL_SLOTS) {
-		return;
-	}
-	bt_addr_to_str(&bond->addr.a, address, sizeof(address));
-	live->items[live->count].type = bond->addr.type;
-	snprintk(live->items[live->count].address, LABEL_ADDR, "%s", address);
-	live->count++;
-}
-
-static bool live_has(const struct live_bonds *live, uint8_t type, const char *address)
-{
-	for (uint8_t i = 0; i < live->count; i++) {
-		if (live->items[i].type == type && !strcmp(live->items[i].address, address)) {
-			return true;
-		}
-	}
-	return false;
-}
-
-/* A bond can go away without going through bonds remove: a host that forgets the
- * pairing, or a build with CONFIG_BT_KEYS_OVERWRITE_OLDEST. Drop those labels the
- * first time somebody asks for the list instead of keeping stale text forever. */
-static void labels_prune(uint8_t id)
-{
-	struct live_bonds live = { 0 };
-	bool changed = false;
-
-	bt_foreach_bond(id, collect_bond, &live);
-	for (size_t i = 0; i < label_blob[1];) {
-		const uint8_t *slot = label_slot(i);
-
-		if (live_has(&live, slot[0], (const char *)(slot + 1U))) {
-			i++;
-		} else {
-			label_drop(i);
-			changed = true;
-		}
-	}
-	if (changed) {
-		(void)labels_save();
-	}
-}
-
-/* One names line. The <type>/<address> prefix matches the BOND lines so a client
- * can join the two by id; the label is quoted because it may contain spaces. */
-static int name_line(char *buf, size_t cap, uint8_t type, const char *address,
-		     const char *label)
-{
-	return snprintk(buf, cap, "NAME %u/%s \"%s\"\n", type, address, label);
-}
-
-/* ---- bond list and removal ----------------------------------------------- */
+#include "bond_label.h"
 
 /* Serialize the short delayed removal with queries and other deletion requests.
  * The delay lets the requester receive the acknowledgement before bt_unpair()
@@ -281,19 +20,12 @@ static void remove_bond(struct k_work *work)
 	ARG_UNUSED(work);
 	k_mutex_lock(&bond_lock, K_FOREVER);
 	last_result = bt_unpair(pending_id, &pending_addr);
-	if (last_result == 0) {
-		char address[BT_ADDR_STR_LEN];
-		int index;
-
-		/* The label belonged to that pairing; keep it from resurfacing on a
-		 * later bond that reuses the slot. */
-		labels_ensure();
-		bt_addr_to_str(&pending_addr.a, address, sizeof(address));
-		index = label_find(pending_addr.type, address);
-		if (index >= 0) {
-			label_drop((size_t)index);
-			(void)labels_save();
-		}
+	/* A successful unpair (or a bond that is already gone) leaves the label
+	 * orphaned, so drop it too. A transient failure keeps the bond, and with
+	 * it the label. */
+	if ((last_result == 0 || last_result == -ENOENT) &&
+	    IS_ENABLED(CONFIG_SETTINGS)) {
+		(void)linkr_bond_label_clear(&pending_addr);
 	}
 	pending = false;
 	k_mutex_unlock(&bond_lock);
@@ -321,19 +53,447 @@ static void list_bond(const struct bt_bond_info *bond, void *data)
 	list->used += n;
 }
 
+/* Parse "<0|1>/AA:BB:CC:DD:EE:FF" (exactly 19 bytes) into an identity
+ * address. The token is copied first so a following command argument cannot
+ * bleed into the address parser. */
+static bool parse_address(const char *value, bt_addr_le_t *out)
+{
+	char text[BT_ADDR_STR_LEN];
+
+	if (strlen(value) != 19u) {
+		return false;
+	}
+	if (value[0] != '0' && value[0] != '1') {
+		return false;
+	}
+	if (value[1] != '/') {
+		return false;
+	}
+	memcpy(text, value + 2, 17u);
+	text[17] = '\0';
+	return bt_addr_le_from_str(text, value[0] == '0' ? "public" : "random",
+				   out) == 0;
+}
+
+#if IS_ENABLED(CONFIG_SETTINGS)
+static int hex_value(char digit)
+{
+	if (digit >= '0' && digit <= '9') {
+		return digit - '0';
+	}
+	if (digit >= 'a' && digit <= 'f') {
+		return digit - 'a' + 10;
+	}
+	if (digit >= 'A' && digit <= 'F') {
+		return digit - 'A' + 10;
+	}
+	return -1;
+}
+
+/* Encode bytes as lowercase hex, NUL-terminated. Returns the character count
+ * written, or 0 when out is too small. */
+static size_t hex_encode(const uint8_t *data, size_t length, char *out,
+			 size_t out_size)
+{
+	static const char digits[] = "0123456789abcdef";
+
+	if (length * 2u + 1u > out_size) {
+		return 0;
+	}
+	for (size_t i = 0; i < length; i++) {
+		out[i * 2u] = digits[data[i] >> 4];
+		out[i * 2u + 1u] = digits[data[i] & 0x0fu];
+	}
+	out[length * 2u] = '\0';
+	return length * 2u;
+}
+
+/* Decode an even-length hex string. Returns the byte count, or -1 when the
+ * text is not valid hex or does not fit out. */
+static int hex_decode(const char *text, uint8_t *out, size_t out_size)
+{
+	size_t length = strlen(text);
+	size_t bytes = length / 2u;
+
+	if (length == 0u || (length % 2u) != 0u || bytes > out_size) {
+		return -1;
+	}
+	for (size_t i = 0; i < bytes; i++) {
+		int high = hex_value(text[i * 2u]);
+		int low = hex_value(text[i * 2u + 1u]);
+
+		if (high < 0 || low < 0) {
+			return -1;
+		}
+		out[i] = (uint8_t)((high << 4) | low);
+	}
+	return (int)bytes;
+}
+
+/* A label is free text that ends up on a terminal, so it follows the same
+ * displayable-UTF-8 rules as the advertised name: no C0/C1 controls, DEL,
+ * embedded NUL, overlong forms, surrogates, or out-of-range code points. The
+ * C1 rule matters here too: U+009B is a one-byte CSI and a terminal may obey
+ * it even though the board never sends an ESC. */
+static bool label_valid(const char *label, size_t len)
+{
+	size_t i = 0;
+
+	if (len == 0u || len > CONFIG_LINKR_BLE_BRIDGE_BOND_LABEL_MAX) {
+		return false;
+	}
+
+	while (i < len) {
+		uint8_t c = (uint8_t)label[i];
+		uint32_t cp;
+		size_t extra;
+
+		if (c < 0x20 || c == 0x7f) {
+			return false;
+		}
+		if (c < 0x80) {
+			i++;
+			continue;
+		}
+
+		if ((c & 0xe0) == 0xc0) {
+			extra = 1;
+			cp = c & 0x1f;
+		} else if ((c & 0xf0) == 0xe0) {
+			extra = 2;
+			cp = c & 0x0f;
+		} else if ((c & 0xf8) == 0xf0) {
+			extra = 3;
+			cp = c & 0x07;
+		} else {
+			return false;
+		}
+		if (i + extra >= len) {
+			return false;
+		}
+		for (size_t j = 1; j <= extra; j++) {
+			uint8_t continuation = (uint8_t)label[i + j];
+
+			if ((continuation & 0xc0) != 0x80) {
+				return false;
+			}
+			cp = (cp << 6) | (continuation & 0x3f);
+		}
+
+		if ((extra == 1 && cp < 0x80) ||
+		    (extra == 2 && cp < 0x800) ||
+		    (extra == 3 && (cp < 0x10000 || cp > 0x10ffff)) ||
+		    (cp >= 0xd800 && cp <= 0xdfff) ||
+		    (cp >= 0x80 && cp <= 0x9f) ||
+		    cp == 0x2028 || cp == 0x2029) {
+			return false;
+		}
+		i += extra + 1;
+	}
+
+	return true;
+}
+
+/* "bonds label <type>/<addr> [<hex>|clear]". args points just past the
+ * "bonds label" prefix. Labels are asked for one address at a time so the
+ * fixed reply buffer never has to hold all of them. */
+static void bond_label_command(uint8_t id, const char *args, char *reply,
+			       size_t size)
+{
+	char address_token[BT_ADDR_STR_LEN + 2];
+	bt_addr_le_t address;
+	char address_text[BT_ADDR_STR_LEN];
+	const char *value;
+	size_t args_len;
+
+	while (*args == ' ') {
+		args++;
+	}
+	args_len = strlen(args);
+
+	if (args_len < 19u) {
+		snprintk(reply, size, "ERR bonds address\n");
+		return;
+	}
+	memcpy(address_token, args, 19u);
+	address_token[19] = '\0';
+	if (!parse_address(address_token, &address)) {
+		snprintk(reply, size, "ERR bonds address\n");
+		return;
+	}
+	if (args[19] != '\0' && args[19] != ' ') {
+		snprintk(reply, size, "ERR bonds address\n");
+		return;
+	}
+	if (!bt_le_bond_exists(id, &address)) {
+		snprintk(reply, size, "ERR bonds not found\n");
+		return;
+	}
+	bt_addr_to_str(&address.a, address_text, sizeof(address_text));
+
+	value = args + 19;
+	while (*value == ' ') {
+		value++;
+	}
+
+	if (*value == '\0') {
+		char out[CONFIG_LINKR_BLE_BRIDGE_BOND_LABEL_MAX + 1];
+		int n = linkr_bond_label_get(&address, out, sizeof(out));
+
+		if (n < 0) {
+			snprintk(reply, size, "ERR bonds save=%d\n", n);
+			return;
+		}
+		if (n == 0) {
+			snprintk(reply, size, "OK bonds label=%u/%s none\n",
+				 (unsigned int)address.type, address_text);
+		} else {
+			char hex[CONFIG_LINKR_BLE_BRIDGE_BOND_LABEL_MAX * 2 + 1];
+
+			hex_encode((const uint8_t *)out, (size_t)n, hex,
+				   sizeof(hex));
+			snprintk(reply, size,
+				 "OK bonds label=%u/%s hex=%s\n",
+				 (unsigned int)address.type, address_text, hex);
+		}
+		return;
+	}
+
+	if (!strcmp(value, "clear")) {
+		(void)linkr_bond_label_clear(&address);
+		snprintk(reply, size, "OK bonds label=%u/%s none\n",
+			 (unsigned int)address.type, address_text);
+		return;
+	}
+
+	/* Hex-encoded UTF-8 write. */
+	{
+		size_t value_len = strlen(value);
+		uint8_t bytes[CONFIG_LINKR_BLE_BRIDGE_BOND_LABEL_MAX];
+		char hex[CONFIG_LINKR_BLE_BRIDGE_BOND_LABEL_MAX * 2 + 1];
+		int n;
+
+		if (value_len == 0u || (value_len % 2u) != 0u) {
+			snprintk(reply, size, "ERR bonds label hex\n");
+			return;
+		}
+		if (value_len / 2u > CONFIG_LINKR_BLE_BRIDGE_BOND_LABEL_MAX) {
+			snprintk(reply, size, "ERR bonds label length\n");
+			return;
+		}
+		n = hex_decode(value, bytes, sizeof(bytes));
+		if (n < 0) {
+			snprintk(reply, size, "ERR bonds label hex\n");
+			return;
+		}
+		if (!label_valid((const char *)bytes, (size_t)n)) {
+			snprintk(reply, size, "ERR bonds label utf8\n");
+			return;
+		}
+		if (linkr_bond_label_set(&address, (const char *)bytes,
+					 (size_t)n) < 0) {
+			snprintk(reply, size, "ERR bonds save\n");
+			return;
+		}
+		hex_encode(bytes, (size_t)n, hex, sizeof(hex));
+		snprintk(reply, size, "OK bonds label=%u/%s hex=%s\n",
+			 (unsigned int)address.type, address_text, hex);
+	}
+}
+
+/* ---- upstream `bonds name` / `bonds names?` compatibility ----------------
+ *
+ * The first version of this feature let a host name only its own pairing with
+ * `@linkr bonds name <label>` and listed every name with `@linkr bonds names?`.
+ * Keep both on top of the per-bond label store: existing Web/Python clients
+ * keep working, while `bonds label <type>/<address>` adds management of any
+ * bond. The listing is capped at the old 32-byte width so eight maximal NAME
+ * lines still fit the 512-byte reply; the per-address read returns the full
+ * configured label. */
+#define BONDS_NAME_MAX 32u
+struct names_listing {
+	char *reply;
+	size_t size, used;
+	bool overflow;
+};
+
+static size_t utf8_char_len(uint8_t c)
+{
+	if ((c & 0x80u) == 0u) {
+		return 1u;
+	}
+	if ((c & 0xe0u) == 0xc0u) {
+		return 2u;
+	}
+	if ((c & 0xf0u) == 0xe0u) {
+		return 3u;
+	}
+	if ((c & 0xf8u) == 0xf0u) {
+		return 4u;
+	}
+	return 1u;
+}
+
+static void list_bond_name(const struct bt_bond_info *bond, void *data)
+{
+	struct names_listing *list = data;
+	char address[BT_ADDR_STR_LEN];
+	char label[CONFIG_LINKR_BLE_BRIDGE_BOND_LABEL_MAX + 1u];
+	char safe[BONDS_NAME_MAX + 1u];
+	size_t used = 0u;
+	int length;
+
+	length = linkr_bond_label_get(&bond->addr, label, sizeof(label));
+	if (length <= 0) {
+		return;
+	}
+	/* Quotes and backslashes would end the quoted NAME field early. The
+	 * per-address command returns the stored bytes exactly; this listing is
+	 * the compatibility view, so it substitutes rather than escapes. */
+	for (size_t i = 0; i < (size_t)length && used < BONDS_NAME_MAX;) {
+		size_t width = utf8_char_len((uint8_t)label[i]);
+
+		if (used + width > BONDS_NAME_MAX) {
+			break;
+		}
+		char c = label[i];
+
+		safe[used++] = (c == '"' || c == '\\') ? '\'' : c;
+		for (size_t j = 1; j < width; j++) {
+			safe[used++] = label[i + j];
+		}
+		i += width;
+	}
+	safe[used] = '\0';
+	if (used == 0u) {
+		return;
+	}
+	bt_addr_to_str(&bond->addr.a, address, sizeof(address));
+	int written = snprintk(list->reply + list->used, list->size - list->used,
+			       "NAME %u/%s \"%s\"\n", bond->addr.type, address,
+			       safe);
+	if (written < 0 || (size_t)written >= list->size - list->used) {
+		list->overflow = true;
+		return;
+	}
+	list->used += (size_t)written;
+}
+
+static void bond_names_command(uint8_t id, char *reply, size_t size)
+{
+	struct names_listing list = { .reply = reply, .size = size };
+	int n = snprintk(reply, size, "OK bonds names\n");
+
+	if (n < 0 || (size_t)n >= size) {
+		snprintk(reply, size, "ERR bonds buffer\n");
+		return;
+	}
+	list.used = (size_t)n;
+	bt_foreach_bond(id, list_bond_name, &list);
+	if (list.overflow) {
+		snprintk(reply, size, "ERR bonds buffer\n");
+	}
+}
+
+static void bond_name_command(struct bt_conn *conn, uint8_t id,
+			      const char *value, char *reply, size_t size)
+{
+	const bt_addr_le_t *self = bt_conn_get_dst(conn);
+	size_t length;
+
+	if (value == NULL) {
+		value = "";
+	}
+	if (*value == ' ') {
+		value++;
+	}
+	length = strlen(value);
+	if (!bt_le_bond_exists(id, self)) {
+		snprintk(reply, size, "ERR bonds not found\n");
+		return;
+	}
+	if (length == 0u) {
+		(void)linkr_bond_label_clear(self);
+		snprintk(reply, size, "OK bonds name\n");
+		return;
+	}
+	if (length > CONFIG_LINKR_BLE_BRIDGE_BOND_LABEL_MAX) {
+		snprintk(reply, size, "ERR bonds name length\n");
+		return;
+	}
+	if (!label_valid(value, length)) {
+		snprintk(reply, size, "ERR bonds name utf8\n");
+		return;
+	}
+	if (linkr_bond_label_set(self, value, length) < 0) {
+		snprintk(reply, size, "ERR bonds name save\n");
+		return;
+	}
+	snprintk(reply, size, "OK bonds name\n");
+}
+
+#else
+static void bond_label_command(uint8_t id, const char *args, char *reply,
+			       size_t size)
+{
+	ARG_UNUSED(id);
+	ARG_UNUSED(args);
+	snprintk(reply, size, "ERR bonds unsupported\n");
+}
+
+static void bond_names_command(uint8_t id, char *reply, size_t size)
+{
+	ARG_UNUSED(id);
+	snprintk(reply, size, "OK bonds names\n");
+}
+
+static void bond_name_command(struct bt_conn *conn, uint8_t id,
+			      const char *value, char *reply, size_t size)
+{
+	ARG_UNUSED(conn);
+	ARG_UNUSED(id);
+	ARG_UNUSED(value);
+	snprintk(reply, size, "ERR bonds unsupported\n");
+}
+#endif /* CONFIG_SETTINGS */
+
+
 bool linkr_bond_command(struct bt_conn *conn, const char *command, char *reply, size_t size)
 {
 	bool query = !strcmp(command, "bonds?");
 	bool names = !strcmp(command, "bonds names?");
-	bool rename = !strcmp(command, "bonds name") || !strncmp(command, "bonds name ", 11);
+	bool name = !strcmp(command, "bonds name") ||
+		    !strncmp(command, "bonds name ", 11);
+	bool label = !strncmp(command, "bonds label", 11) &&
+		     (command[11] == '\0' || command[11] == ' ');
 	bool remove = !strncmp(command, "bonds remove ", 13);
-	if (!query && !names && !rename && !remove) return false;
+
+	if (!query && !names && !name && !label && !remove) return false;
 	struct bt_conn_info info;
 	if (!conn || bt_conn_get_info(conn, &info) || bt_conn_get_security(conn) < BT_SECURITY_L2) {
 		snprintk(reply, size, "ERR bonds encrypted BLE required\n");
 		return true;
 	}
+	/* Labels are stored through the same lock as removal: a write that ran
+	 * beside the delayed bt_unpair() could recreate a label for a bond that
+	 * has just been deleted. The write is short; correctness wins. */
 	k_mutex_lock(&bond_lock, K_FOREVER);
+	if (names) {
+		bond_names_command(info.id, reply, size);
+		k_mutex_unlock(&bond_lock);
+		return true;
+	}
+	if (name) {
+		const char *value = command[10] == ' ' ? command + 11 : "";
+		bond_name_command(conn, info.id, value, reply, size);
+		k_mutex_unlock(&bond_lock);
+		return true;
+	}
+	if (label) {
+		bond_label_command(info.id, command + 11, reply, size);
+		k_mutex_unlock(&bond_lock);
+		return true;
+	}
 	if (query) {
 		struct listing list = { .reply = reply, .size = size, .self = bt_conn_get_dst(conn) };
 		int n = snprintk(reply, size, "OK bonds pending=%u result=%d\n", pending ? 1U : 0U, last_result);
@@ -344,61 +504,11 @@ bool linkr_bond_command(struct bt_conn *conn, const char *command, char *reply, 
 			bt_foreach_bond(info.id, list_bond, &list);
 			if (list.overflow) snprintk(reply, size, "ERR bonds buffer\n");
 		}
-	} else if (names) {
-		int n = snprintk(reply, size, "OK bonds names\n");
-
-		labels_ensure();
-		labels_prune(info.id);
-		if (n < 0 || (size_t)n >= size) {
-			snprintk(reply, size, "ERR bonds buffer\n");
-		} else {
-			size_t used = (size_t)n;
-
-			for (size_t i = 0; i < label_blob[1]; i++) {
-				const uint8_t *slot = label_slot(i);
-				int written = name_line(reply + used, size - used, slot[0],
-							(const char *)(slot + 1U),
-							(const char *)(slot + 2U + LABEL_ADDR));
-
-				if (written < 0 || (size_t)written >= size - used) {
-					snprintk(reply, size, "ERR bonds buffer\n");
-					break;
-				}
-				used += (size_t)written;
-			}
-		}
-	} else if (rename) {
-		const char *value = command[10] == ' ' ? command + 11 : "";
-		const bt_addr_le_t *dst = bt_conn_get_dst(conn);
-		char address[BT_ADDR_STR_LEN];
-
-		/* Keyed exactly like self= above, so a label and the bond it belongs to
-		 * always agree on which address identifies the pairing. A label with no
-		 * bond behind it would be pruned on the next listing. */
-		bt_addr_to_str(&dst->a, address, sizeof(address));
-		if (!bt_le_bond_exists(info.id, dst)) {
-			snprintk(reply, size, "ERR bonds not found\n");
-		} else {
-			int err;
-
-			labels_ensure();
-			err = label_set(dst->type, address, value);
-			if (err == -EINVAL) {
-				snprintk(reply, size, "ERR bonds name length\n");
-			} else if (err == -ENOSPC) {
-				snprintk(reply, size, "ERR bonds name slots\n");
-			} else if (err != 0) {
-				snprintk(reply, size, "ERR bonds name=%d\n", err);
-			} else {
-				snprintk(reply, size, "OK bonds name\n");
-			}
-		}
 	} else {
 		const char *value = command + 13;
 		bt_addr_le_t address;
 		/* Exact identity address, never a shifting list index or wildcard. */
-		if (strlen(value) != 19 || (value[0] != '0' && value[0] != '1') || value[1] != '/' ||
-		    bt_addr_le_from_str(value + 2, value[0] == '0' ? "public" : "random", &address)) {
+		if (!parse_address(value, &address)) {
 			snprintk(reply, size, "ERR bonds address\n");
 		} else if (pending) {
 			snprintk(reply, size, "ERR bonds busy\n");
@@ -419,4 +529,22 @@ bool linkr_bond_command(struct bt_conn *conn, const char *command, char *reply, 
 	}
 	k_mutex_unlock(&bond_lock);
 	return true;
+}
+
+bool linkr_bond_is_readonly(const char *command)
+{
+	if (!strcmp(command, "bonds?")) {
+		return true;
+	}
+	if (strncmp(command, "bonds label", 11) != 0) {
+		return false;
+	}
+	/* A bare address is a read. So is the malformed prefix with no address:
+	 * it can only answer `ERR bonds address`, and refusing it at the control
+	 * gate would report a permission error for a syntax mistake. */
+	const char *rest = command + 11;
+	while (*rest == ' ') {
+		rest++;
+	}
+	return *rest == '\0' || strlen(rest) == 19u;
 }

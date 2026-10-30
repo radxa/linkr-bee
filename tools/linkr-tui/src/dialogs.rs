@@ -176,6 +176,7 @@ const WIFI_TITLE: Entry = [" Join a WiFi network ", " 加入 WiFi 网络 "];
 const WIFI_PASSWORD_TITLE: Entry = [" WiFi password ", " WiFi 密码 "];
 const WEBDAV_TITLE: Entry = [" WebDAV log upload ", " WebDAV 日志上传 "];
 const BLE_NAME_TITLE: Entry = [" BLE advertised name ", " BLE 广播名 "];
+const BOND_LABEL_TITLE: Entry = [" Device label ", " 设备标签 "];
 const LAN_HOST_TITLE: Entry = [" LAN host ", " 局域网主机 "];
 const LAN_TOKEN_TITLE: Entry = [" LAN token ", " 局域网令牌 "];
 
@@ -758,7 +759,7 @@ pub struct Prompt {
 }
 
 /// What agreeing to a prompt does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PromptAction {
     /// Name the network to join. Answered by a second prompt for its password,
     /// because the two are one command on the wire and a half of that command
@@ -776,6 +777,8 @@ pub enum PromptAction {
     /// The token that dial carries. Held in the sidebar row and in the dial,
     /// never in a notice or a log.
     LanToken,
+    /// A paired-device label. The address names the bond the label belongs to.
+    BondLabel { address: String },
 }
 
 impl PromptAction {
@@ -785,7 +788,7 @@ impl PromptAction {
     /// A secret is painted as stars, with one character in the clear for a
     /// moment after an edit put it there, and Ctrl+R shows the whole of it for
     /// as long as it takes to check. See [`PROMPT_REVEAL`].
-    fn asks_for_a_secret(self) -> bool {
+    fn asks_for_a_secret(&self) -> bool {
         matches!(self, PromptAction::WifiPassword | PromptAction::LanToken)
     }
 }
@@ -795,8 +798,8 @@ impl Prompt {
     pub fn new(title: Entry, action: PromptAction) -> Prompt {
         Prompt {
             title,
-            label: Self::label(action),
-            placeholder: Self::placeholder(action),
+            label: Self::label(&action),
+            placeholder: Self::placeholder(&action),
             field: Field::default(),
             masked: action.asks_for_a_secret(),
             reveal: None,
@@ -846,7 +849,7 @@ impl Prompt {
     }
 
     /// The question this action's field asks, in the interface language.
-    fn label(action: PromptAction) -> Entry {
+    fn label(action: &PromptAction) -> Entry {
         match action {
             PromptAction::WifiSsid => ["Network to join (SSID)", "要加入的网络名称（SSID）"],
             PromptAction::WifiPassword => [
@@ -869,12 +872,16 @@ impl Prompt {
                 "32 hex characters, blank when LAN auth is off (Ctrl+R shows it)",
                 "32 位十六进制，未启用鉴权时留空（Ctrl+R 切换显示）",
             ],
+            PromptAction::BondLabel { .. } => [
+                "1-48 UTF-8 bytes; blank clears the label",
+                "1–48 个 UTF-8 字节；留空即清除标签",
+            ],
         }
     }
 
     /// What the empty field says, which is how it tells you the shape of
     /// answer it wants.
-    fn placeholder(action: PromptAction) -> Entry {
+    fn placeholder(action: &PromptAction) -> Entry {
         match action {
             PromptAction::WifiSsid => ["for example BenchNet", "例如 BenchNet"],
             PromptAction::WifiPassword => ["empty for an open network", "留空表示开放网络"],
@@ -885,6 +892,7 @@ impl Prompt {
             PromptAction::BleName => ["for example Bench Bee 078C", "例如 测试😀"],
             PromptAction::LanHost => ["for example 192.168.0.100", "例如 192.168.0.100"],
             PromptAction::LanToken => ["empty when the bridge wants none", "未启用鉴权时留空"],
+            PromptAction::BondLabel { .. } => ["for example Alice's phone", "例如 小明的手机"],
         }
     }
 }
@@ -1257,6 +1265,29 @@ pub fn prompt_ble_name(app: &mut App) {
         .or(app.advertised_name.as_deref())
         .unwrap_or("");
     let prompt = Prompt::with_text(BLE_NAME_TITLE, PromptAction::BleName, current);
+    raise(app, Dialog::Prompt(prompt));
+}
+
+/// Ask for a paired-device label.
+///
+/// The field starts with the current label. Only this host's own pairing is
+/// suggested from the local user name: a remote phone named after the person
+/// at this desk would be a lie. An empty answer clears the label.
+pub fn prompt_bond_label(app: &mut App, address: &str, current: Option<&str>, is_self: bool) {
+    let suggested = current.map(str::to_string).unwrap_or_else(|| {
+        if is_self {
+            crate::user::preferred_name()
+        } else {
+            String::new()
+        }
+    });
+    let prompt = Prompt::with_text(
+        BOND_LABEL_TITLE,
+        PromptAction::BondLabel {
+            address: address.to_string(),
+        },
+        &suggested,
+    );
     raise(app, Dialog::Prompt(prompt));
 }
 
@@ -2431,6 +2462,25 @@ fn start(app: &mut App, prompt: Prompt) {
         // The token goes into the sidebar row and nowhere else — no notice,
         // no log, no report ever names it.
         PromptAction::LanToken => app.lan_token = answer.to_string(),
+        // A label is display-only and low risk, so it goes straight through
+        // without an approval card (unlike a BLE-name change, which alters the
+        // advertisement). The write is still read back from the board.
+        PromptAction::BondLabel { address } => {
+            if answer.trim().len() > crate::accessory::BOND_LABEL_MAX_BYTES {
+                let text = app.strings().net_paired_label_too_long.to_string();
+                app.push_notice(crate::app::Notice {
+                    text,
+                    level: NoticeLevel::Error,
+                });
+                return;
+            }
+            if let Err(why) = app.set_bond_label(&address, &answer) {
+                app.push_notice(crate::app::Notice {
+                    text: why,
+                    level: NoticeLevel::Error,
+                });
+            }
+        }
     }
 }
 

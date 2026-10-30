@@ -2549,8 +2549,31 @@ button,
 /* Paired-host identities wrap inside the existing board card. */
 .bond-list { display: grid; gap: 10px; margin-bottom: 12px; }
 .bond-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.bond-row > span { flex: 1 1 150px; min-width: 0; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: 12px; }
+.bond-identity { flex: 1 1 160px; min-width: 0; display: grid; gap: 2px; }
+.bond-name { font-size: 12.5px; font-weight: 600; overflow-wrap: anywhere; }
+.bond-name.is-address { font-family: var(--font-mono); font-size: 12px; font-weight: 400; }
+.bond-meta { font-family: var(--font-mono); font-size: 10px; color: var(--muted); overflow-wrap: anywhere; }
+.bond-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 .bond-row .btn { min-height: 44px; }
+.bond-edit { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; width: 100%; }
+.bond-edit .btn { flex: 0 0 auto; white-space: nowrap; }
+.bond-input {
+  flex: 1 1 140px;
+  min-width: 0;
+  min-height: 32px;
+  padding: 5px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--input-bg);
+  color: var(--text);
+  font-size: 12px;
+}
+
+@media (max-width: 380px) {
+  .bond-edit { display: grid; grid-template-columns: 1fr 1fr; }
+  .bond-edit .bond-input { grid-column: 1 / -1; }
+  .bond-edit .btn { width: 100%; }
+}
 
 /* Match the divider and spacing used by other settings subsections. */
 .shell-integration-field {

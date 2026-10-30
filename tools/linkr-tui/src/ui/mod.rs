@@ -1482,6 +1482,10 @@ mod tests {
                 (NetworkRow::BleNameRename, "[Rename]".to_string()),
                 (NetworkRow::BleNameDefault, "[Restore default]".to_string()),
                 (NetworkRow::BleNameStatus, "[Read name]".to_string()),
+                (
+                    NetworkRow::PairedRefresh,
+                    "[Refresh paired devices]".to_string(),
+                ),
             ] {
                 app.network.focus = focus;
                 let frame = render_to_text(&app, width, height);

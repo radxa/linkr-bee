@@ -67,6 +67,13 @@ pub enum Query {
     BleName,
     /// `@s?` — LAN access state, and the token the bridge expects.
     Lan,
+    /// `@linkr bonds?` — the hosts bonded to the bridge.
+    Bonds,
+    /// A paired-device label read or write. The command carries an identity
+    /// address, so it is built by [`crate::accessory::bond_label_set_command`]
+    /// and sent through `send_accessory`; this variant only names the shape of
+    /// the answer.
+    BondLabel,
 }
 
 impl Query {
@@ -80,6 +87,12 @@ impl Query {
             Query::Webdav => crate::accessory::WEBDAV_QUERY_COMMAND,
             Query::BleName => crate::accessory::BLE_NAME_QUERY_COMMAND,
             Query::Lan => crate::accessory::LAN_QUERY_COMMAND,
+            Query::Bonds => crate::accessory::BONDS_QUERY_COMMAND,
+            Query::BondLabel => {
+                unreachable!(
+                    "bond label commands carry an address; send them through send_accessory"
+                )
+            }
         }
     }
 
@@ -110,7 +123,13 @@ impl Query {
                         .error
                         .is_empty()
             }
-            Query::Uart | Query::Wifi | Query::Webdav | Query::BleName | Query::Lan => {
+            Query::Uart
+            | Query::Wifi
+            | Query::Webdav
+            | Query::BleName
+            | Query::Lan
+            | Query::Bonds
+            | Query::BondLabel => {
                 // One parse: either half of the verdict ends the question.
                 let status = crate::accessory::reply_status(&lines.join("\n"));
                 status.ok || !status.error.is_empty()
@@ -134,6 +153,9 @@ impl Query {
         match self {
             Query::WifiScan => SCAN_TIMEOUT,
             Query::Diagnostics => INFO_TIMEOUT,
+            // The list is followed by one label read per bonded host, and the
+            // whole series has to fit in one wait.
+            Query::Bonds => REPLY_TIMEOUT * 4,
             _ => REPLY_TIMEOUT,
         }
     }
@@ -217,6 +239,18 @@ impl Conversation {
     /// issued: the firmware treats it as "not a request" and a frame that was
     /// silently dropped is the worst way for this to fail.
     pub fn ask(&mut self, query: Query, now: Instant) -> (u32, &'static str) {
+        let id = self.ask_id(query, now);
+        (id, query.command())
+    }
+
+    /// Ask `query` at `now` with a command supplied by the caller.
+    ///
+    /// Used for the accessory commands whose body carries a value — a UART
+    /// spec, a bond address and label — where the body is built from a `String`
+    /// and `Query::command()` cannot be the one that asked. The question and
+    /// its id are still recorded here, so an answer is correlated exactly as
+    /// for a fixed question.
+    pub fn ask_id(&mut self, query: Query, now: Instant) -> u32 {
         self.next_id = if self.next_id == u32::MAX {
             1
         } else {
@@ -231,7 +265,7 @@ impl Conversation {
             finalised: false,
             since: now,
         });
-        (id, query.command())
+        id
     }
 
     /// Offer one management response to whatever is waiting.
@@ -418,6 +452,15 @@ mod tests {
         // never both belong to one question.
         let (second, _) = talk.ask(Query::Uart, start);
         assert_ne!(id, second);
+    }
+
+    #[test]
+    fn a_value_carrying_command_is_asked_with_its_own_body() {
+        let start = Instant::now();
+        let mut talk = Conversation::new();
+        let id = talk.ask_id(Query::BondLabel, start);
+        assert_ne!(id, 0);
+        assert_eq!(talk.waiting(), Some(Query::BondLabel));
     }
 
     #[test]

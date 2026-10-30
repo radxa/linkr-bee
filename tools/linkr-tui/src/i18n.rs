@@ -238,6 +238,32 @@ pub struct Strings {
     pub net_ble_name_custom: &'static str,
     /// The note marking the MAC-derived name.
     pub net_ble_name_default: &'static str,
+    /// The paired-device section heading.
+    pub net_paired_section: &'static str,
+    /// The read-the-bonds action.
+    pub net_paired_refresh: &'static str,
+    /// Shown when no host is bonded.
+    pub net_paired_empty: &'static str,
+    /// Shown before the list has been read.
+    pub net_paired_not_read: &'static str,
+    /// A delayed removal is still pending on the board.
+    pub net_paired_pending: &'static str,
+    /// The last removal failed.
+    pub net_paired_failed: &'static str,
+    /// The firmware lists bonds but has no label commands.
+    pub net_paired_labels_unsupported: &'static str,
+    /// A label reply that was neither a label nor the removal acknowledgement.
+    pub net_paired_bad_reply: &'static str,
+    /// A typed label is longer than the client cap.
+    pub net_paired_label_too_long: &'static str,
+    /// The marker for this connection's own pairing.
+    pub net_paired_self: &'static str,
+    /// The remove action.
+    pub net_paired_remove: &'static str,
+    /// The note under the list.
+    pub net_paired_hint: &'static str,
+    /// Shown when the firmware has no paired-device commands.
+    pub net_paired_unsupported: &'static str,
     /// The WebDAV status action.
     pub net_webdav_status: &'static str,
     /// Refusing to enable WebDAV without a URL.
@@ -593,6 +619,19 @@ const ZH: Strings = Strings {
     net_ble_name_invalid: "名称需为 1–29 个 UTF-8 字节，且不能包含控制字符",
     net_ble_name_custom: "自定义",
     net_ble_name_default: "MAC 默认",
+    net_paired_section: "已配对设备",
+    net_paired_refresh: "[刷新已配对设备]",
+    net_paired_empty: "没有已配对的主机",
+    net_paired_not_read: "尚未读取；按 Enter 读取",
+    net_paired_pending: "删除等待固件处理，稍后刷新",
+    net_paired_failed: "上次删除失败，请刷新后重试",
+    net_paired_labels_unsupported: "此固件没有标签命令，仍可删除配对",
+    net_paired_bad_reply: "无法解析板子的标签回复",
+    net_paired_label_too_long: "名称最多 48 个 UTF-8 字节",
+    net_paired_self: "当前主机",
+    net_paired_remove: "[删除此配对]",
+    net_paired_hint: "Enter 改名或删除；标签只影响显示",
+    net_paired_unsupported: "此固件不支持配对管理",
     net_webdav_status: "[WebDAV 状态]",
     net_no_url: "先输入 WebDAV 上传地址",
     net_state_on: "开启",
@@ -794,6 +833,19 @@ const EN: Strings = Strings {
     net_ble_name_invalid: "the name must be 1-29 UTF-8 bytes without control characters",
     net_ble_name_custom: "custom",
     net_ble_name_default: "MAC default",
+    net_paired_section: "Paired devices",
+    net_paired_refresh: "[Refresh paired devices]",
+    net_paired_empty: "no paired hosts",
+    net_paired_not_read: "not read yet; press Enter to read",
+    net_paired_pending: "removal pending; refresh shortly",
+    net_paired_failed: "last removal failed; refresh and retry",
+    net_paired_labels_unsupported: "this firmware has no label command; removal still works",
+    net_paired_bad_reply: "could not read the board's label reply",
+    net_paired_label_too_long: "a label is at most 48 UTF-8 bytes",
+    net_paired_self: "this host",
+    net_paired_remove: "[Remove this pairing]",
+    net_paired_hint: "Enter renames or removes; the label is display-only",
+    net_paired_unsupported: "this firmware has no pairing management",
     net_webdav_status: "[WebDAV status]",
     net_no_url: "enter a WebDAV upload URL first",
     net_state_on: "on",

@@ -149,6 +149,22 @@ assembles the firmware ZIPs, Web package, APK and desktop archives. A manual
 release dispatch can run the same assembly as a dry run from a tag without
 touching the GitHub release.
 
+The desktop matrix always builds the Linux and Windows legs. Its two macOS legs
+are optional: they run only when the repository variable `ENABLE_MACOS` is
+`true`, because hosted macOS runners are not always assigned, and a leg that
+queues and is then cancelled fails the run and holds back every other
+platform's archive. `tools/assemble_release.py` accepts a release with or
+without them and refuses one that is missing a Linux or Windows leg.
+
+Components can move on after a release is published: the APK wraps the Web
+terminal built from the same commit, and the firmware follows the firmware
+source. "Refresh release assets" (`.github/workflows/release-refresh.yml`,
+manual dispatch with the tag and the `apk` / `firmware` switches) rebuilds the
+chosen assets from the selected ref and replaces them on that release, using
+`tools/refresh_release.py` to rewrite `release-manifest.json` and
+`SHA256SUMS` for the new bytes. It replaces nothing it was not asked to
+replace.
+
 Download the artifact matching the target from the completed GitHub Actions
 run. The flashable images are:
 
@@ -590,6 +606,28 @@ Every host client exposes the same three operations:
 The desktop and mobile clients ask the board first (`@n?`) and show whether the
 name is the MAC-derived default or a custom one; a write is confirmed by the
 board and read back. The C client prints the board's answer on stdout.
+
+### Paired-device labels
+
+`@linkr bonds?` lists the saved identities; each label is a separate
+`@linkr bonds label <type>/<address>` read so the fixed reply buffer never
+holds them all.
+
+| Host | List | Rename | Remove |
+| --- | --- | --- | --- |
+| `bee` (TUI) | Network view → *Refresh paired devices* | same view → the host row | same view → *Remove this pairing* |
+| `bee-cli` | `--query-bonds` / `query bonds` | `--rename-bond <id>=<label>` / `bond <id> <label>` | `--remove-bond <id>` / `unbond <id>` |
+| `bee --serve` | `{"op":"bonds"}` | `{"op":"bond-label","id":"…","label":"…"}` | `{"op":"bond-remove","id":"…"}` |
+| Web / mobile | Connection panel → *Paired devices* | *Rename* on the row | *Remove pairing* |
+
+Labels are display-only, at most 48 UTF-8 bytes, stored in NVS by identity
+address and deleted with the pairing. The web and phone editors report the
+browser's OS once when the board stores none; the TUI reports the local user
+name once for this host. `@linkr bonds name <label>`/`@linkr bonds names?` are
+kept as the self-only compatibility form, so a host can name itself without
+console ownership; `bonds label <type>/<address>` is the management form for any
+pairing. Older firmware without the commands hides the section (web/TUI)
+rather than leaving a dead control.
 
 ### UART Commands
 
@@ -1172,10 +1210,7 @@ The page can:
 - adjust line ending and BLE write chunk size
 - switch between the system monospace stack and common locally installed Nerd
   Fonts, with a Powerline/Nerd glyph preview; the selection is persisted for
-  the current browser origin, but the Nerd font files themselves are not
-  bundled. The only bundled face is a BabelStone Pseudographica subset for the
-  Unicode 13/16 legacy-computing blocks (`web/fonts/`), because desktop
-  monospace stacks render those ANSI-art glyphs as .notdef
+  the current browser origin, but the font files themselves are not bundled
 - render terminal control sequences through xterm.js, including cursor movement,
   line erasing, readline redraws, 16-color, 256-color, and truecolor SGR
 - expand the terminal to fullscreen and automatically refit its rows and columns

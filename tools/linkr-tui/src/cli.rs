@@ -295,6 +295,21 @@ pub const FLAGS: &[Flag] = &[
         "ask @s? and print the bridge's LAN address and token state",
     ),
     Flag::new(
+        "--query-bonds",
+        Value::None,
+        "ask @linkr bonds? and print the paired hosts and their labels",
+    ),
+    Flag::new(
+        "--rename-bond",
+        Value::Free,
+        "set a paired host's label as <type>/<address>=<label>",
+    ),
+    Flag::new(
+        "--remove-bond",
+        Value::Free,
+        "remove the pairing for <type>/<address>",
+    ),
+    Flag::new(
         "--uart",
         Value::Free,
         "set UART as baud,data,parity,stop,flow",
@@ -400,12 +415,14 @@ pub const SUBCOMMANDS: &[(&str, &str)] = &[
     ),
     (
         "query",
-        "read one thing: info, uart, wifi, webdav, ble-name or lan",
+        "read one thing: info, uart, wifi, webdav, ble-name, lan or bonds",
     ),
     (
         "set",
         "change one thing and read it back: uart, wifi, webdav or ble-name",
     ),
+    ("bond", "label a paired host: bond <type>/<address> <label>"),
+    ("unbond", "remove a pairing: unbond <type>/<address>"),
     (
         "exec",
         "run a command on the target and bring its status back: exec -- <cmd>",
@@ -550,14 +567,41 @@ pub fn expand_subcommand(argv: Vec<String>) -> Result<Vec<String>, String> {
                     "webdav" => "--query-webdav",
                     "ble-name" => "--query-ble-name",
                     "lan" => "--query-lan",
+                    "bonds" => "--query-bonds",
                     other => {
                         return Err(format!(
-                        "query reads one of info, uart, wifi, webdav, ble-name or lan; '{other}' is not one"
+                        "query reads one of info, uart, wifi, webdav, ble-name, lan or bonds; '{other}' is not one"
                     ))
                     }
                 }
                 .to_string(),
             );
+        }
+        "bond" => {
+            let (address, label) = words
+                .split_first()
+                .ok_or_else(|| "bond wants <type>/<address> <label>".to_string())?;
+            if !crate::accessory::bond_id_valid(address) {
+                return Err(format!(
+                    "'{address}' is not a paired-device identity address"
+                ));
+            }
+            let label = label.join(" ");
+            if label.trim().is_empty() {
+                return Err("bond wants a label after the address".to_string());
+            }
+            translated.push("--rename-bond".to_string());
+            translated.push(format!("{address}={label}"));
+        }
+        "unbond" => {
+            let [address] = one_word(name, &words)?;
+            if !crate::accessory::bond_id_valid(&address) {
+                return Err(format!(
+                    "'{address}' is not a paired-device identity address"
+                ));
+            }
+            translated.push("--remove-bond".to_string());
+            translated.push(address);
         }
         "set" => {
             let [what, value] = two_words(name, &words)?;
@@ -1437,6 +1481,10 @@ pub struct Requests {
     pub ble_name: Option<String>,
     /// `@n default`.
     pub ble_name_default: bool,
+    /// `<type>/<address>` and its new label, when `--rename-bond` named one.
+    pub bond_label: Option<(String, String)>,
+    /// `<type>/<address>` when `--remove-bond` named one.
+    pub bond_remove: Option<String>,
 }
 
 impl Requests {
@@ -1451,6 +1499,8 @@ impl Requests {
             && !self.webdav_off
             && self.ble_name.is_none()
             && !self.ble_name_default
+            && self.bond_label.is_none()
+            && self.bond_remove.is_none()
     }
 }
 
@@ -1551,6 +1601,46 @@ pub fn run_requests(app: &mut App, requests: &Requests, format: Format, connect:
         match result {
             Err(why) => failed += report(format, "ble-name", false, &why),
             Ok(()) => failed += wait_and_report(app, crate::device::Query::BleName, format),
+        }
+    }
+    if let Some((address, label)) = &requests.bond_label {
+        match app.set_bond_label(address, label) {
+            Err(why) => failed += report(format, "bond-label", false, &why),
+            Ok(()) => {
+                if !wait_for_query(app, crate::device::Query::BondLabel, format) {
+                    failed += report(format, "bond-label", false, &why_no_answer(app));
+                } else {
+                    let shown = app
+                        .network
+                        .bonds
+                        .as_ref()
+                        .and_then(|bonds| {
+                            bonds
+                                .iter()
+                                .find(|bond| bond.id.eq_ignore_ascii_case(address))
+                        })
+                        .and_then(|bond| bond.label.clone())
+                        .unwrap_or_default();
+                    failed += report(format, "bond-label", true, &shown);
+                }
+            }
+        }
+    }
+    if let Some(address) = &requests.bond_remove {
+        match app.remove_bond(address) {
+            Err(why) => failed += report(format, "bond-remove", false, &why),
+            Ok(()) => {
+                if !wait_for_query(app, crate::device::Query::BondLabel, format) {
+                    failed += report(format, "bond-remove", false, &why_no_answer(app));
+                } else {
+                    let detail = if app.network.bonds_pending {
+                        "accepted; the board removes it shortly"
+                    } else {
+                        "removed"
+                    };
+                    failed += report(format, "bond-remove", true, detail);
+                }
+            }
         }
     }
     if requests.wifi_scan {
@@ -2050,6 +2140,8 @@ fn query_name(query: crate::device::Query) -> &'static str {
         crate::device::Query::Webdav => "webdav",
         crate::device::Query::BleName => "ble-name",
         crate::device::Query::Lan => "lan",
+        crate::device::Query::Bonds => "bonds",
+        crate::device::Query::BondLabel => "bond-label",
     }
 }
 
@@ -2157,6 +2249,22 @@ fn answer_of(app: &App, query: crate::device::Query) -> Result<String, String> {
                 )
             }
         }
+        // One host per line: its identity address, then its label, then a
+        // marker for this connection. Bonded hosts come from `bonds?` and the
+        // labels were read after it.
+        crate::device::Query::Bonds => match &app.network.bonds {
+            Some(bonds) => bonds
+                .iter()
+                .map(|bond| {
+                    let label = bond.label.as_deref().unwrap_or("(no label)");
+                    let mark = if bond.is_self { "  [self]" } else { "" };
+                    format!("{}  {label}{mark}", bond.id)
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+            None => String::new(),
+        },
+        crate::device::Query::BondLabel => String::new(),
     })
 }
 
@@ -2676,6 +2784,7 @@ mod tests {
             (&["query", "webdav"], &["--query-webdav"]),
             (&["query", "ble-name"], &["--query-ble-name"]),
             (&["query", "lan"], &["--query-lan"]),
+            (&["query", "bonds"], &["--query-bonds"]),
             (&["query", "info", "--json"], &["--query-info", "--json"]),
             (
                 &["set", "uart", "115200,8,n,1,none"],
@@ -2696,6 +2805,14 @@ mod tests {
             ),
             (&["set", "ble-name", "测试😀"], &["--rename-ble", "测试😀"]),
             (&["set", "ble-name", "default"], &["--reset-ble-name"]),
+            (
+                &["bond", "0/AA:BB:CC:DD:EE:01", "Alice's phone"],
+                &["--rename-bond", "0/AA:BB:CC:DD:EE:01=Alice's phone"],
+            ),
+            (
+                &["unbond", "0/AA:BB:CC:DD:EE:01"],
+                &["--remove-bond", "0/AA:BB:CC:DD:EE:01"],
+            ),
             (&["exec", "--", "df", "-h"], &["--exec", "df -h"]),
             (&["exec", "--", "echo", "hi"], &["--exec", "echo hi"]),
             (
@@ -2810,12 +2927,12 @@ mod tests {
         #[cfg(feature = "tui")]
         assert_eq!(
             subcommands_json(),
-            r#"["scan","doctor","query","set","exec","send","loopback","tui","capabilities"]"#
+            r#"["scan","doctor","query","set","bond","unbond","exec","send","loopback","tui","capabilities"]"#
         );
         #[cfg(not(feature = "tui"))]
         assert_eq!(
             subcommands_json(),
-            r#"["scan","doctor","query","set","exec","send","loopback","capabilities"]"#
+            r#"["scan","doctor","query","set","bond","unbond","exec","send","loopback","capabilities"]"#
         );
         #[cfg(feature = "tui")]
         assert!(subcommands_words().contains("tui"));
