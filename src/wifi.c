@@ -16,6 +16,7 @@
  */
 
 #include "wifi.h"
+#include "ext_ram.h"
 
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_WIFI)
 
@@ -74,11 +75,14 @@ LOG_MODULE_REGISTER(linkr_wifi, CONFIG_LOG_DEFAULT_LEVEL);
 /* Leaves room for the completion marker in the control-response queue. */
 #define WIFI_SCAN_MAX_RESULTS 12
 
-static char wifi_ssid[SSID_MAX + 1];
-static char wifi_psk[PSK_MAX + 1];
-static char webdav_url[URL_MAX + 1];
-static char webdav_user[CRED_MAX + 1];
-static char webdav_pass[CRED_MAX + 1];
+/* Credentials and the scan cache are pure data touched only from thread
+ * context (settings load, management requests, the upload thread), so on the
+ * C5 PSRAM build they live there and cost no internal SRAM. */
+static char wifi_ssid[SSID_MAX + 1] LINKR_EXT_RAM_BSS;
+static char wifi_psk[PSK_MAX + 1] LINKR_EXT_RAM_BSS;
+static char webdav_url[URL_MAX + 1] LINKR_EXT_RAM_BSS;
+static char webdav_user[CRED_MAX + 1] LINKR_EXT_RAM_BSS;
+static char webdav_pass[CRED_MAX + 1] LINKR_EXT_RAM_BSS;
 
 static struct k_mutex cfg_lock;
 static struct net_mgmt_event_callback wifi_mgmt_cb;
@@ -104,8 +108,68 @@ static struct k_work wifi_scan_work;
 static struct k_mutex scan_lock;
 static struct k_mutex scan_cache_lock;
 static struct k_work_delayable wifi_retry_work;
-static struct k_work_delayable wifi_scan_timeout_work;
+#if defined(CONFIG_SOC_SERIES_ESP32C5)
+/* Plain work, not delayable: the clock timer below submits it, and
+ * k_work_cancel() asserts when the object carries K_WORK_DELAYABLE_BIT --
+ * submitting a delayable object's embedded .work does not clear that flag. */
+static struct k_work scan_timeout_work;
+#else
+static struct k_work_delayable scan_timeout_work;
+#endif
 static struct k_work_delayable wifi_operation_timeout_work;
+
+/*
+ * Scan watchdog placement.
+ *
+ * On the C5 it cannot live on the system workqueue: a WiFi operation that owns
+ * that queue is exactly the condition the watchdog exists to break out of, so a
+ * delayable work item queued there can never police it. Measured on the C5, a
+ * sweep with a BLE link up took 60-75 s against 19.7 s idle, and the 30 s
+ * watchdog never fired because it sat behind the very scan it was meant to time
+ * out. There the timer runs from the kernel clock interrupt, which no thread can
+ * block, and hands the job to a dedicated preemptible queue.
+ *
+ * No other target has shown that behaviour, so they keep the original
+ * delayable-work watchdog rather than each pay for a thread and 768 B of stack.
+ */
+#if defined(CONFIG_SOC_SERIES_ESP32C5)
+#define LINKR_SCAN_WD_OWN_QUEUE 1
+#else
+#define LINKR_SCAN_WD_OWN_QUEUE 0
+#endif
+
+#if LINKR_SCAN_WD_OWN_QUEUE
+static struct k_work_q scan_wq;
+static struct k_timer scan_watchdog;
+/* The handler only formats a <=96 B line and hands it to linkr_mgmt_send(),
+ * which allocates and queues without touching BLE, so the stack stays small;
+ * SRAM is the binding constraint on this target. 1024 rather than the 768 that
+ * survives a normal build: with CONFIG_ASSERT=y the same handler overflowed
+ * 768 and rebooted the board from this very thread, so that was too close to
+ * the edge to ship. */
+K_THREAD_STACK_DEFINE(scan_wq_stack, 1024);
+#define SCAN_WQ_PRIO 5
+#endif
+
+/* BLE and WiFi share one radio on this part. With the default balance policy a
+ * connected BLE link starves a sweep, so bias the coexistence arbiter towards
+ * WiFi while a scan is in flight and restore the default once it ends. */
+#if defined(CONFIG_SOC_SERIES_ESP32C5) && defined(CONFIG_ESP32_SW_COEXIST_ENABLE)
+#include <esp_coexist.h>
+/*
+ * esp_coex_preference_set() is a one-line wrapper in esp_coex/src/coexist.c,
+ * but this build only compiles lib_printf.c and esp_coex_adapter.c from that
+ * component, so the wrapper is absent while the blob export it forwards to is
+ * linked. Call the blob entry directly; esp_coex_prefer_t and coex_prefer_t
+ * carry identical values (WIFI=0, BT=1, BALANCE=2).
+ */
+extern int coex_preference_set(esp_coex_prefer_t prefer);
+#define LINKR_SCAN_COEX_BIAS 1
+#else
+#define LINKR_SCAN_COEX_BIAS 0
+#endif
+
+
 static int wifi_scan_emit(const char *line);
 static atomic_t wifi_connected;
 static atomic_t wifi_ip_ready;
@@ -142,10 +206,19 @@ struct wifi_scan_cache_entry {
     enum wifi_security_type security;
 };
 
-static struct wifi_scan_cache_entry scan_cache[WIFI_SCAN_MAX_RESULTS];
+static struct wifi_scan_cache_entry scan_cache[WIFI_SCAN_MAX_RESULTS]
+    LINKR_EXT_RAM_BSS;
 static size_t scan_cache_count;
 
-RING_BUF_DECLARE(log_ring, LOG_RING_SIZE);
+/* RING_BUF_DECLARE would put the backing array in __noinit (DRAM1) as well.
+ * This keeps the same ring_buf initializer but places the payload in PSRAM:
+ * linkr_log_feed() runs on the uart_to_ble thread and the drain happens on the
+ * upload thread, both under log_lock. The ring_buf structure itself stays in
+ * DRAM, as kernel-adjacent structures must. */
+BUILD_ASSERT(LOG_RING_SIZE <= RING_BUFFER_MAX_SIZE,
+	     "log_ring exceeds RING_BUFFER_MAX_SIZE");
+static uint8_t log_ring_storage[LOG_RING_SIZE] __aligned(4) LINKR_EXT_RAM_BSS;
+struct ring_buf log_ring = RING_BUF_INIT(log_ring_storage, LOG_RING_SIZE);
 static struct k_mutex log_lock;
 /* Serializes a configuration change with an in-flight HTTP PUT. */
 static struct k_mutex upload_lock;
@@ -173,13 +246,13 @@ struct linkr_webdav_settings {
 } __packed;
 
 /* The old, per-field keys are only used once to migrate existing devices. */
-static char legacy_wifi_ssid[SSID_MAX + 1];
-static char legacy_wifi_psk[PSK_MAX + 1];
-static char legacy_webdav_url[URL_MAX + 1];
-static char legacy_webdav_user[CRED_MAX + 1];
-static char legacy_webdav_pass[CRED_MAX + 1];
-static struct linkr_wifi_settings loaded_wifi_settings;
-static struct linkr_webdav_settings loaded_webdav_settings;
+static char legacy_wifi_ssid[SSID_MAX + 1] LINKR_EXT_RAM_BSS;
+static char legacy_wifi_psk[PSK_MAX + 1] LINKR_EXT_RAM_BSS;
+static char legacy_webdav_url[URL_MAX + 1] LINKR_EXT_RAM_BSS;
+static char legacy_webdav_user[CRED_MAX + 1] LINKR_EXT_RAM_BSS;
+static char legacy_webdav_pass[CRED_MAX + 1] LINKR_EXT_RAM_BSS;
+static struct linkr_wifi_settings loaded_wifi_settings LINKR_EXT_RAM_BSS;
+static struct linkr_webdav_settings loaded_webdav_settings LINKR_EXT_RAM_BSS;
 static bool wifi_settings_seen;
 static bool wifi_settings_valid;
 static bool webdav_settings_seen;
@@ -1017,7 +1090,12 @@ static void wifi_scan_release(void)
 {
     struct bt_conn *conn;
 
-    (void)k_work_cancel_delayable(&wifi_scan_timeout_work);
+#if LINKR_SCAN_WD_OWN_QUEUE
+    k_timer_stop(&scan_watchdog);
+    (void)k_work_cancel(&scan_timeout_work);
+#else
+    (void)k_work_cancel_delayable(&scan_timeout_work);
+#endif
 
     k_mutex_lock(&scan_lock, K_FOREVER);
     conn = scan_conn;
@@ -1028,7 +1106,26 @@ static void wifi_scan_release(void)
     if (conn) {
         bt_conn_unref(conn);
     }
+
+#if LINKR_SCAN_COEX_BIAS
+    /* Back to the default arbiter policy: the bias only exists to get the
+     * sweep through, and leaving it on would starve BLE for everything that
+     * follows. */
+    (void)coex_preference_set(ESP_COEX_PREFER_BALANCE);
+#endif
 }
+
+#if LINKR_SCAN_WD_OWN_QUEUE
+/* Clock-ISR half of the watchdog: no workqueue involved, so a WiFi operation
+ * holding the system workqueue cannot delay it. Hand the reporting to the
+ * dedicated queue. */
+static void scan_watchdog_expiry(struct k_timer *timer)
+{
+    ARG_UNUSED(timer);
+
+    (void)k_work_submit_to_queue(&scan_wq, &scan_timeout_work);
+}
+#endif
 
 /* Watchdog: a driver that never reports NET_EVENT_WIFI_SCAN_DONE (cancel or
  * error path) would otherwise leave scan_in_progress set forever, wedging all
@@ -1062,6 +1159,13 @@ static void wifi_scan_work_handler(struct k_work *work)
     params.bands = BIT(WIFI_FREQ_BAND_2_4_GHZ);
     params.max_bss_cnt = 0;
 
+#if LINKR_SCAN_COEX_BIAS
+    /* Bias the radio arbiter towards WiFi for the duration of the sweep: with
+     * the default policy a connected BLE link stretched it from 19.7 s to
+     * 60-75 s. wifi_scan_release() restores the default on every exit path. */
+    (void)coex_preference_set(ESP_COEX_PREFER_WIFI);
+#endif
+
     /* esp_wifi_start()/esp_wifi_scan_start() can consume more stack than the
      * Bluetooth RX workqueue owns. Start the scan on the 4 KiB system
      * workqueue; result callbacks remain asynchronous. */
@@ -1076,8 +1180,13 @@ static void wifi_scan_work_handler(struct k_work *work)
 
     /* Arm the watchdog so a driver that never reports completion cannot wedge
      * the scan state. */
-    (void)k_work_reschedule(&wifi_scan_timeout_work,
-                            K_MSEC(WIFI_SCAN_TIMEOUT_MS));
+#if LINKR_SCAN_WD_OWN_QUEUE
+    /* Clock ISR plus a dedicated queue: a WiFi operation holding the system
+     * workqueue can postpone neither. */
+    k_timer_start(&scan_watchdog, K_MSEC(WIFI_SCAN_TIMEOUT_MS), K_NO_WAIT);
+#else
+    (void)k_work_reschedule(&scan_timeout_work, K_MSEC(WIFI_SCAN_TIMEOUT_MS));
+#endif
     LOG_INF("WiFi scan started");
 }
 
@@ -1596,7 +1705,7 @@ static int http_put(const struct webdav_url *u, const uint8_t *payload,
         goto out;
     }
 
-    static uint8_t recv_buf[512];
+    static uint8_t recv_buf[512] LINKR_EXT_RAM_BSS;
     struct http_request req = {
         .method = HTTP_PUT,
         .url = u->path,
@@ -1643,7 +1752,7 @@ static void upload_thread(void *a, void *b, void *c)
     ARG_UNUSED(b);
     ARG_UNUSED(c);
 
-    static uint8_t chunk[WEBDAV_UPLOAD_CHUNK];
+    static uint8_t chunk[WEBDAV_UPLOAD_CHUNK] __aligned(4) LINKR_EXT_RAM_BSS;
     size_t pending_total = 0;
     atomic_val_t pending_generation = 0;
     uint32_t pending_sequence = 0;
@@ -1856,7 +1965,20 @@ int linkr_wifi_init(void)
 	k_work_init_delayable(&wifi_operation_timeout_work,
 			      wifi_operation_timeout_handler);
     k_work_init(&wifi_scan_work, wifi_scan_work_handler);
-    k_work_init_delayable(&wifi_scan_timeout_work, wifi_scan_timeout_handler);
+#if LINKR_SCAN_WD_OWN_QUEUE
+    k_work_init(&scan_timeout_work, wifi_scan_timeout_handler);
+#else
+    k_work_init_delayable(&scan_timeout_work, wifi_scan_timeout_handler);
+#endif
+#if LINKR_SCAN_WD_OWN_QUEUE
+    k_timer_init(&scan_watchdog, scan_watchdog_expiry, NULL);
+    k_work_queue_start(&scan_wq, scan_wq_stack,
+                       K_THREAD_STACK_SIZEOF(scan_wq_stack),
+                       K_PRIO_PREEMPT(SCAN_WQ_PRIO), NULL);
+    if (IS_ENABLED(CONFIG_THREAD_NAME)) {
+        (void)k_thread_name_set(&scan_wq.thread, "scan_watchdog");
+    }
+#endif
     atomic_set(&wifi_state, LINKR_WIFI_STATE_OFF);
 
     k_thread_create(&wifi_connect_thread, wifi_connect_stack,

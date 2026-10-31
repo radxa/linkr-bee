@@ -1,0 +1,12 @@
+diff --git a/zephyr/Kconfig b/zephyr/Kconfig
+index e9fb2b90a8..e21d15c172 100644
+--- a/zephyr/Kconfig
++++ b/zephyr/Kconfig
+@@ -188,6 +188,7 @@ config SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY
+ 	default y if SOC_SERIES_ESP32
+ 	default y if SOC_SERIES_ESP32S2
+ 	default y if SOC_SERIES_ESP32S3
++	default y if SOC_SERIES_ESP32C5
+ 
+ config SPIRAM_ALLOW_NOINIT_SEG_EXTERNAL_MEMORY
+ 	bool

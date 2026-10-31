@@ -110,6 +110,19 @@ jobs:
           grep -qx 'CONFIG_BT_BONDING_REQUIRED=y' "${config}"
           grep -qx 'CONFIG_BT_MAX_PAIRED=8' "${config}"
           grep -qx 'CONFIG_BUILD_OUTPUT_BIN=y' "${config}"
+          # PSRAM layout. The released C5 image runs from the module's 8 MB part
+          # and must keep the WiFi heap, the WiFi packet buffers and the ROM
+          # region above DRAM_SHARED_BUFFERS_END out of it. docs/C5_PSRAM.md.
+          if grep -qx 'CONFIG_SOC_SERIES_ESP32C5=y' "${config}"; then
+            grep -qx 'CONFIG_ESP_SPIRAM=y' "${config}"
+            grep -qx 'CONFIG_ESP_SPIRAM_SIZE=8388608' "${config}"
+            grep -qx 'CONFIG_SPIRAM_TYPE_ESPPSRAM64=y' "${config}"
+            grep -qx 'CONFIG_SPIRAM_SPEED_80M=y' "${config}"
+            grep -qx '# CONFIG_ESP_SPIRAM_MEMTEST is not set' "${config}"
+            grep -qx 'CONFIG_ESP_WIFI_HEAP_SYSTEM=y' "${config}"
+            grep -qx '# CONFIG_ESP_WIFI_HEAP_SPIRAM is not set' "${config}"
+            grep -qx '# CONFIG_ESP32_WIFI_NET_ALLOC_SPIRAM is not set' "${config}"
+          fi
 
       - name: Package firmware
         shell: bash

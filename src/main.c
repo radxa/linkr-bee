@@ -40,6 +40,7 @@
 #include "target_binding.h"
 #include "ble_mgmt.h"
 #include "ble_uart_reliable.h"
+#include "ext_ram.h"
 #include "wifi.h"
 #include "uart_autobaud.h"
 #include "uart_bulk_tx.h"
@@ -149,8 +150,9 @@ static atomic_t autobaud_request_id;
 /* NUS receive callbacks run serially on the Bluetooth workqueue.  Keep the
  * command scratch buffer out of that workqueue's small thread stack: placing
  * it in handle_control_command_complete() consumed more than half of the
- * stack on every terminal keystroke. */
-static char control_command_data[CONTROL_CMD_MAX_LEN];
+ * stack on every terminal keystroke. Only thread context touches it, so it can
+ * live in PSRAM. */
+static char control_command_data[CONTROL_CMD_MAX_LEN] LINKR_EXT_RAM_BSS;
 static struct {
 	bool active;
 	uint32_t epoch;
@@ -164,7 +166,7 @@ static struct {
 	 * Management event follows on the same request ID. */
 	bool async_response;
 	char data[LINKR_MGMT_MAX_PAYLOAD];
-} mgmt_capture;
+} mgmt_capture LINKR_EXT_RAM_BSS;
 #if !IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_TEST_UART_LOOPBACK_VERIFY)
 static atomic_t uart_rx_dropped;
 static atomic_t uart_reliable_drop_no_conn;
@@ -192,10 +194,16 @@ static struct uart_config active_uart_config = {
  * same board). This is an exact expansion of K_MSGQ_DEFINE (same
  * STRUCT_SECTION_ITERABLE entry, same static initializer, same alignment)
  * with only the buffer's placement changed: contents never need to survive
- * reset. */
+ * reset.
+ *
+ * On the PSRAM build the store moves out of DRAM entirely: both the producers
+ * (GATT/WebSocket receive callbacks) and the single consumer (the UART worker
+ * thread) run in thread context, and the kernel copies queue elements under
+ * its own spinlock, so the slower memory costs nothing but bytes. */
 static uint8_t __aligned(4)
 	ble_to_uart_storage[sizeof(struct bridge_packet) *
-			    CONFIG_LINKR_BLE_BRIDGE_BLE_TO_UART_QUEUE_DEPTH];
+			    CONFIG_LINKR_BLE_BRIDGE_BLE_TO_UART_QUEUE_DEPTH]
+		LINKR_EXT_RAM_BSS;
 STRUCT_SECTION_ITERABLE(k_msgq, ble_to_uart_queue) =
 	Z_MSGQ_INITIALIZER(ble_to_uart_queue, ble_to_uart_storage,
 			   sizeof(struct bridge_packet),
@@ -204,7 +212,10 @@ K_MUTEX_DEFINE(ble_to_uart_queue_lock);
 K_SEM_DEFINE(bridge_start_sem, 0, 5);
 /* Same relocation as ble_to_uart_storage above: RING_BUF_DECLARE declares the
  * byte array as __noinit (dram1), this keeps every field of the initializer
- * but places the array in .bss (dram0). */
+ * but places the array in .bss (dram0).
+ *
+ * This one stays in DRAM even on the PSRAM build: it is written from the UART
+ * interrupt handler, where a QSPI round trip per byte is unacceptable. */
 static uint8_t uart_rx_storage[UART_RX_BUFFER_SIZE];
 struct ring_buf uart_rx_ring =
 	RING_BUF_INIT(uart_rx_storage, UART_RX_BUFFER_SIZE);
