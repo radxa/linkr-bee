@@ -72,6 +72,22 @@ test('renaming another host uses the address form and needs control',async({page
   await expect(last.locator('.bond-name')).toHaveText('Tablet');
   expect(await page.evaluate(()=>window.commands)).toContain('@linkr bonds label 1/AA:BB:CC:DD:EE:02 5461626c6574');
 });
+test('a background refresh keeps the caret where the user is editing',async({page})=>{
+  const last=page.locator('.bond-row').last();
+  await last.locator('[data-bond-action="rename"]').click();
+  const input=last.locator('.bond-input');
+  await expect.poll(()=>input.evaluate(el=>el===document.activeElement&&el.selectionStart===el.value.length)).toBe(true);
+  await input.fill('Tablet');
+  await input.evaluate(el=>el.setSelectionRange(2,4));
+  await page.evaluate(()=>window.bondTest.renderSerialControl());
+  await expect.poll(()=>input.evaluate(el=>[el.selectionStart,el.selectionEnd])).toEqual([2,4]);
+  await input.press('X');
+  await expect(input).toHaveValue('TaXet');
+  await expect.poll(()=>input.evaluate(el=>el.selectionStart)).toBe(3);
+  await page.locator('[data-bonds-refresh]').focus();
+  await page.evaluate(()=>window.bondTest.renderSerialControl());
+  await expect(page.locator('[data-bonds-refresh]')).toBeFocused();
+});
 test('unsupported firmware hides the paired-devices card',async({page})=>{
   await page.evaluate(async()=>{window.bondsReply='ERR unknown command';await window.bondTest.query()});
   await expect(page.locator('#boardBondsCard')).toBeHidden();

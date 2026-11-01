@@ -55,6 +55,9 @@ export function createBondUi({ card, context, send, supported, beforeSelfDelete,
   let peers = [], names = new Map();
   let busy = false, generation = null, reported = null;
   let editing = null, draft = "";
+  /* An IME composition owns the rename input until it commits; rebuilding the
+   * row underneath it would drop the in-progress text. */
+  let composing = false;
   let labelSupported = null, namesSupported = null;
   const list = card.querySelector('[data-bonds-list]');
   const status = card.querySelector('[role="status"]');
@@ -85,6 +88,7 @@ export function createBondUi({ card, context, send, supported, beforeSelfDelete,
     busy = false;
     editing = null;
     draft = "";
+    composing = false;
     labelSupported = ctx.label ?? null;
     namesSupported = null;
     reported = null;
@@ -108,12 +112,21 @@ export function createBondUi({ card, context, send, supported, beforeSelfDelete,
 
   function render() {
     syncGeneration();
+    if (composing) return;
     const ctx = context();
     card.querySelector('[data-bonds-title]').textContent = text('已配对设备', 'Paired devices');
     card.setAttribute('aria-label', text('已配对设备', 'Paired devices'));
     card.querySelector('[data-bonds-hint]').textContent = text('管理保存在 Bee 上的蓝牙配对记录。名称由各主机自己上报，网页只能报出浏览器与系统；也可以改名。删除后需重新配对；主机系统中的旧记录需自行忽略。', 'Manage Bluetooth pairings saved on Bee. Hosts report their own names (a browser can only report its browser and system); you can rename them too. Deleted hosts must pair again; forget their old OS pairing too.');
     refresh.textContent = text('刷新列表', 'Refresh list');
     refresh.disabled = busy || !ctx.ready;
+    /* Unrelated traffic (the two-second control poll, a board reply) renders
+     * this card again. Rebuilding the list replaces the rename input, so carry
+     * its focus and caret across the rebuild instead of snapping to the end. */
+    const previous = list.querySelector('.bond-input');
+    const focused = previous !== null && document.activeElement === previous;
+    const selection = focused
+      ? [previous.selectionStart, previous.selectionEnd, previous.selectionDirection]
+      : null;
     list.replaceChildren();
     for (const peer of peers) {
       const row = document.createElement('div');
@@ -131,6 +144,8 @@ export function createBondUi({ card, context, send, supported, beforeSelfDelete,
         input.placeholder = text('设备标签', 'Device label');
         input.setAttribute('aria-label', text('设备标签', 'Device label'));
         input.addEventListener('input', () => { draft = input.value; });
+        input.addEventListener('compositionstart', () => { composing = true; });
+        input.addEventListener('compositionend', () => { composing = false; });
         input.addEventListener('keydown', event => {
           if (event.key === 'Enter') {
             event.preventDefault();
@@ -178,23 +193,33 @@ export function createBondUi({ card, context, send, supported, beforeSelfDelete,
     }
     if (editing !== null) {
       const input = list.querySelector('.bond-input');
-      if (input) {
+      if (input && selection) {
         input.focus();
-        input.setSelectionRange(input.value.length, input.value.length);
+        input.setSelectionRange(selection[0], selection[1], selection[2]);
       }
     }
+  }
+
+  function focusEditor() {
+    const input = list.querySelector('.bond-input');
+    if (!input) return;
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
   }
 
   function startEdit(peer) {
     if (busy || !canRename(peer)) return;
     editing = peer.id;
     draft = names.get(peer.id) || '';
+    composing = false;
     render();
+    focusEditor();
   }
 
   function cancelEdit() {
     editing = null;
     draft = '';
+    composing = false;
     render();
   }
 
@@ -296,6 +321,7 @@ export function createBondUi({ card, context, send, supported, beforeSelfDelete,
       else names.delete(peer.id);
       editing = null;
       draft = '';
+      composing = false;
       status.textContent = clean ? text('名称已保存。', 'Name saved.') : text('名称已清除。', 'Name cleared.');
     } catch (error) {
       if (live(token)) status.textContent = error.message;
