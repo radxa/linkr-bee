@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 test.beforeEach(async ({page}) => {
   await page.route('**/app.js?*', async route => {
     const response = await route.fetch();
-    await route.fulfill({response, body: await response.text() + '\nwindow.bondTest={state,setConnected,setSettingsPage,renderSerialControl,onDisconnected,autoReconnect, query:()=>bondUi.query(),mock:fn=>{sendControl=fn}};'});
+    await route.fulfill({response, body: await response.text() + '\nwindow.bondTest={state,setConnected,setSettingsPage,renderSerialControl,onDisconnected,autoReconnect, query:()=>bondUi.query(),report:()=>bondUi.reportHostName(),mock:fn=>{sendControl=fn}};'});
   });
   await page.goto('/');
   await page.waitForFunction(()=>window.bondTest?.state.term);
@@ -87,6 +87,26 @@ test('a background refresh keeps the caret where the user is editing',async({pag
   await page.locator('[data-bonds-refresh]').focus();
   await page.evaluate(()=>window.bondTest.renderSerialControl());
   await expect(page.locator('[data-bonds-refresh]')).toBeFocused();
+});
+test('a stored name survives a reconnect instead of being reset',async({page})=>{
+  const sent=await page.evaluate(async()=>{
+    window.commands=[];window.bondTest.state.writeGeneration++;
+    await window.bondTest.report();
+    return window.commands;
+  });
+  expect(sent.filter(c=>c.startsWith('@linkr bonds name'))).toEqual([]);
+  expect(sent).toContain('@linkr bonds label 0/AA:BB:CC:DD:EE:01');
+});
+test('an unnamed bond is reported once per connection',async({page})=>{
+  const sent=await page.evaluate(async()=>{
+    const t=window.bondTest;
+    delete window.bondLabels['0/AA:BB:CC:DD:EE:01'];
+    window.commands=[];t.state.writeGeneration++;
+    await t.report();await t.report();
+    return window.commands.filter(c=>c.startsWith('@linkr bonds name '));
+  });
+  const label=await page.evaluate(async()=>(await import('/bond_ui.js')).browserHostLabel());
+  expect(sent).toEqual([`@linkr bonds name ${label}`]);
 });
 test('unsupported firmware hides the paired-devices card',async({page})=>{
   await page.evaluate(async()=>{window.bondsReply='ERR unknown command';await window.bondTest.query()});

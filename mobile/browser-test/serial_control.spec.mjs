@@ -139,6 +139,8 @@ test("a BLE capability handshake queries and claims without invalidating itself"
           ? "OK control self=2 owner=0 mode=available epoch=1 peers=1 ble_max=2 linkr_reserved=0"
           : command === "@c claim"
           ? "OK control self=2 owner=2 mode=control epoch=2 peers=1 ble_max=2 linkr_reserved=0"
+          : command === "@linkr bonds?" ? "OK bonds pending=0 result=0\nBOND 0/AA:BB:CC:DD:EE:02 self=1\n"
+          : command === "@linkr bonds label 0/AA:BB:CC:DD:EE:02" ? "OK bonds label=0/AA:BB:CC:DD:EE:02 none\r\n"
           : command === "@i?" ? "@info done\r\n" : "ERR unsupported\r\n";
         const payload = encode.encode(text), response = new Uint8Array(12 + payload.length);
         response.set([0x4c, 0x4b, 1, 2]);

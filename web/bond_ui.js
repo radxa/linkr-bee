@@ -67,15 +67,44 @@ export function createBondUi({ card, context, send, supported, beforeSelfDelete,
 
   /* Tell the board which host this pairing belongs to, once per connection.
    * `bonds name` writes only the caller's own bond, so it works without taking
-   * console ownership. Best effort: the label is cosmetic, so a refusal stays
-   * silent. */
-  function reportHostName() {
+   * console ownership. A name the owner already stored is never touched: the
+   * default would otherwise replace a rename on every reconnect. Best effort:
+   * the label is cosmetic, so a refusal stays silent. */
+  async function reportHostName() {
     const ctx = context();
     if (!ctx.ready || ctx.supported === false || reported === ctx.generation) return;
     const label = browserHostLabel();
     if (!label) return;
-    reported = ctx.generation;
-    return send(`@linkr bonds name ${label}`, { quiet: true }).catch(() => {});
+    const token = ctx.generation;
+    reported = token;
+    try {
+      const bonds = parseBonds(await send('@linkr bonds?', { quiet: true }));
+      if (!live(token)) return;
+      const own = bonds.peers.find(peer => peer.self);
+      if (!own) return;
+      const stored = await readOwnLabel(own.id, token);
+      /* `null` means the board could not say, so do not risk overwriting. */
+      if (stored === null || stored) return;
+      await send(`@linkr bonds name ${label}`, { quiet: true });
+    } catch {
+      /* Cosmetic: a refused or interrupted report is not an error. */
+    }
+  }
+
+  /* The label stored for one bond, `""` when it has none, or `null` when the
+   * firmware cannot answer. */
+  async function readOwnLabel(id, token) {
+    const response = await send(bondLabelQueryCommand({ id }), { quiet: true });
+    if (!live(token)) return null;
+    if (/ERR.*(?:unknown command|unsupported)/i.test(response)) {
+      /* Firmware from before the per-address read still lists the bonds that
+       * carry a name. */
+      const listing = await send('@linkr bonds names?', { quiet: true });
+      if (!live(token) || !/^OK bonds names/m.test(String(listing))) return null;
+      return parseBondNames(listing).get(id) || '';
+    }
+    const parsed = parseBondLabel(response);
+    return parsed ? parsed.label : null;
   }
 
   function syncGeneration() {
