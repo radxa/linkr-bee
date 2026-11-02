@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   A2A_CARD_PATH,
+  A2A_ERROR,
   A2A_JSONRPC_PATH,
   a2aAgentCard,
   a2aError,
@@ -25,7 +26,7 @@ test("the agent card advertises JSON-RPC, bearer auth and no streaming", () => {
   assert.match(card.skills[0].description, /串口/);
 });
 
-test("SendMessage params accept one or more text parts and carry the context", () => {
+test("SendMessage params accept one or more text parts and default to blocking", () => {
   const parsed = parseSendMessageParams({
     message: {
       role: "ROLE_USER",
@@ -40,7 +41,12 @@ test("SendMessage params accept one or more text parts and carry the context", (
   assert.equal(parsed.messageId, "m-1");
   assert.equal(parsed.returnImmediately, false);
   assert.equal(parsed.historyLength, 2);
-  assert.equal(parseSendMessageParams({ message: { role: "ROLE_USER", parts: [{ text: "x" }] } }).returnImmediately, true);
+  // A2A v1.0 defaults to blocking; only an explicit true asks for the queued task.
+  assert.equal(parseSendMessageParams({ message: { role: "ROLE_USER", parts: [{ text: "x" }] } }).returnImmediately, false);
+  assert.equal(parseSendMessageParams({
+    message: { role: "ROLE_USER", parts: [{ text: "x" }] },
+    configuration: { returnImmediately: true },
+  }).returnImmediately, true);
 });
 
 test("only text user messages are accepted", () => {
@@ -80,19 +86,45 @@ test("a resident task maps to an A2A Task with artifacts for a completed result"
   assert.equal(canceled.status.state, "TASK_STATE_CANCELED");
 });
 
-test("task lists and error envelopes keep the A2A JSON-RPC shape", () => {
-  const listed = a2aListTasks([
-    { taskId: "a", sessionId: "s", state: "completed", request: "r", result: "ok", createdAt: "2026-10-29T00:00:00Z" },
-    { taskId: "b", sessionId: "s", state: "running", request: "r2", createdAt: "2026-10-29T00:01:00Z" },
-  ], { pageSize: 5 });
-  assert.equal(listed.tasks.length, 2);
-  assert.equal(listed.nextPageToken, "");
-  assert.equal(listed.pageSize, 2);
-  const error = a2aError(7, -32001, "Task not found", { reason: "TASK_NOT_FOUND" });
+test("task lists report the total matched count and page by numeric offset", () => {
+  const tasks = Array.from({ length: 5 }, (_, index) => ({
+    taskId: `task-${index}`,
+    sessionId: "s",
+    state: "completed",
+    request: `r${index}`,
+    result: "ok",
+    createdAt: `2026-10-29T00:0${index}:00Z`,
+  }));
+  const first = a2aListTasks(tasks, { pageSize: 2 });
+  assert.equal(first.tasks.length, 2);
+  assert.equal(first.pageSize, 2);
+  assert.equal(first.totalSize, 5, "totalSize is the matched count, not the page length");
+  assert.equal(first.nextPageToken, "2");
+  const second = a2aListTasks(tasks, { pageSize: 2, pageToken: first.nextPageToken });
+  assert.deepEqual(second.tasks.map((task) => task.id), ["task-2", "task-3"]);
+  assert.equal(second.totalSize, 5);
+  assert.equal(second.nextPageToken, "4");
+  const last = a2aListTasks(tasks, { pageSize: 2, pageToken: second.nextPageToken });
+  assert.equal(last.tasks.length, 1);
+  assert.equal(last.nextPageToken, "");
+  assert.equal(last.totalSize, 5);
+  // The response's own field name is accepted as the request token too.
+  assert.equal(a2aListTasks(tasks, { pageSize: 2, nextPageToken: "4" }).tasks[0].id, "task-4");
+  const error = a2aError(7, A2A_ERROR.TASK_NOT_FOUND, "Task not found", { reason: "TASK_NOT_FOUND" });
   assert.equal(error.jsonrpc, "2.0");
   assert.equal(error.id, 7);
   assert.equal(error.error.code, -32001);
   assert.equal(error.error.data[0].reason, "TASK_NOT_FOUND");
   assert.equal(A2A_JSONRPC_PATH, "/a2a");
   assert.equal(A2A_CARD_PATH, "/.well-known/agent-card.json");
+});
+
+test("A2A error codes stay outside the reserved -32001..-32004 range", () => {
+  assert.equal(A2A_ERROR.TASK_NOT_FOUND, -32001);
+  assert.equal(A2A_ERROR.TASK_NOT_CANCELABLE, -32002);
+  assert.equal(A2A_ERROR.PUSH_NOTIFICATION_NOT_SUPPORTED, -32003);
+  assert.equal(A2A_ERROR.UNSUPPORTED_OPERATION, -32004);
+  for (const name of ["SERVER_DISABLED", "READ_ONLY", "AGENT_NOT_CONFIGURED", "TASK_BUSY", "DENIED"]) {
+    assert.ok(A2A_ERROR[name] >= -32014 && A2A_ERROR[name] <= -32010, `${name} uses the app-specific range`);
+  }
 });

@@ -13,6 +13,8 @@ import {
   redactToolArguments,
   validateMcpConfig,
 } from "../../web/mcp_server.js";
+import { wifiCommand, webdavCommand } from "../../web/accessory_control.js";
+import { SerialJournal } from "../../web/serial_journal.js";
 
 const TOOL_NAMES = [
   "get_device_status",
@@ -532,9 +534,18 @@ test("a denied approval never executes the write", async () => {
   const host = createHost({ device, requestApproval: async () => ({ approved: false, reason: "not now" }) });
   const response = await callTool(host, "send_serial_input", { text: "rm -rf /tmp/x", appendEnter: true });
   assert.equal(response.status, 200);
-  assert.equal(toolErrorText(response.message), "Not executed: the request was denied on the phone.");
+  /* The phone UI explains why it refused; that reason travels to the caller. */
+  assert.equal(toolErrorText(response.message), "Not executed: not now");
   assert.equal(calls.execute.length, 0);
   assert.equal(host.getAudit()[0].outcome, "denied");
+});
+
+test("a denial without a reason keeps the generic human-denial sentence", async () => {
+  const { device, calls } = fakeDevice();
+  const host = createHost({ device, requestApproval: async () => ({ approved: false }) });
+  const response = await callTool(host, "send_serial_input", { text: "ls", appendEnter: true });
+  assert.equal(toolErrorText(response.message), "Not executed: the request was denied on the phone.");
+  assert.equal(calls.execute.length, 0);
 });
 
 test("fully-authorized mode runs approval-gated tools without asking the phone", async () => {
@@ -1570,7 +1581,7 @@ test("a native cancellation arriving before its HTTP event still prevents execut
  * Resident agent delegation tools
  * ------------------------------------------------------------------ */
 function fakeResidentAgent(overrides = {}) {
-  const calls = { start: [], get: [], list: [], cancel: [], status: 0 };
+  const calls = { start: [], get: [], list: [], cancel: [], cancelAll: 0, status: 0 };
   const tasks = new Map();
   const state = {
     available: true,
@@ -1580,6 +1591,7 @@ function fakeResidentAgent(overrides = {}) {
     queued: 0,
     ...(overrides.status || {}),
   };
+  let taskCounter = 0;
   const agent = {
     calls,
     tasks,
@@ -1591,7 +1603,7 @@ function fakeResidentAgent(overrides = {}) {
     startTask(args) {
       calls.start.push({ ...args });
       const task = {
-        taskId: "agent-task-1",
+        taskId: `agent-task-${++taskCounter}`,
         sessionId: args.sessionId || "default",
         state: "running",
         request: args.request,
@@ -1628,6 +1640,17 @@ function fakeResidentAgent(overrides = {}) {
       task.state = "canceled";
       task.finishedAt = "2026-10-29T00:01:00.000Z";
       return { ...task };
+    },
+    /* Mirrors the resident manager's owner-side revocation: queued and running
+     * tasks are canceled without touching anything else. */
+    cancelAll() {
+      calls.cancelAll += 1;
+      for (const task of tasks.values()) {
+        if (!["completed", "failed", "canceled"].includes(task.state)) {
+          task.state = "canceled";
+          task.finishedAt = "2026-10-29T00:01:00.000Z";
+        }
+      }
     },
   };
   return agent;
@@ -1790,7 +1813,8 @@ test("A2A refuses a task when the phone denies it or the access mode is read-onl
     jsonrpc: "2.0", id: 1, method: "SendMessage",
     params: { message: { role: "ROLE_USER", parts: [{ text: "work" }] } },
   });
-  assert.equal(deniedResponse.message.error.code, -32003);
+  /* App-specific failures use the non-reserved -32010..-32014 range. */
+  assert.equal(deniedResponse.message.error.code, -32014);
   assert.equal(deniedResponse.message.error.data[0].reason, "DENIED");
 
   const readOnly = await enabledHost({ residentAgent: fakeResidentAgent() });
@@ -1799,7 +1823,7 @@ test("A2A refuses a task when the phone denies it or the access mode is read-onl
     jsonrpc: "2.0", id: 2, method: "SendMessage",
     params: { message: { role: "ROLE_USER", parts: [{ text: "work" }] } },
   });
-  assert.equal(refusedResponse.message.error.code, -32001);
+  assert.equal(refusedResponse.message.error.code, -32011);
   assert.equal(refusedResponse.message.error.data[0].reason, "READ_ONLY");
 });
 
@@ -1866,4 +1890,334 @@ test("A2A validates task limits before asking for approval", async () => {
   assert.equal(response.message.error.code, -32602);
   assert.equal(approvals, 0);
   assert.equal(agent.calls.start.length, 0);
+});
+
+/* ------------------------------------------------------------------ *
+ * Review regressions: JSON-RPC envelope, schema, preflight, journal reset
+ * ------------------------------------------------------------------ */
+
+test("JSON-RPC ids must be string, number or null, and a request always needs a method", async () => {
+  const host = createHost();
+  for (const id of [{ nested: true }, [1], true]) {
+    const response = await host.handleRpc(JSON.stringify({ jsonrpc: "2.0", id, method: "ping" }));
+    assert.equal(response.status, 400);
+    assert.equal(JSON.parse(response.body).error.code, -32600);
+    assert.equal(JSON.parse(response.body).id, null, "an invalid id must not be echoed back");
+  }
+  /* Neither method nor id is a malformed request, not a silent notification. */
+  const noMethod = await host.handleRpc(JSON.stringify({ jsonrpc: "2.0" }));
+  assert.equal(noMethod.status, 400);
+  assert.equal(JSON.parse(noMethod.body).error.code, -32600);
+  /* A real notification still gets 202, and a null id is a legal request id. */
+  const notification = await host.handleRpc(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }));
+  assert.deepEqual(notification, { status: 202, body: "" });
+  const nullId = await host.handleRpc(JSON.stringify({ jsonrpc: "2.0", id: null, method: "ping" }));
+  assert.equal(nullId.status, 200);
+  assert.equal(JSON.parse(nullId.body).id, null);
+});
+
+test("additionalProperties:false is not bypassed by Object.prototype names", async () => {
+  const host = createHost();
+  for (const key of ["constructor", "toString", "hasOwnProperty"]) {
+    const response = await callTool(host, "get_device_status", JSON.parse(`{"${key}":1}`));
+    assert.equal(response.message.error.code, -32602, key);
+    assert.match(response.message.error.message, new RegExp(`Unknown argument: ${key}`));
+  }
+});
+
+test("invalid accessory commands are refused before the phone is asked", async () => {
+  const approvals = [];
+  const { accessory } = fakeAccessory({
+    command: (action, args) => action === "set-wifi" ? wifiCommand(args)
+      : action === "set-webdav" ? webdavCommand(args) : `@${action}`,
+  });
+  const host = createHost({
+    accessory,
+    requestApproval: async (request) => {
+      approvals.push(request);
+      return { approved: true };
+    },
+  });
+  const wifi = await callTool(host, "set_wifi", { action: "connect" });
+  assert.match(toolErrorText(wifi.message), /ssid/);
+  const webdav = await callTool(host, "set_webdav", { action: "on" });
+  assert.match(toolErrorText(webdav.message), /url/);
+  /* Twelve Chinese characters are 36 UTF-8 bytes: the JSON Schema character
+   * limit passes, the board's byte budget does not. */
+  const beeName = await callTool(host, "set_bee_name", { name: "十个中文字符名字测试一下" });
+  assert.match(toolErrorText(beeName.message), /29 UTF-8 bytes/);
+  assert.equal(approvals.length, 0, "no approval may be requested for an impossible change");
+});
+
+test("read_serial_log reports a reset journal instead of an empty quiet page", async () => {
+  const journal = new SerialJournal();
+  const encode = (text) => new TextEncoder().encode(text);
+  journal.append(encode("boot: old session\r\n"));
+  const oldCursor = journal.read().latestCursor;
+  journal.reset(); // reconnect or Clear
+  journal.append(encode("new session\r\n"));
+  const { device } = fakeDevice();
+  const host = createHost({ device, readLog: (options) => journal.read(options) });
+
+  const stale = await callTool(host, "read_serial_log", { after: oldCursor + 100 });
+  const payload = toolPayload(stale.message);
+  assert.equal(payload.text, "");
+  assert.equal(payload.truncated, true, "a cursor from before the reset is a truncated window");
+  assert.equal(payload.hasMore, false);
+  assert.match(payload.note, /reset|ahead/i);
+
+  const tail = toolPayload((await callTool(host, "read_serial_log", { recent: true })).message);
+  assert.equal(tail.text, "new session\r\n");
+  assert.equal(tail.truncated, false);
+  assert.equal(tail.note, undefined);
+});
+
+/* ------------------------------------------------------------------ *
+ * Review regressions: resident task revocation
+ * ------------------------------------------------------------------ */
+
+test("changing the access mode cancels a running resident task, not only pending calls", async () => {
+  const agent = fakeResidentAgent();
+  const host = createHost({
+    residentAgent: agent,
+    requestApproval: async () => ({ approved: true }),
+  });
+  const started = await callTool(host, "start_agent_task", { request: "drive the console" });
+  assert.equal(started.message.result.isError, undefined);
+  const before = agent.calls.cancelAll;
+  await host.setConfig({ access: "read" });
+  assert.equal(agent.calls.cancelAll, before + 1, "owner-side access change cancels resident work");
+  assert.equal((await agent.getTask("agent-task-1")).state, "canceled");
+});
+
+test("rotating the token cancels a running resident task", async () => {
+  const agent = fakeResidentAgent();
+  const { bridge } = fakeBridge();
+  const host = createHost({
+    bridge, residentAgent: agent,
+    requestApproval: async () => ({ approved: true }),
+  });
+  await host.attach();
+  await host.enable();
+  await callTool(host, "start_agent_task", { request: "drive the console" });
+  const before = agent.calls.cancelAll;
+  await host.regenerateToken();
+  /* The explicit rotation and the resulting stateChanged snapshot may both
+   * revoke, which is harmless; what matters is that resident work stops. */
+  assert.ok(agent.calls.cancelAll > before);
+  assert.equal((await agent.getTask("agent-task-1")).state, "canceled");
+});
+
+test("a native token change cancels resident tasks as well as pending approvals", async () => {
+  const agent = fakeResidentAgent();
+  const { bridge, listeners, state } = fakeBridge();
+  const host = createHost({
+    bridge, residentAgent: agent,
+    requestApproval: async () => ({ approved: true }),
+  });
+  await host.attach();
+  await host.enable();
+  await callTool(host, "start_agent_task", { request: "drive the console" });
+  const before = agent.calls.cancelAll;
+  listeners.find((entry) => entry.event === "stateChanged").callback({ ...state, token: "b".repeat(64) });
+  assert.equal(agent.calls.cancelAll, before + 1);
+});
+
+test("a native Stop notification that reports autoStart=false stays disabled", async () => {
+  const storage = memoryStorage();
+  let changes = 0;
+  const { bridge, listeners, state } = fakeBridge();
+  const host = createHost({ bridge, storage, onChange: () => { changes += 1; } });
+  await host.attach();
+  await host.enable();
+  assert.equal(host.getConfig().enabled, true);
+  const before = changes;
+  listeners.find((entry) => entry.event === "stateChanged").callback({ ...state, running: false, autoStart: false });
+  assert.equal(host.getConfig().enabled, false);
+  assert.equal(JSON.parse(storage.data.get(MCP_CONFIG_KEY)).enabled, false);
+  assert.ok(changes > before, "the UI is notified to re-render the disabled card");
+});
+
+test("stopping the server forgets messageId dedupe state", async () => {
+  const agent = fakeResidentAgent();
+  const { bridge } = fakeBridge();
+  const host = createHost({ bridge, residentAgent: agent });
+  await host.attach();
+  await host.enable();
+  const request = {
+    jsonrpc: "2.0", id: 1, method: "SendMessage",
+    params: { message: { role: "ROLE_USER", parts: [{ text: "work" }], messageId: "dedupe-reset", contextId: "ctx" } },
+  };
+  const first = await a2a(host, request);
+  await host.disable();
+  await host.enable();
+  const second = await a2a(host, { ...request, id: 2 });
+  assert.notEqual(second.message.result.task.id, first.message.result.task.id);
+  assert.equal(agent.calls.start.length, 2);
+});
+
+/* ------------------------------------------------------------------ *
+ * Review regressions: A2A codes, defaults, dedupe and pagination
+ * ------------------------------------------------------------------ */
+
+function sendMessage(id, { text = "work", messageId, contextId = "ctx", configuration } = {}) {
+  const message = { role: "ROLE_USER", parts: [{ text }] };
+  if (messageId) message.messageId = messageId;
+  if (contextId) message.contextId = contextId;
+  return { jsonrpc: "2.0", id, method: "SendMessage", params: { message, ...(configuration ? { configuration } : {}) } };
+}
+
+test("A2A SendMessage defaults to blocking and reads the task before answering", async () => {
+  const agent = fakeResidentAgent();
+  const { host } = await enabledHost({ residentAgent: agent });
+  const response = await a2a(host, sendMessage(1));
+  assert.equal(response.message.result.task.id, "agent-task-1");
+  assert.ok(agent.calls.get.includes("agent-task-1"), "the blocking default waits on the task");
+});
+
+test("A2A retries with the same messageId return the existing task without a second approval", async () => {
+  const approvals = [];
+  const agent = fakeResidentAgent();
+  const { host } = await enabledHost({
+    residentAgent: agent,
+    requestApproval: async (request) => {
+      approvals.push(request);
+      return { approved: true };
+    },
+  });
+  const first = await a2a(host, sendMessage(1, { messageId: "retry-1" }));
+  assert.equal(first.message.result.task.id, "agent-task-1");
+  assert.equal(approvals.length, 1);
+  const retry = await a2a(host, sendMessage(2, { messageId: "retry-1" }));
+  assert.equal(retry.message.result.task.id, "agent-task-1");
+  assert.equal(approvals.length, 1, "a lost response plus retry must not ask the phone twice");
+  assert.equal(agent.calls.start.length, 1, "the physical task is not started twice");
+});
+
+test("A2A SendMessage naming an existing task asks for a new context message instead", async () => {
+  const agent = fakeResidentAgent();
+  const { host } = await enabledHost({ residentAgent: agent });
+  await a2a(host, sendMessage(1));
+  const continuation = await a2a(host, {
+    jsonrpc: "2.0", id: 2, method: "SendMessage",
+    params: {
+      message: {
+        role: "ROLE_USER", parts: [{ text: "follow up" }], taskId: "agent-task-1", contextId: "ctx",
+      },
+    },
+  });
+  assert.equal(continuation.message.error.code, -32004);
+  assert.equal(continuation.message.error.data[0].reason, "UNSUPPORTED_OPERATION");
+  assert.match(continuation.message.error.message, /new message with the same contextId/i);
+  assert.equal(agent.calls.start.length, 1, "no second task starts in the old session");
+});
+
+test("A2A CancelTask on a terminal task returns TaskNotCancelable", async () => {
+  const agent = fakeResidentAgent();
+  const { host } = await enabledHost({ residentAgent: agent });
+  await a2a(host, sendMessage(1));
+  const canceled = await a2a(host, { jsonrpc: "2.0", id: 2, method: "CancelTask", params: { id: "agent-task-1" } });
+  assert.equal(canceled.message.result.status.state, "TASK_STATE_CANCELED");
+  const again = await a2a(host, { jsonrpc: "2.0", id: 3, method: "CancelTask", params: { id: "agent-task-1" } });
+  assert.equal(again.message.error.code, -32002);
+  assert.equal(again.message.error.data[0].reason, "TASK_NOT_CANCELABLE");
+  assert.equal(agent.calls.cancel.length, 1);
+});
+
+test("A2A push-notification methods report the unsupported capability", async () => {
+  const { host } = await enabledHost({ residentAgent: fakeResidentAgent() });
+  for (const method of [
+    "CreateTaskPushNotificationConfig",
+    "GetTaskPushNotificationConfig",
+    "ListTaskPushNotificationConfigs",
+    "DeleteTaskPushNotificationConfig",
+  ]) {
+    const response = await a2a(host, { jsonrpc: "2.0", id: 1, method, params: {} });
+    assert.equal(response.message.error.code, -32003, method);
+    assert.equal(response.message.error.data[0].reason, "PUSH_NOTIFICATION_NOT_SUPPORTED");
+  }
+});
+
+test("A2A ListTasks pages by numeric offset and reports the full matched total", async () => {
+  const agent = fakeResidentAgent();
+  const { host } = await enabledHost({ residentAgent: agent });
+  for (let index = 0; index < 3; index += 1) {
+    await a2a(host, sendMessage(index + 1, { text: `work-${index}`, messageId: `page-${index}` }));
+  }
+  const first = await a2a(host, {
+    jsonrpc: "2.0", id: 10, method: "ListTasks",
+    /* An unsupported filter is ignored, not echoed or claimed. */
+    params: { pageSize: 2, contextId: "ctx", statusFilter: "TASK_STATE_COMPLETED" },
+  });
+  assert.equal(first.message.result.tasks.length, 2);
+  assert.equal(first.message.result.pageSize, 2);
+  assert.equal(first.message.result.totalSize, 3, "totalSize is the matched count, not the page");
+  assert.equal(first.message.result.nextPageToken, "2");
+  assert.equal(first.message.result.statusFilter, undefined);
+  const second = await a2a(host, {
+    jsonrpc: "2.0", id: 11, method: "ListTasks",
+    params: { pageSize: 2, pageToken: first.message.result.nextPageToken },
+  });
+  assert.equal(second.message.result.tasks.length, 1);
+  assert.equal(second.message.result.totalSize, 3);
+  assert.equal(second.message.result.nextPageToken, "");
+});
+
+test("A2A configuration, busy and disabled failures use non-reserved codes", async () => {
+  const unconfigured = await enabledHost({ residentAgent: fakeResidentAgent({ status: { available: false } }) });
+  const unavailable = await a2a(unconfigured.host, sendMessage(1));
+  assert.equal(unavailable.message.error.code, -32012);
+  assert.equal(unavailable.message.error.data[0].reason, "AGENT_NOT_CONFIGURED");
+
+  const busy = await enabledHost({ residentAgent: fakeResidentAgent({ status: { humanAssistantBusy: true } }) });
+  const busyResponse = await a2a(busy.host, sendMessage(1));
+  assert.equal(busyResponse.message.error.code, -32013);
+  assert.equal(busyResponse.message.error.data[0].reason, "TASK_BUSY");
+
+  const stopped = await enabledHost({ residentAgent: fakeResidentAgent() });
+  await stopped.host.disable();
+  const disabled = await stopped.host.handleHttp({
+    id: "a2a-disabled",
+    path: "/a2a",
+    body: JSON.stringify(sendMessage(1)),
+  });
+  assert.equal(disabled.status, 503);
+  assert.equal(JSON.parse(disabled.body).error.code, -32010);
+  assert.equal(JSON.parse(disabled.body).error.data[0].reason, "SERVER_DISABLED");
+});
+
+test("the task-start approval wording scopes consent to ordinary serial reads and writes", async () => {
+  const approvals = [];
+  const agent = fakeResidentAgent();
+  const host = createHost({
+    residentAgent: agent,
+    requestApproval: async (request) => {
+      approvals.push(request);
+      return { approved: true };
+    },
+  });
+  const init = await rpc(host, "initialize", {});
+  const instructions = init.message.result.instructions;
+  assert.match(instructions, /ORDINARY serial reads and writes/);
+  for (const phrase of [
+    /destructive shell commands/,
+    /WiFi scans/,
+    /WiFi or other credentials/,
+    /WebDAV enable/,
+    /LAN-bridge on\/rotate-token/,
+    /forgetting the saved board/,
+  ]) {
+    assert.match(instructions, phrase);
+  }
+
+  const list = await rpc(host, "tools/list", {});
+  const tool = list.message.result.tools.find((item) => item.name === "start_agent_task");
+  assert.match(tool.description, /ORDINARY serial reads and writes/);
+  assert.match(tool.description, /WiFi or other credentials/);
+
+  const response = await callTool(host, "start_agent_task", { request: "check the target" });
+  const payload = toolPayload(response.message);
+  assert.match(approvals[0].summary, /ORDINARY serial reads and writes/);
+  assert.match(approvals[0].summary, /WiFi\/credentials/);
+  assert.match(payload.note, /ORDINARY serial reads and writes/);
 });

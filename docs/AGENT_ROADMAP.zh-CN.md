@@ -3,6 +3,58 @@
 本文记录 AI（Agent）功能当前的能力边界、已确认的缺口和排期。实机验收记录见
 [AGENT_VALIDATION.zh-CN.md](AGENT_VALIDATION.zh-CN.md)。
 
+## 2026-11-02：MCP/A2A 审阅修复
+
+本轮针对审阅发现的 MCP/A2A 问题修正行为（不是新功能）：
+
+- **传输**：请求行、请求头与请求体共用 20 秒墙钟期限，超时返回 `408`；拒绝
+  `Expect: 100-continue`（`417`）；只支持 HTTP/1.0–1.1、每连接一个请求；停止时关闭仍在
+  读取的连接并清理排队连接（slowloris 修复）。`GET /` 与
+  `GET /.well-known/agent-card.json` 保持公开，`POST /mcp`、`POST /a2a` 需要 Bearer。
+- **确认**：App 不可见时仍发通知；**允许**/**拒绝** 现在要求设备已解锁；通知在原确认
+  期限到期时由原生定时器一并失效（WebView 冻结也能结束）；划掉通知视为拒绝；点通知
+  正文回到 App 并在请求仍等待时重新显示应用内横幅；工具错误带手机给出的原因
+  （`Not executed: <原因>`），不再一律写成“人工拒绝”。
+- **生命周期**：前台服务通知的 **Stop** 现在持久化关闭（`autoStart=false`），下次启动
+  不会自动拉起，直到用户在卡片里重新启用；原生 Stop、轮换令牌、修改访问权限、修改
+  端口/监听地址、关闭服务都会撤销待确认调用并取消运行中/排队的常驻任务；epoch 守卫
+  避免 stop 与 bind 竞争后把服务复活。
+- **常驻任务权限**：任务启动确认只覆盖普通串口读写；破坏性/不可逆命令、目标机
+  always-ask 命令、WiFi 扫描，以及常驻助手能做的配件变更（桥接 UART、WiFi、WebDAV）
+  在任务内仍逐次在手机上确认，任何访问权限下都是如此。常驻运行改用独立的 resident
+  authority 提示词，不再继承 Manual/Auto/Full Auto 的文案。
+- **A2A 一致性**：`-32001`–`-32004` 只用于规范含义（TaskNotFound / TaskNotCancelable /
+  PushNotificationNotSupported / UnsupportedOperation），应用侧条件改用
+  `-32010`–`-32014`（SERVER_DISABLED / READ_ONLY / AGENT_NOT_CONFIGURED / TASK_BUSY /
+  DENIED）；`returnImmediately` 默认 false（阻塞，最多等 30 秒后返回运行中任务）；
+  `messageId` 有界去重，响应丢失后重试返回既有任务；不支持 `message.taskId` 续任务
+  （`-32004` 并提示改用相同 `contextId`）；`ListTasks` 返回真实 `totalSize` 并支持
+  `pageToken`/`pageSize`；`CancelTask` 对终态任务返回 `-32002`；推送配置方法返回
+  `-32003`。任务启动确认属于 HTTP `SendMessage` 请求，`returnImmediately` 不会跳过它。
+- **串口日志**：重连/清屏/日志重置后，陈旧的 `after` 游标返回 `truncated:true` 与
+  重置说明，而不是一个看起来“控制台很安静”的空页。
+- **界面**：确认横幅在真实全屏元素内重新挂载；复制、令牌轮换、校验错误等一次性提示
+  不再被状态刷新立即覆盖；新增空闲状态显示；`start_agent_task` 的通知正文显示实际请求
+  而不是策略说明。
+- **补充复核修复**：敏感操作确认返回后再次核对原目标机，切换设备后不得沿用确认；
+  过期的卡片/通知“允许”事件即使早于超时回调到达也按拒绝处理；HTTP 读取期限从接受
+  连接时计算，包含排队时间，停止服务后释放排队连接引用；原生请求固定到接受它的监听
+  代次，防止旧请求在重启后借用新服务；通知动作以请求 ID 和动作区分 PendingIntent，
+  并修复定时器注册/取消竞争。新增目标切换、过期确认、排队期限和定时器取消回归。
+- **已知限制（评审发现，暂缓修复）**：常驻任务没有墙钟上限。若模型提供方的流挂起且不
+  产生事件，任务会一直占用设备闸门，直到有人调用 `cancel_agent_task`/`CancelTask` 或
+  在 App 里点停止；没有自动看门狗。
+- **验证边界**：**主机 JVM MCP 传输 45/45、原生确认定时器 2/2、mobile `node --test` 642/642、MCP
+  Playwright 32/32、完整 Playwright 460/460（单 worker）、Web 与 HarmonyOS 构建、
+  `npx cap sync android` 及 `testDebugUnitTest assembleDebug` 全绿（debug APK
+  5.9 MB）**。本轮原生改动（通知解锁要求、原生确认过期、`autoStart` 持久化、epoch
+  守卫、20 秒期限、关闭既有连接）只有主机 JVM/构建验证，**未在真机上复跑**；
+  2026-10-26 与 2026-10-29 的真机结果描述的是更早的构建，真机复测待完成。Playwright
+  使用假原生桥与假设备执行器，不代表 Android 或硬件行为。另有 Python 主机测试
+  303 项（4 项环境相关跳过），以及 390/834/1440 px、中英文、明暗主题的 MCP 卡片与
+  确认横幅截图复核；通用演示界面另覆盖 338 px 小屏。
+- 使用与安全说明见 [MCP.zh-CN.md](MCP.zh-CN.md) 与 [A2A.zh-CN.md](A2A.zh-CN.md)。
+
 ## 2026-10-29：常驻助手与 agent-to-agent（MCP + A2A）
 
 Linkr App 内的助手现在可以作为常驻 agent 被其他 agent 调用：
@@ -18,7 +70,9 @@ Linkr App 内的助手现在可以作为常驻 agent 被其他 agent 调用：
 - **确认与执行**：启动任务是一次确认；批准后任务内串口写入与配件修改不再逐条确认，
   仍走 App 的执行器、证据纪律和单写入闸门。只读模式拒绝启动任务；任务运行期间外部
   写工具被拒绝。配置只使用 App 本地已保存的 AI 配置，板载配置必须由用户手动“从板载
-  载入”后才会被使用；板载提示词在会话开始时读取一次。
+  载入”后才会被使用；板载提示词在会话开始时读取一次。（2026-11-02 审阅后改为：任务
+  确认只覆盖普通串口读写；破坏性命令、always-ask 命令、WiFi 扫描与配件变更仍逐次
+  确认，见上节。）
 - **生命周期**：任务活在 App 进程内；前台服务维持后台可达，杀进程丢失运行任务；任务
   历史持久化、SSE/推送、多会话并发是后续工作。
 - **测试**：`mobile/test/resident_agent.test.mjs`（任务队列、会话、取消、自动执行代理、
@@ -28,7 +82,8 @@ Linkr App 内的助手现在可以作为常驻 agent 被其他 agent 调用：
 - **验证边界**：主机测试与构建通过；真机（mock OpenAI 兼容端点）已验证 agent card、
   A2A 一次确认任务、GetTask/ListTasks 与 MCP start_agent_task/get_agent_task。目标板
   未连接（新 BLE 地址需 GPIO1 配对），串口/配件工具与真实模型服务待补验证；后台任务的
-  阻塞式 HTTP 响应曾丢失，建议 returnImmediately + 轮询。
+  阻塞式 HTTP 响应曾丢失，建议 returnImmediately + 轮询（以上均为更早构建的结果；
+  2026-11-02 审阅修复见上节，未在真机复跑）。
 
 ## 2026-10-26：MCP 服务器（Android）
 
@@ -65,7 +120,9 @@ HTTP 传输与前台服务生命周期。
   完全授权；端口、监听地址、令牌复制与轮换、客户端配置片段、最近 50 次调用审计）；
   写入确认横幅在设置面板之外显示，参数打码。App 在前台时用应用内横幅确认；App 在后台
   或锁屏时改为发布高优先级通知（Allow / Deny），可直接在通知栏确认，无需打开 App；
-  Android 13+ 在启用服务器时请求通知权限，拒绝则退回“仅前台确认”。
+  Android 13+ 在启用服务器时请求通知权限，拒绝则退回“仅前台确认”。（2026-11-02 审阅
+  后：通知操作要求设备解锁，划掉通知视为拒绝，通知随确认期限失效，点正文回到应用内
+  横幅；通知 Stop 持久化关闭服务器。）
 - 证据纪律不变：串口输出是不可信设备数据，发送成功只代表投递。需要确认的调用在 App
   前台时用横幅、在后台/锁屏时用通知栏确认；通知被禁用时后台确认会被拒绝、调用不会
   执行。不需要确认的调用（读取、两种扫描、仅高危模式的普通写入、完全授权）在后台也能
@@ -79,8 +136,10 @@ HTTP 传输与前台服务生命周期。
   `mobile/browser-test/mcp_ui.spec.mjs`（卡片可见性、四档访问权限、端口/监听地址、审计
   列表、确认横幅的允许与拒绝）。
 - 验证边界：**主机 JVM 测试、构建、真机 + 真实配件的读取/确认/一次写入已验证；配置修改
-  与进程被杀未验证**。2026-10-26 在 StepX PZ261A（Android 16，BLE 连接 Linkr Bee 配件）
-  上验证：卡片启动服务、令牌与地址正确、同 WiFi 另一台机器可访问（`GET /`、
+  与进程被杀未验证**。以下为 2026-10-26 在 StepX PZ261A（Android 16，BLE 连接 Linkr Bee
+  配件）上的更早构建结果；2026-11-02 审阅轮改动（通知解锁、原生确认过期、Stop
+  持久化、20 秒期限等）只有主机 JVM/构建验证，未在真机复跑。当时验证：卡片启动服务、
+  令牌与地址正确、同 WiFi 另一台机器可访问（`GET /`、
   `initialize`、`tools/list`、鉴权与 `Origin` 拒绝）、`get_device_status` 返回真实配件、
   `get_accessory_diagnostics` 返回固件/Zephyr/UART/WiFi 统计、`read_serial_log`/
   `search_serial_log` 返回真实日志窗口、写入在手机上弹出确认（拒绝返回 `isError`，允许
@@ -124,7 +183,9 @@ Web、Capacitor 和 HarmonyOS ArkWeb 共用的 Pi runtime 默认改为 `focused`
   定义见 `mobile/src/pi-agent.mjs`。校验工具是唯一由应用而非模型下结论的一组，
   见第五期。
 - **执行策略**：手动 / 自动 / Full Auto 三档，破坏性命令在任何档位都要人工确认；
-  精确白名单加位置感知的命令边界匹配，见 `web/agent_execution_policy.js`。
+  常驻任务（MCP/A2A）同样如此——任务启动确认只覆盖普通串口读写，破坏性命令、目标机
+  always-ask 命令、WiFi 扫描与配件/桥接敏感变更仍逐次确认；精确白名单加位置感知的命令
+  边界匹配，见 `web/agent_execution_policy.js`。
 - **证据纪律**：工具描述与系统提示反复要求"发送成功不等于命令完成"、退出码不等于
   目标达成、恢复后先读状态再行动、不重放历史命令。
 - **记忆**：任务摘要最多 20 条（按设备隔离、脱敏后存 localStorage，见
@@ -480,6 +541,7 @@ token）：保留四态语义与证据纪律，删掉模型可自行推断的重
   `match` / `mismatch` / `indeterminate` / `observed`，并守住两条区别：`observed`
   （没给预期，只是测量）不等于 `match`，`indeterminate`（答不了 / 回答不可用）不等于
   任一结果。不要另造一套说法，也不要把"退出码 0"或某一行的出现升级成"已验证"。
-- 当前应用已内置 Android 端 MCP 服务器（见 [MCP.zh-CN.md](MCP.zh-CN.md)）；仍未接入
-  子代理和向量记忆，后两者不要按“现成可用”的应用能力排期。
+- 当前应用已内置 Android 端 MCP 服务器与 A2A 常驻助手（见
+  [MCP.zh-CN.md](MCP.zh-CN.md)、[A2A.zh-CN.md](A2A.zh-CN.md)）；仍未接入子代理和
+  向量记忆，后两者不要按“现成可用”的应用能力排期。
 - 助手不应越过"下载后等用户指示"的界线，自动安装、刷写不在计划内。

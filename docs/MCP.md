@@ -13,10 +13,13 @@ runs through the same serial execution gate and accessory management channel tha
 the built-in assistant uses. The server is **Android-only**; the Web, iOS, and
 HarmonyOS clients have no MCP endpoint.
 
-This feature is verified on a phone with a real accessory for reads, the write
-approval flow and one live write; the configuration-change tools and process
-death are still untested. Read
-[Verification status](#verification-status) before relying on it for hardware work.
+Reads, the write approval flow and one live write were verified on a phone with
+a real accessory using the 2026-10-26 build. The 2026-11-02 review round changed
+native approval, lifecycle and transport behavior, which has host-JVM and build
+coverage but has not been re-run on a phone yet; configuration-change tools and
+process death remain untested. Read
+[Verification status](#verification-status) before relying on any of it for
+hardware work.
 
 ## Contents
 
@@ -48,6 +51,13 @@ existing BLE or LAN connection to Linkr Bee → target UART, management channel
 - The transport is request/response only. One request is answered per connection
   and the connection is then closed; the server never opens a server-initiated
   event stream.
+- The native transport speaks HTTP/1.0 or HTTP/1.1 and handles one request per
+  connection. The request line, headers and body share a 20-second deadline, so
+  a client that trickles bytes past it gets `408 Request Timeout` instead of
+  holding a worker. `Expect: 100-continue` is rejected with `417`.
+- `GET /` (the status JSON) and `GET /.well-known/agent-card.json` are public:
+  they need no token and carry no secret. Every `POST /mcp` and `POST /a2a`
+  needs the bearer token.
 - Supported MCP protocol versions are `2025-06-18`, `2025-03-26`, and
   `2024-11-05`. A client that asks for another version is answered with the
   newest supported version.
@@ -76,15 +86,17 @@ existing BLE or LAN connection to Linkr Bee → target UART, management channel
 
 1. Open **Settings → AI** in the app and find the **MCP server** card.
 2. Enable **Allow AI clients on this network**. The server starts immediately and
-   the setting is remembered; it starts again on the next app launch while the
-   toggle stays on. On Android 13+ this asks for the notification permission so
+   the setting is remembered, so a normal relaunch with the toggle still on starts
+   it again. On Android 13+ this asks for the notification permission so
    approvals can appear in the notification shade while the app is in the
    background; refusing it only disables that background path.
 3. Choose **Access**, from the most restrictive to the most permissive mode:
    - **Read-only: no approval needed** — nothing is ever asked on the phone:
      reads and scans run directly, and every write tool is refused.
    - **Read and write: every command needs approval** — each write and each scan
-     asks once on the phone; reads run directly. This is the default.
+     asks once on the phone; reads run directly. This is the default. Starting a
+     resident task asks too, and the task's sensitive internal calls still ask per
+     call.
    - **Read and write: only high-risk commands need approval** — only the
      high-risk calls below ask on the phone; every other read, scan and write
      runs directly:
@@ -101,6 +113,8 @@ existing BLE or LAN connection to Linkr Bee → target UART, management channel
        piping a download into a shell (`curl`/`wget`/`fetch | sh`) and
        `base64 -d | sh`. Patterns match at a command position, so text that
        merely mentions one of these names is not treated as high risk;
+     - `start_agent_task` for every task start (starting the resident agent is
+       treated as high risk);
      - `set_wifi` for every action;
      - `set_webdav` only for `action:"on"`; `action:"off"` runs directly;
      - `set_lan_bridge` only for `action:"on"` or `"rotate-token"`;
@@ -115,13 +129,17 @@ existing BLE or LAN connection to Linkr Bee → target UART, management channel
      restarts are deliberately not guarded. The classification is a best-effort
      pattern guard for recognized shell forms, **not a sandbox**: indirect
      execution through scripts, variables or interpreters cannot be classified,
-     so a token holder may still reach a high-risk action without a prompt. The
-     app asks once before switching to this mode from a stricter one.
+     so a token holder may still reach a high-risk action without a prompt. A
+     resident task started in this mode still asks for its own sensitive calls per
+     call (see [Tools](#tools)). The app asks once before switching to this mode
+     from a stricter one.
    - **Read and write: fully authorized** — every tool runs directly, including
      serial writes and bridge changes, with no prompt on the phone. The bearer
      token becomes the only control: use it only for a fully trusted client that
      must act unattended, and keep the app on a trusted network. The app asks
-     once before switching to this mode.
+     once before switching to this mode. A resident task started in this mode
+     begins without a prompt, but the sensitive calls listed under
+     [Tools](#tools) still ask inside it.
 4. Set the **Port** (1024–65535, default `8712`). Changing the port or listen
    address restarts the server briefly.
 5. Choose **Listen on**:
@@ -139,8 +157,9 @@ the background. The card also lists the latest external calls.
 
 While the server is enabled, Android shows an ongoing
 `Linkr Bee MCP service is running` notification with a **Stop** action. **Stop**
-closes the listener immediately; disable and re-enable the server in the card to
-run it again.
+closes the listener, cancels pending MCP calls and resident tasks, and persists
+the server as disabled: it will not start on the next app launch until you enable
+it again in the card. Turning the server off in the card has the same effect.
 
 ## Connect a client
 
@@ -204,6 +223,9 @@ endpoint/card paths:
 {"name":"linkr-bee-mcp","version":"0.1.0","mcp":"/mcp","a2a":"/a2a","agentCard":"/.well-known/agent-card.json"}
 ```
 
+Neither the status page nor the agent card needs the token, and neither carries a
+secret.
+
 ## Tools
 
 The columns are the four access modes from [Enable the server](#enable-the-server):
@@ -233,7 +255,7 @@ directly.
 | `set_bee_name` | refused | ask | run | run | BLE management channel |
 | `set_lan_bridge` | refused | ask | ask for `on`/`rotate-token` | run | BLE management channel |
 | `get_agent_status` | run | run | run | run | usable AI settings |
-| `start_agent_task` | refused | ask | ask | run | usable AI settings; one approval covers the task |
+| `start_agent_task` | refused | ask | ask | run | usable AI settings; one approval covers ordinary serial reads/writes |
 | `get_agent_task` | run | run | run | run | a resident task |
 | `list_agent_tasks` | run | run | run | run | — |
 | `cancel_agent_task` | run | run | run | run | a resident task |
@@ -253,16 +275,22 @@ directly.
   `disconnect_bee` are write tools, so `read` refuses them. In `guarded` mode a
   plain disconnect runs directly and only `forget:true` asks.
 - **Resident agent tools** delegate work to the assistant that runs inside the
-  app. `start_agent_task` is the one approval for a task: inside it the
-  assistant's serial writes and accessory changes run without further phone
-  prompts, using the app's saved AI configuration and the board-stored
-  instructions (a board configuration is used only after the user has loaded it
-  into the app). One task runs at a time, up to 8 wait in the queue, tasks are
-  polled with `get_agent_task` and stopped with `cancel_agent_task`; in read-only
-  mode a task can be polled and canceled but not started. While a task is active
-  other device-changing MCP calls are refused so nothing fights over the serial
-  gate. The same service is exposed over A2A: see the
-  [A2A guide](A2A.md).
+  app. `start_agent_task` is the one approval for a task when the access mode
+  asks for one, but it covers only the task's ordinary serial reads and writes.
+  Destructive or irreversible shell commands, commands on the target's
+  always-ask list, WiFi scans, and the accessory changes the resident agent can
+  make (bridge UART, accessory WiFi, WebDAV) still ask on the phone inside the
+  task; the resident agent asks per call through the same approval surface. This
+  holds in every access mode, including fully authorized. The resident run is
+  told its authority explicitly instead of inheriting the app's
+  Manual/Auto/Full Auto prompt. It uses the app's saved AI
+  configuration and the board-stored instructions (a board configuration is used
+  only after the user has loaded it into the app). One task runs at a time, up to
+  8 wait in the queue, tasks are polled with `get_agent_task` and stopped with
+  `cancel_agent_task`; in read-only mode a task can be polled and canceled but
+  not started. While a task is active or queued, other device-changing MCP calls
+  are refused so nothing fights over the serial gate. The same service is
+  exposed over A2A: see the [A2A guide](A2A.md).
 - **Board configuration tools** (`set_bee_name`, `set_lan_bridge`) change the
   bridge's advertised BLE name or its LAN WebSocket listener through the
   encrypted management channel. They are write tools: `read` refuses them,
@@ -284,6 +312,13 @@ directly.
   out-of-range values are rejected as invalid params (`-32602`). Tool results are
   JSON in a single text content block; device and accessory failures are
   `isError` results, not JSON-RPC errors.
+- A refused approval returns the phone's reason inside the tool error, normally
+  `Not executed: <reason>` (a timeout, the app not being visible, another pending
+  approval or an explicit denial). It still means nothing was executed.
+- Arguments that the app's own command builder would reject are refused before
+  the phone is asked: `set_wifi` connect without an SSID, `set_webdav` enable
+  without a URL, and a BLE name over 29 UTF-8 bytes. The command is built and
+  validated again when it executes.
 
 ### Serial log tools
 
@@ -299,14 +334,19 @@ directly.
 - The journal is a bounded receive buffer. Output that has been evicted cannot be
   read again, and the tools report `truncated` when the requested range is no
   longer retained.
+- A cursor carried over from before a reconnect, a terminal Clear or another
+  journal reset is ahead of the current journal. Instead of an empty page,
+  `read_serial_log` returns `truncated: true`, `hasMore: false` and a note; read
+  again without `after`, or with `recent: true`, for the current tail.
 - Both tools mark their output `untrusted: true`. Serial output can be partial,
   interleaved, or stale.
 
 ### Device-changing tools
 
-- `send_serial_input` sends up to 2,048 characters to the target UART, with an
-  optional Enter sequence. A successful send only means the payload was
-  delivered; the result carries the delivery record and an evidence window.
+- `send_serial_input` sends up to 2,048 characters to the target UART;
+  `appendEnter` is required and appends the configured Enter sequence. A
+  successful send only means the payload was delivered; the result carries the
+  delivery record and an evidence window.
   Without `trackExit` there is no exit status. With `trackExit: true` the app
   appends a shell completion token (POSIX shell with an observed idle prompt
   required), and the result reports `state`, `executionStatus`, `completed` and
@@ -360,19 +400,21 @@ the client:
   and every scan; `guarded` asks only for the high-risk calls listed under
   [Enable the server](#enable-the-server) and runs ordinary writes and both scans
   directly; `auto` asks nothing; `read` refuses every write tool and asks
-  nothing. An approval, and equally a skipped prompt, is not evidence that a
-  command did what the client intended;
+  nothing. Inside a resident task, its sensitive per-call approvals still apply
+  (see [Tools](#tools)). An approval, and equally a skipped prompt, is not
+  evidence that a command did what the client intended;
 - only one device-changing call runs at a time. A second one is refused
   immediately with an error while the first is pending or executing; read tools
   are not serialized behind that guard;
 - approval and execution share a 165-second overall budget (or the shorter
   remaining native deadline); the execution phase is capped at 120 seconds.
   Expired native requests are cancelled, including events delayed by a paused
-  WebView. Disabling/rebinding the server, rotating its token or changing access
-  policy revokes pending authorization. A changed target connection session also
-  requires a fresh request. Input already delivered cannot be recalled.
-  A call that cannot be answered within the native 180-second request window
-  returns HTTP `504` instead of a tool result.
+  WebView. Disabling/rebinding the server, rotating its token, changing access
+  policy or pressing **Stop** on the foreground-service notification revokes
+  pending authorization and cancels running or queued resident tasks. A changed
+  target connection session also requires a fresh request. Input already
+  delivered cannot be recalled. A call that cannot be answered within the native
+  180-second request window returns HTTP `504` instead of a tool result.
 
 ## Security
 
@@ -384,31 +426,44 @@ the client:
   certificate. Enable the server only on a network you trust, and never forward
   the port or expose it to the internet.
 - **Anyone holding the token can use the tools.** That includes reading the
-  serial log and requesting device-changing calls. What happens next depends on
-  the selected access mode: `confirm` still needs a human click on the phone for
-  every write and scan, but do not treat the token as read-only. The more
-  permissive modes reduce or remove that click: `guarded` runs ordinary writes
-  and both scans directly and asks only for the high-risk calls listed under
+  serial log, starting resident tasks that spend the configured model's tokens,
+  and requesting device-changing calls. What happens next depends on the selected
+  access mode: `confirm` still needs a human click on the phone for every write
+  and scan, but do not treat the token as read-only. The more permissive modes
+  reduce or remove that click: `guarded` runs ordinary writes and both scans
+  directly and asks only for the high-risk calls listed under
   [Enable the server](#enable-the-server), while `auto` asks nothing. In both,
   the token holder can drive the accessory unattended, including while the app
   is backgrounded, so only use them with a client and network you fully trust.
 - Requests that carry an `Origin` header are refused with `403`. This blocks
   browser-based use and DNS rebinding; it is why the server is for MCP clients,
-  not web pages.
+  not web pages. The two public endpoints, `GET /` and
+  `GET /.well-known/agent-card.json`, need no token and carry no device data;
+  everything that can read the console or change state is behind a
+  `POST` with the bearer token.
 - Approval is mode-dependent. The default `confirm` mode asks for every write
   and every scan. `guarded` deliberately skips the prompt for non-high-risk
   writes; its high-risk classification is a best-effort pattern guard, not a
   sandbox, so a token holder may still cause changes without a click. `auto`
-  asks nothing. `read` refuses all eight write tools even if a client asks, while
-  still running reads and scans without a prompt.
+  asks nothing. `read` refuses all nine write tools even if a client asks
+  (`send_serial_input`, `set_uart_config`, `set_wifi`, `set_webdav`,
+  `connect_bee`, `disconnect_bee`, `set_bee_name`, `set_lan_bridge` and
+  `start_agent_task`), while still running reads and scans without a prompt.
+  Inside a resident task, the task-start approval (or, in fully authorized mode,
+  the prompt-free start) only waives the ordinary serial reads and writes; the
+  sensitive per-call approvals described under [Tools](#tools) still apply in
+  every mode.
 - The approval card shows the tool and its arguments with password-like fields
   masked. The WiFi password is never shown there or echoed in a tool result.
 - When the app is not visible (screen off, another app in front) the approval is
   posted as a high-priority notification with **Allow** / **Deny** actions. The
-  notification body names the tool and a short summary, is PRIVATE on the lock
-  screen, and tapping an action answers the waiting call without opening the
-  app. Approving there is a real approval: treat the unlocked phone and its
-  notification shade as the approval boundary.
+  notification body names the tool and a short summary, and is PRIVATE on the
+  lock screen. Both actions require the device to be unlocked before they take
+  effect, so a locked phone cannot approve anything. Dismissing the notification
+  counts as **Deny**, and the notification expires with the request deadline.
+  Tapping its body opens the app and re-shows the in-app approval card while the
+  request is still pending. Approving is a real authorization, so keep the phone
+  locked when it is unattended.
 - The card keeps the latest 50 external calls in memory for this app run, with
   password-like arguments and URL userinfo masked. The audit list is not
   persisted.
@@ -422,6 +477,10 @@ the client:
   app alive while it is backgrounded, but killing the process stops the server
   and loses running resident tasks. Task history is not persisted. A2A streaming
   (SSE) and push notifications are not supported; poll `GetTask`/`get_agent_task`.
+  A resident task has **no wall-clock limit**: if the model provider stream stalls
+  without events, the task keeps the device gate busy until someone calls
+  `cancel_agent_task` (`CancelTask` over A2A) or taps Stop in the app. There is
+  no automatic watchdog for that case.
 - **No server-initiated messages.** The transport is POST-only: `GET /mcp` and
   `DELETE /mcp` return `405`, and server notifications, progress updates,
   sampling, and elicitation are not sent. Use clients that work with plain
@@ -430,16 +489,20 @@ the client:
 - **The server stops with the app.** The foreground service keeps the process
   alive while the app is backgrounded, but the server is not a daemon: closing the
   activity destroys it, and if Android kills the app process the listener goes
-  away. Relaunching the app restarts the server when the setting is still on.
+  away. Relaunching the app restarts the server only while the saved setting is
+  on; **Stop** on the foreground-service notification clears that setting, so the
+  server stays off until it is enabled again in the card.
 - **Background approvals use a notification.** While the app is visible the
   approval card is shown in the app; while it is not visible the request is
-  posted as a high-priority notification with **Allow** / **Deny** actions, so a
-  write can be approved from the notification shade without reopening the app.
-  This needs the POST_NOTIFICATIONS permission on Android 13+ and the app
-  process alive; if notifications are disabled, a background approval is refused
-  and the call is not executed. A backgrounded WebView can still delay or fail
-  to answer a request. Calls that never prompt — every read, both scans, `auto`
-  mode, and non-high-risk writes in `guarded` — run while backgrounded.
+  posted as a high-priority notification with **Allow** / **Deny** actions. The
+  actions require the device to be unlocked, dismissing the notification denies
+  the call, and the notification expires with the request. Tapping the body opens
+  the app and shows the in-app card again while the request is pending. This
+  needs the POST_NOTIFICATIONS permission on Android 13+ and the app process
+  alive; if notifications are disabled, a background approval is refused and the
+  call is not executed. A backgrounded WebView can still delay or fail to answer
+  a request. Calls that never prompt — every read, both scans, `auto` mode, and
+  non-high-risk writes in `guarded` — run while backgrounded.
 - **One device-changing call at a time.** The second write is rejected, including
   while the first is still waiting for approval. Read tools can run concurrently.
 - **Tool results are bounded.** Serial reads are paged, searches are capped at 12
@@ -454,9 +517,10 @@ the client:
   WebDAV, or async-event capability also gets an explicit error.
 - **No discovery.** There is no mDNS or other discovery: copy the endpoint and
   token from the card into the client.
-- **Hardware verification is partial.** Reads, approval and a single serial
-  write are verified on a phone with a real accessory; configuration changes and
-  process death are not. See below.
+- **Hardware verification is partial and predates the review round.** Reads,
+  approval and a single serial write were verified on a phone with the
+  2026-10-26 build; configuration changes and process death were not, and the
+  2026-11-02 changes have not been re-run on hardware. See below.
 
 ## Troubleshooting
 
@@ -465,17 +529,20 @@ the client:
 | `401 Unauthorized` | Missing or wrong bearer token. Copy the token again from the card; after a rotation, update every client. |
 | `403 Forbidden` | The request carried an `Origin` header. A browser or browser-based tool produced it; use an MCP client or a plain HTTP client and omit `Origin`. |
 | `404 Not Found` | Wrong path. The MCP endpoint is `/mcp`. |
-| `405 Method Not Allowed` on `GET /mcp` | The client tried an SSE stream or the legacy HTTP+SSE transport. This server is POST-only. |
+| `405 Method Not Allowed` on `GET /mcp` | The client tried an SSE stream or the legacy HTTP+SSE transport. This server is POST-only; `GET /a2a` is answered the same way. |
+| `408 Request Timeout` | The request line, headers or body did not arrive within the transport's 20-second deadline. Retry; a client that trickles bytes will always fail. |
 | `411 Length Required` | The client used chunked transfer encoding or omitted `Content-Length`. |
 | `413 Payload Too Large` | The request body exceeds 1 MiB; the request line plus headers may not exceed 16 KiB. |
-| `400 Bad Request` | Malformed HTTP, or a JSON-RPC parse error (`-32700`). |
+| `417 Expectation Failed` | The client sent `Expect: 100-continue`, which this server rejects. Disable that expectation in the client. |
+| `400 Bad Request` | Malformed HTTP, a JSON-RPC parse error (`-32700`), or an unsupported HTTP version (only HTTP/1.0 and HTTP/1.1 are accepted). |
 | JSON-RPC `-32602` | Unknown tool or invalid arguments. Check the tool's schema with `tools/list`. |
 | `503 Service Unavailable` | The app is not ready: the WebView has not attached, the server is stopping, or the app was killed. Bring the app to the foreground, toggle the server off and on, or restart the app. |
 | `504 Gateway Timeout` | The app did not answer within 180 seconds — for example while backgrounded or waiting on the phone. The call may not have reached the device; check the phone and the serial log before retrying, and never resend serial input blindly. |
 | Service error: address already in use | Another process holds the port. Change the port in the card or stop the other listener. |
 | Connection refused / no route | The client host cannot reach the phone. Check that both are on the same network without client isolation, that the listen address is **All interfaces**, and that the address is the phone's address on that network. `GET /` from the client host should answer without a token. |
-| Approval never appears | The app must be visible (in-app card) or notifications must be enabled (background notification with Allow/Deny); a second approval may already be pending; an expired approval is treated as denied. Nothing is executed while no approval is given. A prompt is expected only for writes and scans in `confirm` mode and for the high-risk calls in `guarded` mode; `auto` and `read` never prompt, and `guarded` runs non-high-risk calls directly. |
-| A write ran without a phone approval | The selected mode does not prompt for that call: `guarded` runs non-high-risk writes directly and `auto` never asks. Select `confirm` to require a click for every write; `read` refuses writes instead. |
+| Approval never appears | The app must be visible (in-app card) or notifications must be enabled (background notification with Allow/Deny). Notification actions need the device unlocked; dismissing the notification denies the call, and the notification expires with the request. Tap the notification body to return to the in-app card. A second approval may already be pending; an expired approval is treated as denied. Nothing is executed while no approval is given. A prompt is expected only for writes and scans in `confirm` mode, for the high-risk calls in `guarded` mode, and for sensitive calls made inside a resident task; `auto` and `read` never prompt at the MCP tool level, and `guarded` runs non-high-risk calls directly. |
+| Tool error starts with `Not executed:` | The phone surface refused the call. The text after the colon is the phone's reason (denied, timed out, app not visible, another pending approval, or a policy/configuration refusal). Nothing was executed; fix the condition and retry instead of resending input. |
+| A write ran without a phone approval | The selected mode does not prompt for that call: `guarded` runs non-high-risk writes directly and `auto` never asks; a resident task's ordinary serial reads/writes are covered by the task-start approval. Select `confirm` to require a click for every top-level write; inside a resident task, destructive commands and sensitive changes still ask in every mode. |
 | "The target is not connected" | Connect Linkr Bee and the target in the app first. Disconnecting makes serial tools return an explicit error even while retained log text is displayed. |
 | "Accessory settings need a Bluetooth LE connection" | The app is in LAN-only mode. Switch to the BLE connection for diagnostics and configuration tools. |
 | "read-only mode is enabled" | A write tool was called while **Read-only** was selected. Reads and scans still run without a prompt; switch to a read-write access mode on the phone to change the device. |
@@ -483,35 +550,24 @@ the client:
 
 ## Verification status
 
-**host-JVM tests + build verified; server, read tools, approval, one live write,
-and the Bee connection/rename tools verified on a phone with a real accessory;
-some configuration-change tools and process-death handling are still untested.**
+**2026-11-02 review round: host-JVM MCP transport tests 45/45, mobile
+`node --test` suite 642/642, MCP Playwright specs 32/32 (`mcp_lifecycle` +
+`mcp_server` + `mcp_ui`), full Playwright suite 460/460 (single worker), the web
+and HarmonyOS builds and `npx cap sync android` green, and
+`./gradlew testDebugUnitTest assembleDebug` produced a 5.9 MB debug APK.**
 
-Concretely: the Java transport has host-JVM unit tests (routing, authentication,
-`Origin` precedence, body limits, status page, bind-failure and token-rotation
-handling, stop semantics), the MCP protocol and tool layer has `node --test`
-coverage (version negotiation, the four access modes and the guarded high-risk
-classifier, approval paths, redaction, single-write guard), the settings card and
-approval banner have Playwright coverage against a fake native bridge, and the
-Android and web builds succeed.
+Those are host, browser and build results, not phone results. The review-round
+native changes — the 20-second request deadline/slowloris fix, closing previous
+connections, notification **Allow**/**Deny** requiring device unlock, native
+approval expiry, `autoStart` persistence and the epoch guards — are host-JVM and
+build verified only and were **not** re-run on a phone. The Playwright specs run
+against a fake native bridge and a fake device executor, so they verify the UI
+and protocol wiring, not Android or hardware behavior.
 
-Resident agent and A2A coverage (2026-10-29): the A2A transport routes
-(`POST /a2a`, public `GET /.well-known/agent-card.json`, 405/401/403 and body
-limits) have host-JVM tests; the resident task manager, A2A protocol mapping and
-the five delegation tools have `node --test` coverage (queueing, sessions,
-cancellation, the one-approval auto-execute proxy, read-only refusal, A2A
-SendMessage/GetTask/ListTasks/CancelTask and the agent card); the MCP card's A2A
-endpoint row has Playwright coverage. On a phone with a mock OpenAI-compatible
-endpoint, the agent card, the A2A one-approval task flow, `GetTask`/`ListTasks`
-and the MCP `start_agent_task`/`get_agent_task` path were verified end to end.
-The target board was not connected during that run (new BLE address needing
-GPIO1 pairing), so the resident agent's serial/accessory tools and a real model
-provider remain unverified on hardware. A background-approval attempt completed
-the task but lost the blocking HTTP response; use `returnImmediately:true` and
-poll for background tasks.
-
-Verified on hardware 2026-10-26 (StepX PZ261A, Android 16, debug APK installed
-over adb, connected to a Linkr Bee accessory over BLE):
+The 2026-10-26 hardware results below describe the earlier build (StepX PZ261A,
+Android 16, debug APK over adb, Linkr Bee accessory over BLE). They remain
+evidence for that build only (firmware 0.1.2, Zephyr 4.4.1); the review-round
+changes and a real-phone re-check are pending.
 
 - the card starts the server on port 8712 with `lan` binding, generates a
   64-hex token and shows `http://<wifi-ip>:8712/mcp`;
@@ -521,18 +577,19 @@ over adb, connected to a Linkr Bee accessory over BLE):
   twenty-one tools;
 - `get_device_status` reports the live accessory (`connected:true`,
   `transport:"ble"`, device name/id, `115200,8,n,1,n`, byte counters);
-  `get_accessory_diagnostics` returns the bridge's own `@i?` groups (firmware
-  0.1.2, Zephyr 4.4.1, UART/WiFi/WebDAV/ws counters); `read_serial_log` returns
-  the journal window and cursors; `search_serial_log` returns an empty match set
-  for a phrase outside the window rather than a false positive;
+  `get_accessory_diagnostics` returns the bridge's own `@i?` groups (UART/WiFi/
+  WebDAV/ws counters); `read_serial_log` returns the journal window and cursors;
+  `search_serial_log` returns an empty match set for a phrase outside the window
+  rather than a false positive;
 - a write (`send_serial_input`) raised the approval banner on the phone: denying
-  it returned `isError: "Not executed: the request was denied on the phone."`,
-  and approving it delivered the text to the target shell (the target echoed it
-  back, visible in the serial log);
+  it returned `isError` and executed nothing, and approving it delivered the
+  text to the target shell (the target echoed it back, visible in the serial
+  log);
 - with the app backgrounded, a write approval was posted as a notification
   (channel "Linkr Bee MCP approvals", `VISIBILITY_PRIVATE`) with **Allow** /
   **Deny** actions; tapping Allow executed the waiting call and dismissed the
-  notification;
+  notification. That build did not require the device to be unlocked for those
+  actions; the review round now does;
 - a tracked command (`send_serial_input` with `trackExit` and
   `waitForCompletion`) ran `uname -s` on the real target and returned
   `completed:true`, `exitCode:0`, `tracked:true` and the shell output in the
@@ -553,16 +610,33 @@ over adb, connected to a Linkr Bee accessory over BLE):
   notification, and the endpoint stays reachable after the app is sent to the
   background (`ping` answered).
 
-Not verified: the accessory configuration tools (`set_uart_config`, `set_wifi`,
+Resident agent and A2A coverage (2026-10-29, also an earlier build): the A2A
+transport routes (`POST /a2a`, public `GET /.well-known/agent-card.json`,
+405/401/403 and body limits) have host-JVM tests; the resident task manager, A2A
+protocol mapping and the five delegation tools have `node --test` coverage
+(queueing, sessions, cancellation, the task-approval proxy, read-only refusal,
+A2A SendMessage/GetTask/ListTasks/CancelTask and the agent card); the MCP card's
+A2A endpoint row has Playwright coverage. On a phone with a mock
+OpenAI-compatible endpoint, the agent card, the A2A task-start approval flow,
+`GetTask`/`ListTasks` and the MCP `start_agent_task`/`get_agent_task` path were
+verified end to end. The target board was not connected during that run (new BLE
+address needing GPIO1 pairing), so the resident agent's serial/accessory tools
+and a real model provider remain unverified on hardware. A background-approval
+attempt completed the task but lost the blocking HTTP response; a caller should
+prefer `returnImmediately:true` plus `GetTask`, and the review round now dedupes
+`messageId` so retrying the same message returns the existing task.
+
+Not verified: the review-round native behavior above was not exercised on a
+phone. The accessory configuration tools (`set_uart_config`, `set_wifi`,
 `set_webdav`) and `set_lan_bridge` were not exercised on hardware;
 `set_bee_name` was exercised only with `reset=true`, not with a custom name;
-`disconnect_bee` with `forget=true` was not exercised. The hardware run above
-used the default every-command approval mode: the `guarded` high-risk
-classification and the prompt-free `read` mode are covered by the tool-layer
-tests, not by a hardware session. Process-death and
-foreground-service permission edge cases are covered by code review only, and
-multiple concurrent clients were not tested. Nothing in this guide claims those
-paths are hardware-verified.
+`disconnect_bee` with `forget=true` was not exercised. The 2026-10-26 hardware
+run used the default every-command approval mode: the `guarded` high-risk
+classification, the prompt-free `read` mode and the resident task's per-call
+sensitive approvals are covered by the tool-layer tests, not by a hardware
+session. Process-death and foreground-service permission edge cases are not
+hardware-verified, and multiple concurrent clients were not tested. Nothing in
+this guide claims those paths are hardware-verified.
 
 ## Related documentation
 

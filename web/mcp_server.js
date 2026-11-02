@@ -11,10 +11,11 @@
  *    instructions;
  *  - a successful send is delivery, not command completion.
  */
-import { redactCommand } from "./accessory_control.js";
+import { bleNameCommand, redactCommand } from "./accessory_control.js";
 import { isGuardedCommand } from "./agent_execution_policy.js";
 import {
   A2A_CARD_PATH,
+  A2A_ERROR,
   A2A_JSONRPC_PATH,
   A2A_PROTOCOL_VERSION,
   a2aAgentCard,
@@ -71,6 +72,9 @@ const SEARCH_EXCERPT_BEFORE = 180;
 const SEARCH_EXCERPT_AFTER = 240;
 const ACCESSORY_DIAGNOSTIC_LINES = 24;
 const WIFI_NETWORK_LIMIT = 20;
+/* Bounded A2A messageId -> taskId memory: a retry after a lost response must
+ * return the task that already exists, not start (and approve) a second one. */
+const MAX_MESSAGE_IDS = 64;
 
 const NO_ARGUMENTS = {
   type: "object",
@@ -304,7 +308,7 @@ export const MCP_TOOLS = Object.freeze([
   }),
   Object.freeze({
     name: "start_agent_task",
-    description: "Hand a task to the app's resident assistant and return immediately with a taskId to poll. The assistant runs with the AI settings saved in the app (a board-stored configuration is used only after the user has loaded it into the app), the board-stored instructions and the app's serial/accessory tools. Approving this call is the one consent for the task: inside it, serial writes and accessory changes run without further phone prompts, so review the request before approving. Tasks run one at a time and are queued; a task can be read with get_agent_task and stopped with cancel_agent_task. There is no hard wall-clock limit by default; pass timeoutMs (up to 24 hours) only when the caller wants a deadline, and remember that cancel_agent_task is the normal way to stop a long task. The assistant's output is model output, not device evidence: verify it with the read tools or the serial log.",
+    description: "Hand a task to the app's resident assistant and return a taskId to poll. The assistant runs with the AI settings saved in the app (a board-stored configuration is used only after the user has loaded it into the app), the board-stored instructions and the app's serial/accessory tools. Approving this call covers the task's ORDINARY serial reads and writes; it is not blanket consent: destructive shell commands, WiFi scans and sensitive changes still ask on the phone per call — bridge/accessory settings, WiFi or other credentials, WebDAV enable, LAN-bridge on/rotate-token, and forgetting the saved board. Tasks run one at a time and are queued; a task can be read with get_agent_task and stopped with cancel_agent_task. There is no hard wall-clock limit by default; pass timeoutMs (up to 24 hours) only when the caller wants a deadline, and remember that cancel_agent_task is the normal way to stop a long task. The assistant's output is model output, not device evidence: verify it with the read tools or the serial log.",
     inputSchema: {
       type: "object",
       properties: {
@@ -419,7 +423,7 @@ const MCP_INSTRUCTIONS = [
   "Read the serial log to observe output, and never resend uncertain input automatically.",
   "Writes are approved by a human on the phone in approval mode, and both scans ask there too; high-risk-only mode asks only for destructive shell commands, WiFi credential or network changes, bridge or token changes and forgetting the board; fully-authorized mode asks nothing; when read-only mode is enabled every device-changing tool is refused and nothing is asked.",
   "Accessory and connection tools configure the bridge, not the target console: scan_bee_devices, connect_bee and disconnect_bee change the app's own Bluetooth session, while get_bee_status reports that session.",
-  "start_agent_task delegates work to the resident assistant in the app. Its one approval covers the task's serial writes and accessory changes; tasks run one at a time, are polled with get_agent_task and can be stopped with cancel_agent_task. The assistant's answer is model output, not evidence that the target changed.",
+  "start_agent_task delegates work to the resident assistant in the app. Its one approval covers the task's ORDINARY serial reads and writes only; destructive shell commands, WiFi scans and sensitive changes still ask on the phone per call: bridge/accessory settings, WiFi or other credentials, WebDAV enable, LAN-bridge on/rotate-token, and forgetting the saved board. Tasks run one at a time, are polled with get_agent_task and can be stopped with cancel_agent_task. The assistant's answer is model output, not evidence that the target changed.",
 ].join(" ");
 
 const DEFAULTS = Object.freeze({
@@ -545,6 +549,13 @@ function isPlainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+/* JSON-RPC 2.0 allows a String, Number or Null id; an object/array/boolean id
+ * is an invalid request, and echoing it back would make the response itself
+ * unparseable for a strict client. */
+function validJsonRpcId(value) {
+  return value === null || typeof value === "string" || typeof value === "number";
+}
+
 /* Hand-written JSON Schema subset: the catalog above only uses these keywords,
  * and an external dependency for six keywords would be more surface than it is
  * worth. `path` names the offending value so the JSON-RPC error is actionable
@@ -572,11 +583,13 @@ function validateSchemaValue(schema, value, path) {
       if (!isPlainObject(value)) return `${path} must be an object`;
       const properties = schema.properties || {};
       for (const key of schema.required || []) {
-        if (!(key in value) || value[key] === undefined) return `${path ? `${path}.` : ""}${key} is required`;
+        /* Object.hasOwn, not `in`: prototype names such as "constructor" must
+         * not count as a caller-provided property. */
+        if (!Object.hasOwn(value, key) || value[key] === undefined) return `${path ? `${path}.` : ""}${key} is required`;
       }
       for (const [key, child] of Object.entries(value)) {
         const childPath = path ? `${path}.${key}` : key;
-        if (!(key in properties)) {
+        if (!Object.hasOwn(properties, key)) {
           if (schema.additionalProperties === false) return `Unknown argument: ${key}`;
           continue;
         }
@@ -725,9 +738,26 @@ export function createMcpHost(deps = {}) {
   const activeCalls = new Set();
   const nativeCalls = new Map();
   const cancelledNativeRequests = new Set();
+  /* Bounded A2A dedupe: messageId -> taskId. Cleared whenever the server stops,
+   * is disabled or restarts, because a new listener is a new session boundary. */
+  const messageIdTasks = new Map();
 
   function revokeCalls(reason) {
     for (const call of activeCalls) call.abort(reason);
+  }
+
+  function forgetMessageIds() {
+    messageIdTasks.clear();
+  }
+
+  function rememberMessageId(messageId, taskId) {
+    if (typeof messageId !== "string" || !messageId) return;
+    if (typeof taskId !== "string" || !taskId) return;
+    messageIdTasks.delete(messageId);
+    messageIdTasks.set(messageId, taskId);
+    while (messageIdTasks.size > MAX_MESSAGE_IDS) {
+      messageIdTasks.delete(messageIdTasks.keys().next().value);
+    }
   }
 
   function captureTarget() {
@@ -801,11 +831,22 @@ export function createMcpHost(deps = {}) {
     if (!isPlainObject(state)) return;
     if (bridgeSnapshot?.running === true && state.running === false) {
       revokeCalls("The MCP server stopped; pending authorization was revoked.");
+      /* The resident task is JS-side: it keeps driving the console after the
+       * HTTP listener stops, so a server stop must cancel it as well. */
       deps.residentAgent?.cancelAll?.();
+      forgetMessageIds();
     } else if (bridgeSnapshot?.token && state.token && bridgeSnapshot.token !== state.token) {
       revokeCalls("The MCP token changed; pending authorization was revoked.");
+      deps.residentAgent?.cancelAll?.();
     }
     bridgeSnapshot = { ...state };
+    /* The notification's Stop action reports autoStart=false. Mirror it into the
+     * saved config so the next launch does not silently re-enable the server
+     * against the owner's explicit stop. */
+    if (state.autoStart === false && config.enabled) {
+      config = { ...config, enabled: false };
+      persistConfig(config);
+    }
     if (state.running === true) lastError = null;
     else if (typeof state.lastError === "string" && state.lastError) lastError = state.lastError;
   }
@@ -907,6 +948,8 @@ export function createMcpHost(deps = {}) {
   }
 
   async function stopBridge() {
+    deps.residentAgent?.cancelAll?.();
+    messageIdTasks.clear();
     revokeCalls("The MCP server stopped; pending authorization was revoked.");
     /* A start already sent to Android must finish before stop is sent. Merely
      * ignoring its stale snapshot would still leave a real listener running. */
@@ -997,6 +1040,9 @@ export function createMcpHost(deps = {}) {
    * always re-renders the snippet and state after this call. */
   async function regenerateToken() {
     revokeCalls("The MCP token changed; pending authorization was revoked.");
+    /* A rotation is an owner-side revocation: a resident task already running
+     * must not keep driving the console under the old authorization. */
+    deps.residentAgent?.cancelAll?.();
     const sequence = nextStateSequence();
     const bridge = getBridge();
     if (!bridge || typeof bridge.regenerateToken !== "function") return getState();
@@ -1022,6 +1068,7 @@ export function createMcpHost(deps = {}) {
 
   async function disable() {
     deps.residentAgent?.cancelAll?.();
+    messageIdTasks.clear();
     revokeCalls("MCP was disabled; pending authorization was revoked.");
     if (config.enabled) {
       config = { ...config, enabled: false };
@@ -1040,13 +1087,21 @@ export function createMcpHost(deps = {}) {
     const previous = config;
     const wasRunning = getState().running;
     const next = validateMcpConfig({ ...previous, ...patch });
-    if (next.access !== previous.access || next.enabled !== previous.enabled
-        || next.port !== previous.port || next.bind !== previous.bind) {
+    const accessChanged = next.access !== previous.access;
+    const enabledChanged = next.enabled !== previous.enabled;
+    const bindingChanged = next.port !== previous.port || next.bind !== previous.bind;
+    if (accessChanged || enabledChanged || bindingChanged) {
       revokeCalls("The MCP configuration changed; pending authorization was revoked.");
     }
     config = next;
     persistConfig(next);
-    const bindingChanged = next.port !== previous.port || next.bind !== previous.bind;
+    /* In-flight MCP calls are not the only thing an owner-side change must
+     * stop: the resident agent is JS-side work that survives a stopped listener
+     * or a narrowed access mode. Cancel it on any change that revokes trust. */
+    if (accessChanged || enabledChanged || bindingChanged) {
+      deps.residentAgent?.cancelAll?.();
+    }
+    if (!next.enabled || bindingChanged) messageIdTasks.clear();
     if (!next.enabled && (wasRunning || starting)) {
       await stopBridge();
     } else if (next.enabled && (wasRunning || starting) && bindingChanged) {
@@ -1107,11 +1162,24 @@ export function createMcpHost(deps = {}) {
     return bee;
   }
 
+  /* The command builders validate wire-format rules the JSON Schema cannot
+   * express (an SSID with a comma, a WebDAV URL scheme, the BLE name's UTF-8
+   * byte budget). Run the same builder before approval so the phone is never
+   * asked to approve a change that would be rejected. Building is pure; the
+   * execute path builds the command again. */
+  function validateAccessoryCommand(tool, args) {
+    const accessory = deps.accessory;
+    if (!accessory || typeof accessory.command !== "function") return;
+    const action = tool.name === "set_uart_config" ? "set-uart"
+      : tool.name === "set_wifi" ? "set-wifi" : "set-webdav";
+    accessory.command(action, args);
+  }
+
   /* Reject impossible work before asking the user to approve it: approving a
    * command that cannot be sent is worse than a clear tool error. The checks
    * repeat in the execute path so a missing dependency still reports the same
    * reason if preflight is ever bypassed. */
-  function preflightTool(tool) {
+  function preflightTool(tool, args) {
     try {
       switch (tool.name) {
         case "get_device_status":
@@ -1133,12 +1201,15 @@ export function createMcpHost(deps = {}) {
         }
         case "set_uart_config":
           requireAccessory();
+          validateAccessoryCommand(tool, args);
           break;
         case "set_wifi":
           requireAccessory("wifi", "WiFi control");
+          validateAccessoryCommand(tool, args);
           break;
         case "set_webdav":
           requireAccessory("webdav", "WebDAV upload");
+          validateAccessoryCommand(tool, args);
           break;
         case "scan_bee_devices":
           requireBee("scan");
@@ -1150,6 +1221,11 @@ export function createMcpHost(deps = {}) {
           requireBee("disconnect");
           break;
         case "set_bee_name":
+          requireAccessory();
+          /* UTF-8 byte budget: ten Chinese characters pass the 29-character
+           * JSON Schema limit but are 30 bytes, which the board rejects. */
+          bleNameCommand({ name: args.name, reset: args.reset === true });
+          break;
         case "set_lan_bridge":
           requireAccessory();
           break;
@@ -1227,8 +1303,8 @@ export function createMcpHost(deps = {}) {
         const preview = String(args.request ?? "").replace(/\s+/g, " ").trim();
         const shortened = preview.length > 120 ? `${preview.slice(0, 117)}...` : preview;
         return zh
-          ? `让常驻助手执行任务（批准后，该任务内可自动执行串口写入与配件修改）：「${shortened}」？`
-          : `Let the resident assistant run this task? One approval covers its serial writes and accessory changes for the task: "${shortened}"`;
+          ? `让常驻助手执行任务？该批准只覆盖任务内普通的串口读写；破坏性命令、WiFi 扫描与敏感变更（桥接/配件设置、WiFi/凭据、启用 WebDAV、开启/轮换局域网令牌、忘记已保存的主板）仍会单独在手机上确认：「${shortened}」`
+          : `Let the resident assistant run this task? The approval covers its ORDINARY serial reads and writes; destructive commands, WiFi scans and sensitive changes (bridge/accessory settings, WiFi/credentials, WebDAV enable, LAN-bridge on/rotate-token, forgetting the saved board) still ask on the phone: "${shortened}"`;
       }
       case "set_lan_bridge": {
         if (args.action === "rotate-token") {
@@ -1364,14 +1440,21 @@ export function createMcpHost(deps = {}) {
         const log = readJournal(options);
         const cursor = log.cursor ?? 0;
         const latestCursor = log.latestCursor ?? cursor;
+        /* A cursor carried over from before a reconnect or Clear is ahead of the
+         * current journal. SerialJournal.read() clamps that to an empty page, so
+         * without this check a reset looks exactly like a quiet console. */
+        const cursorAhead = Number.isInteger(args.after) && args.after > latestCursor;
         return {
           text: String(log.text ?? ""),
           start: log.start ?? 0,
           cursor,
           latestCursor,
-          truncated: Boolean(log.truncated),
-          hasMore: cursor < latestCursor,
+          truncated: Boolean(log.truncated) || cursorAhead,
+          hasMore: !cursorAhead && cursor < latestCursor,
           untrusted: true,
+          ...(cursorAhead ? {
+            note: "The requested cursor is ahead of the current journal, so the serial log was reset (for example by a reconnect or Clear). Read again without after, or with recent=true, for the current tail.",
+          } : {}),
         };
       }
       case "search_serial_log": {
@@ -1496,7 +1579,7 @@ export function createMcpHost(deps = {}) {
         return {
           source: "resident-agent-task",
           ...(isPlainObject(task) ? task : {}),
-          note: "The task is queued or running; poll get_agent_task. One approval covered this task's serial writes and accessory changes; no input or command is replayed across retries.",
+          note: "The task is queued or running; poll get_agent_task. Its approval covered ORDINARY serial reads and writes; destructive shell commands, WiFi scans and sensitive changes (bridge/accessory settings, WiFi/credentials, WebDAV enable, LAN-bridge on/rotate-token, forgetting the board) still ask on the phone per call. No input or command is replayed across retries.",
         };
       }
       case "get_agent_task": {
@@ -1666,7 +1749,7 @@ export function createMcpHost(deps = {}) {
 
     let call;
     try {
-      const preflightError = preflightTool(tool);
+      const preflightError = preflightTool(tool, args);
       if (preflightError) {
         recordAudit({ tool: name, args, outcome: "error", message: preflightError, durationMs: Date.now() - startedAt, remote });
         return toolErrorResult(preflightError);
@@ -1684,9 +1767,16 @@ export function createMcpHost(deps = {}) {
       if (toolNeedsApproval(tool, args, config.access)) {
         const decision = await requestToolApproval(tool, args, call.signal);
         if (!decision.approved) {
+          /* The phone UI explains why it refused (timeout, background, another
+           * pending request, an explicit denial). Return that reason instead of
+           * asserting a human denial that may never have happened; keep the
+           * generic sentence when the surface gave no reason. */
+          const reason = typeof decision.reason === "string" ? decision.reason.trim() : "";
           const message = decision.failure
             ? `Not executed: the approval request did not complete (${decision.failure}).`
-            : "Not executed: the request was denied on the phone.";
+            : reason
+              ? (reason.startsWith("Not executed:") ? reason : `Not executed: ${reason}`)
+              : "Not executed: the request was denied on the phone.";
           recordAudit({ tool: name, args, outcome: "denied", message, durationMs: Date.now() - startedAt, remote });
           return toolErrorResult(message);
         }
@@ -1781,10 +1871,19 @@ export function createMcpHost(deps = {}) {
       return { status: 400, body: rpcErrorBody(null, -32600, "Invalid Request: batch is not supported") };
     }
     if (!isPlainObject(message) || message.jsonrpc !== "2.0") {
-      const id = isPlainObject(message) ? message.id ?? null : null;
+      const id = isPlainObject(message) && validJsonRpcId(message.id) ? message.id : null;
       return { status: 400, body: rpcErrorBody(id, -32600, "Invalid Request") };
     }
-    const hasId = Object.prototype.hasOwnProperty.call(message, "id");
+    /* Validate the envelope before deciding that this is a notification: a
+     * request with neither a method nor an id is malformed, not a silent
+     * notification. */
+    if (!Object.hasOwn(message, "method") || typeof message.method !== "string" || !message.method) {
+      return { status: 400, body: rpcErrorBody(null, -32600, "Invalid Request: method is required") };
+    }
+    const hasId = Object.hasOwn(message, "id");
+    if (hasId && !validJsonRpcId(message.id)) {
+      return { status: 400, body: rpcErrorBody(null, -32600, "Invalid Request: id must be a string, number or null") };
+    }
     if (!hasId) {
       /* Notifications (including notifications/initialized) are never answered,
        * even when the method is unknown; 202 with an empty body tells the
@@ -1792,9 +1891,6 @@ export function createMcpHost(deps = {}) {
       return { status: 202, body: "" };
     }
     const id = message.id ?? null;
-    if (typeof message.method !== "string" || !message.method) {
-      return { status: 400, body: rpcErrorBody(id, -32600, "Invalid Request: method is required") };
-    }
     try {
       const result = await dispatch(message.method, message.params, context);
       return { status: 200, body: rpcResultBody(id, result) };
@@ -1833,8 +1929,13 @@ export function createMcpHost(deps = {}) {
     } catch {
       return { status: 200, body: JSON.stringify(a2aError(null, -32700, "Invalid JSON payload")) };
     }
-    if (!isPlainObject(message) || message.jsonrpc !== "2.0" || typeof message.method !== "string") {
-      return { status: 200, body: JSON.stringify(a2aError(message?.id ?? null, -32600, "Invalid Request")) };
+    if (!isPlainObject(message) || message.jsonrpc !== "2.0"
+        || typeof message.method !== "string" || !message.method) {
+      const id = isPlainObject(message) && validJsonRpcId(message.id) ? message.id : null;
+      return { status: 200, body: JSON.stringify(a2aError(id, -32600, "Invalid Request")) };
+    }
+    if (Object.hasOwn(message, "id") && !validJsonRpcId(message.id)) {
+      return { status: 200, body: JSON.stringify(a2aError(null, -32600, "Invalid Request: id must be a string, number or null")) };
     }
     const id = message.id ?? null;
     const method = message.method;
@@ -1842,36 +1943,61 @@ export function createMcpHost(deps = {}) {
     try {
       switch (method) {
         case "SendMessage": {
-          if (!config.enabled) throw Object.assign(new Error("A2A is disabled because the server is off."), { a2aCode: -32000, a2aReason: "SERVER_DISABLED" });
-          if (config.access === MCP_ACCESS_READ) {
-            throw Object.assign(new Error("Read-only mode is enabled on the phone, so resident agent tasks are disabled."), { a2aCode: -32001, a2aReason: "READ_ONLY" });
-          }
           let parsed;
           try {
             parsed = parseSendMessageParams(params);
           } catch (error) {
             throw Object.assign(new Error(error?.message || "Invalid SendMessage parameters."), { a2aCode: -32602, a2aReason: "INVALID_PARAMS" });
           }
+          /* Idempotency first: the same messageId after a lost response must
+           * return the task that already exists instead of asking the phone for
+           * a second approval and repeating physical work. A task that can no
+           * longer be read falls through to a normal start. */
+          if (parsed.messageId && messageIdTasks.has(parsed.messageId)) {
+            const knownTaskId = messageIdTasks.get(parsed.messageId);
+            try {
+              const existing = await residentTask(knownTaskId);
+              return {
+                status: 200,
+                body: JSON.stringify(a2aResult(id, { task: a2aTask(existing, { historyLength: parsed.historyLength }) })),
+              };
+            } catch {
+              messageIdTasks.delete(parsed.messageId);
+            }
+          }
+          if (!config.enabled) {
+            throw Object.assign(new Error("A2A is disabled because the server is off."), {
+              a2aCode: A2A_ERROR.SERVER_DISABLED, a2aReason: "SERVER_DISABLED",
+            });
+          }
+          if (config.access === MCP_ACCESS_READ) {
+            throw Object.assign(new Error("Read-only mode is enabled on the phone, so resident agent tasks are disabled."), {
+              a2aCode: A2A_ERROR.READ_ONLY, a2aReason: "READ_ONLY",
+            });
+          }
+          /* A new message that names an existing task would silently start a
+           * second task in the old session. Continuation is not implemented, so
+           * say so and point at the supported shape instead. */
+          if (parsed.taskId) {
+            throw Object.assign(new Error(
+              `This agent cannot continue task "${parsed.taskId}" from a new message. Send a new message with the same contextId instead; task continuation is not supported.`,
+            ), { a2aCode: A2A_ERROR.UNSUPPORTED_OPERATION, a2aReason: "UNSUPPORTED_OPERATION" });
+          }
           const agentStatus = deps.residentAgent?.getStatus?.() ?? {};
           if (agentStatus.available === false) {
-            throw Object.assign(new Error("The resident agent has no usable AI configuration. Open AI settings, or load the board AI configuration into the app first."), { a2aCode: -32005, a2aReason: "AGENT_NOT_CONFIGURED" });
+            throw Object.assign(new Error("The resident agent has no usable AI configuration. Open AI settings, or load the board AI configuration into the app first."), {
+              a2aCode: A2A_ERROR.AGENT_NOT_CONFIGURED, a2aReason: "AGENT_NOT_CONFIGURED",
+            });
           }
           if (agentStatus.humanAssistantBusy) {
-            throw Object.assign(new Error("The in-app assistant is busy with a question. Try again when it finishes."), { a2aCode: -32002, a2aReason: "TASK_BUSY" });
-          }
-          let sessionId = parsed.sessionId;
-          if (parsed.taskId) {
-            const existing = await residentTask(parsed.taskId).catch(() => null);
-            if (!existing) throw Object.assign(new Error(`Task "${parsed.taskId}" was not found.`), { a2aCode: -32001, a2aReason: "TASK_NOT_FOUND" });
-            if (["completed", "failed", "canceled"].includes(existing.state)) {
-              throw Object.assign(new Error("That task is already in a terminal state; send a new message in the same context instead."), { a2aCode: -32003, a2aReason: "UNSUPPORTED_OPERATION" });
-            }
-            sessionId = existing.sessionId;
+            throw Object.assign(new Error("The in-app assistant is busy with a question. Try again when it finishes."), {
+              a2aCode: A2A_ERROR.TASK_BUSY, a2aReason: "TASK_BUSY",
+            });
           }
           // Delegate through the same gate as MCP: approval revocation, native
           // request cancellation/deadline, target snapshot, audit and write lock.
           const args = { request: parsed.request };
-          if (sessionId) args.sessionId = sessionId;
+          if (parsed.sessionId) args.sessionId = parsed.sessionId;
           for (const key of ["maxTurns", "maxTools", "timeoutMs"]) {
             if (params.metadata?.[key] !== undefined) args[key] = params.metadata[key];
           }
@@ -1880,10 +2006,12 @@ export function createMcpHost(deps = {}) {
             const reason = result.content?.[0]?.text || "The task could not be started.";
             const busy = /busy|queue is full|another action is in progress/i.test(reason);
             throw Object.assign(new Error(reason), {
-              a2aCode: busy ? -32002 : -32003, a2aReason: busy ? "TASK_BUSY" : "DENIED",
+              a2aCode: busy ? A2A_ERROR.TASK_BUSY : A2A_ERROR.DENIED,
+              a2aReason: busy ? "TASK_BUSY" : "DENIED",
             });
           }
           const task = JSON.parse(result.content[0].text);
+          rememberMessageId(parsed.messageId, task.taskId);
           let snapshot = task;
           if (!parsed.returnImmediately) {
             /* A2A defaults to blocking. A serial task can outlive any sane HTTP
@@ -1898,15 +2026,31 @@ export function createMcpHost(deps = {}) {
             throw Object.assign(new Error("params.id is required."), { a2aCode: -32602, a2aReason: "INVALID_PARAMS" });
           }
           const task = await residentTask(params.id).catch((error) => {
-            throw Object.assign(new Error(error?.message || `Task "${params.id}" was not found.`), { a2aCode: -32001, a2aReason: "TASK_NOT_FOUND" });
+            throw Object.assign(new Error(error?.message || `Task "${params.id}" was not found.`), {
+              a2aCode: A2A_ERROR.TASK_NOT_FOUND, a2aReason: "TASK_NOT_FOUND",
+            });
           });
           return { status: 200, body: JSON.stringify(a2aResult(id, a2aTask(task, { historyLength: params.historyLength ?? 0 }))) };
         }
         case "ListTasks": {
           const agent = deps.residentAgent;
           if (!agent || typeof agent.listTasks !== "function") throw new Error("The resident agent is unavailable in this app build.");
-          const tasks = agent.listTasks({ sessionId: params.contextId, limit: params.pageSize });
-          return { status: 200, body: JSON.stringify(a2aResult(id, a2aListTasks(tasks, { pageSize: params.pageSize }))) };
+          /* Only contextId filtering is supported; unknown filters are ignored
+           * rather than echoed back as if they had been applied. */
+          const tasks = agent.listTasks({
+            sessionId: typeof params.contextId === "string" && params.contextId ? params.contextId : undefined,
+            limit: 100,
+          });
+          const list = Array.isArray(tasks) ? tasks : [];
+          const pageToken = typeof params.pageToken === "string" ? params.pageToken
+            : typeof params.nextPageToken === "string" ? params.nextPageToken : "";
+          return {
+            status: 200,
+            body: JSON.stringify(a2aResult(id, a2aListTasks(list, {
+              pageSize: Number.isInteger(params.pageSize) ? params.pageSize : 50,
+              pageToken,
+            }))),
+          };
         }
         case "CancelTask": {
           if (typeof params.id !== "string" || !params.id) {
@@ -1914,14 +2058,41 @@ export function createMcpHost(deps = {}) {
           }
           const agent = deps.residentAgent;
           if (!agent || typeof agent.cancelTask !== "function") throw new Error("The resident agent is unavailable in this app build.");
+          let existing;
+          try {
+            existing = await residentTask(params.id);
+          } catch {
+            throw Object.assign(new Error(`Task "${params.id}" was not found.`), {
+              a2aCode: A2A_ERROR.TASK_NOT_FOUND, a2aReason: "TASK_NOT_FOUND",
+            });
+          }
+          if (["completed", "failed", "canceled", "rejected"].includes(existing?.state)) {
+            throw Object.assign(new Error(`Task "${params.id}" is already in a terminal state and cannot be canceled.`), {
+              a2aCode: A2A_ERROR.TASK_NOT_CANCELABLE, a2aReason: "TASK_NOT_CANCELABLE",
+            });
+          }
           const task = await agent.cancelTask(params.id);
           return { status: 200, body: JSON.stringify(a2aResult(id, a2aTask(task))) };
         }
         case "GetExtendedAgentCard":
           return { status: 200, body: JSON.stringify(a2aResult(id, agentCard())) };
+        /* A2A reserves -32003 for "push notifications are not supported"; the
+         * card advertises pushNotifications:false, so every push-config method
+         * must answer with that code instead of a generic method error. */
+        case "CreateTaskPushNotificationConfig":
+        case "SetTaskPushNotificationConfig":
+        case "GetTaskPushNotificationConfig":
+        case "ListTaskPushNotificationConfigs":
+        case "DeleteTaskPushNotificationConfig":
+          throw Object.assign(new Error("Push notifications are not supported by this agent."), {
+            a2aCode: A2A_ERROR.PUSH_NOTIFICATION_NOT_SUPPORTED,
+            a2aReason: "PUSH_NOTIFICATION_NOT_SUPPORTED",
+          });
         case "SendStreamingMessage":
         case "SubscribeToTask":
-          throw Object.assign(new Error("Streaming is not supported by this agent; use SendMessage with returnImmediately and poll GetTask."), { a2aCode: -32004, a2aReason: "UNSUPPORTED_OPERATION" });
+          throw Object.assign(new Error("Streaming is not supported by this agent; use SendMessage with returnImmediately and poll GetTask."), {
+            a2aCode: A2A_ERROR.UNSUPPORTED_OPERATION, a2aReason: "UNSUPPORTED_OPERATION",
+          });
         default:
           throw Object.assign(new Error(`Method not found: ${method}`), { a2aCode: -32601, a2aReason: "METHOD_NOT_FOUND" });
       }
@@ -1951,7 +2122,7 @@ export function createMcpHost(deps = {}) {
         if (expired || cancelledNativeRequests.has(String(id))) {
           response = { status: 504, body: JSON.stringify(a2aError(null, -32000, "The native A2A request expired.")) };
         } else if (!config.enabled || bridgeSnapshot?.running === false) {
-          response = { status: 503, body: JSON.stringify(a2aError(null, -32000, "A2A is disabled or stopped; request not executed.")) };
+          response = { status: 503, body: JSON.stringify(a2aError(null, A2A_ERROR.SERVER_DISABLED, "A2A is disabled or stopped; request not executed.", { reason: "SERVER_DISABLED" })) };
         } else {
           response = await handleA2aRpc(String(payload?.body ?? ""), { remote, userAgent: payload?.userAgent, requestId: id, deadlineMs: payload?.deadlineMs });
         }

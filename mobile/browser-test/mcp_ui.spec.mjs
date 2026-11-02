@@ -583,7 +583,7 @@ test("a write tool needs on-phone approval: deny answers isError, allow executes
   await banner.locator('[data-mcp="approvalDeny"]').tap();
   const denied = parsedResponse(await waitForResponse(page, "req-deny"));
   expect(denied.result.isError).toBe(true);
-  expect(resultText(denied)).toBe("Not executed: the request was denied on the phone.");
+  expect(resultText(denied)).toBe("Not executed: Denied; nothing was executed.");
   await expect(banner).toBeHidden();
   expect(await page.evaluate(() => window.__mcpTestExecutions)).toEqual([]);
 
@@ -745,7 +745,7 @@ test("high-risk-only access runs safe writes but still approves destructive inpu
   await banner.locator('[data-mcp="approvalDeny"]').tap();
   const risky = parsedResponse(await waitForResponse(page, "req-guarded-risky"));
   expect(risky.result.isError).toBe(true);
-  expect(resultText(risky)).toBe("Not executed: the request was denied on the phone.");
+  expect(resultText(risky)).toBe("Not executed: Denied; nothing was executed.");
   await expect(banner).toBeHidden();
   const executions = await page.evaluate(() => window.__mcpTestExecutions);
   expect(executions).toEqual([
@@ -834,7 +834,8 @@ test("a notification Deny answers isError and executes nothing", async ({ page }
   const response = await waitForResponse(page, "req-notif-deny");
   const payload = parsedResponse(response);
   expect(payload.result.isError).toBe(true);
-  expect(resultText(payload)).toContain("denied on the phone");
+  /* The notification UI supplies its localized denial reason; the host returns it. */
+  expect(resultText(payload)).toContain("Not executed: Denied");
   expect(await page.evaluate(() => window.__mcpTestExecutions)).toEqual([]);
 });
 
@@ -858,7 +859,7 @@ test("a hidden page without notification permission refuses instead of hanging",
   const response = await waitForResponse(page, "req-notif-unavailable");
   const payload = parsedResponse(response);
   expect(payload.result.isError).toBe(true);
-  expect(resultText(payload)).toContain("denied on the phone");
+  expect(resultText(payload)).toContain("Not executed: The app is not in the foreground");
   expect(await page.evaluate(() => window.__mcpTestExecutions)).toEqual([]);
 });
 
@@ -928,3 +929,110 @@ for (const [width, lang, theme] of [[390, "zh", "light"], [390, "en", "dark"], [
     await page.locator("#agentStop").click();
   });
 }
+
+/* ------------------------------------------------------------------ *
+ * (h) Review regressions: banner reachability and visible status messages
+ * ------------------------------------------------------------------ */
+
+test("the approval banner paints above the terminal fullscreen fallback", async ({ page }) => {
+  await installFakeBridge(page);
+  await exposeAppInternals(page);
+  await openApp(page);
+  await installFakeDevice(page);
+  await openAiSettings(page);
+  await enableMcp(page);
+  /* app.js falls back to this class on WebViews that reject requestFullscreen;
+   * the terminal then paints at z-index 1000 and would otherwise cover the
+   * banner, leaving the write to time out unseen. */
+  await page.evaluate(() => {
+    document.getElementById("terminalCard").classList.add("terminal-fullscreen-fallback");
+    document.body.classList.add("terminal-fullscreen-fallback");
+  });
+  await callRpc(page, {
+    bridgeId: "req-fallback",
+    rpcId: "rpc-fallback",
+    method: "tools/call",
+    params: { name: "send_serial_input", arguments: { text: "uname -a", appendEnter: true } },
+  });
+  const banner = page.locator("#mcpApproval");
+  await expect(banner).toBeVisible();
+  const topmost = await page.evaluate(() => {
+    const element = document.getElementById("mcpApproval");
+    const rect = element.getBoundingClientRect();
+    const hit = document.elementFromPoint(
+      rect.left + rect.width / 2,
+      rect.top + rect.height / 2,
+    );
+    if (!hit) return "none";
+    return hit.closest("#mcpApproval") ? "banner" : `${hit.tagName}#${hit.id}`;
+  });
+  expect(topmost).toBe("banner");
+  await banner.locator('[data-mcp="approvalDeny"]').tap();
+  await waitForResponse(page, "req-fallback");
+  await page.evaluate(() => {
+    document.getElementById("terminalCard").classList.remove("terminal-fullscreen-fallback");
+    document.body.classList.remove("terminal-fullscreen-fallback");
+  });
+});
+
+test("the approval banner moves into the fullscreen element and is restored afterwards", async ({ page }) => {
+  await installFakeBridge(page);
+  await exposeAppInternals(page);
+  await openApp(page);
+  await installFakeDevice(page);
+  await openAiSettings(page);
+  await enableMcp(page);
+  /* Headless Chromium has no reliable user-gesture fullscreen; a readable
+   * fullscreenElement exercises the same branch App code sees on a phone. The
+   * drawer is closed so it cannot intercept the banner (on a phone the terminal
+   * is fullscreen and the drawer is not showing). */
+  await page.locator("#drawerClose").tap();
+  await expect(page.locator("#controlsPanel")).toHaveAttribute("aria-hidden", "true");
+  await page.evaluate(() => {
+    Object.defineProperty(document, "fullscreenElement", {
+      configurable: true,
+      get: () => document.getElementById("terminalCard"),
+    });
+  });
+  await callRpc(page, {
+    bridgeId: "req-fullscreen",
+    rpcId: "rpc-fullscreen",
+    method: "tools/call",
+    params: { name: "send_serial_input", arguments: { text: "pwd", appendEnter: true } },
+  });
+  const banner = page.locator("#mcpApproval");
+  await expect(banner).toBeVisible();
+  expect(
+    await page.evaluate(() => document.getElementById("mcpApproval")?.parentElement?.id),
+  ).toBe("terminalCard");
+  await banner.locator('[data-mcp="approvalDeny"]').tap();
+  await waitForResponse(page, "req-fullscreen");
+  await expect(banner).toBeHidden();
+  expect(
+    await page.evaluate(() => document.getElementById("mcpApproval")?.parentElement?.tagName),
+  ).toBe("BODY");
+  await page.evaluate(() => { delete document.fullscreenElement; });
+});
+
+test("an invalid port error and the token rotation confirmation survive the refresh", async ({ page }) => {
+  await installFakeBridge(page);
+  await exposeAppInternals(page);
+  await openApp(page);
+  await openAiSettings(page);
+  await enableMcp(page);
+  await revealMcpCard(page);
+
+  await page.locator("#mcpPort").fill("80");
+  await page.locator("#mcpPort").press("Tab");
+  /* The handler refreshes the card after saving/validation; the error must not
+   * be replaced by the "Running" line before the user can read it. */
+  await expect(page.locator("#mcpStatus")).toContainText("MCP port must be an integer between 1024 and 65535.");
+  expect(
+    await page.evaluate(() => JSON.parse(localStorage.getItem("linkr-mcp-config-v1")).port),
+  ).toBe(8712);
+
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.locator("#mcpRegenerate").tap();
+  await expect(page.locator("#mcpStatus")).toContainText(/New token generated|已生成新令牌/);
+  expect(await page.evaluate(() => window.__mcpCalls.regenerateToken)).toBe(1);
+});

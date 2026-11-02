@@ -16,6 +16,21 @@ export const A2A_SKILL_ID = "linkr-bee-serial-console";
 export const A2A_JSONRPC_PATH = "/a2a";
 export const A2A_CARD_PATH = "/.well-known/agent-card.json";
 
+/* A2A v1.0 reserves -32001..-32004. App-specific failures must not reuse those
+ * codes: a client that sees -32001 concludes "task not found", not "the phone
+ * is in read-only mode". The custom range below is outside the reserved set. */
+export const A2A_ERROR = Object.freeze({
+  TASK_NOT_FOUND: -32001,
+  TASK_NOT_CANCELABLE: -32002,
+  PUSH_NOTIFICATION_NOT_SUPPORTED: -32003,
+  UNSUPPORTED_OPERATION: -32004,
+  SERVER_DISABLED: -32010,
+  READ_ONLY: -32011,
+  AGENT_NOT_CONFIGURED: -32012,
+  TASK_BUSY: -32013,
+  DENIED: -32014,
+});
+
 const TASK_STATE = {
   queued: "TASK_STATE_SUBMITTED",
   running: "TASK_STATE_WORKING",
@@ -58,6 +73,9 @@ export function messageText(message) {
   return texts.join("\n");
 }
 
+/* A2A v1.0 defaults to a blocking SendMessage: the response carries the task
+ * after it settles (or after a bounded wait). Only an explicit
+ * returnImmediately=true asks for the queued task right away. */
 export function parseSendMessageParams(params = {}) {
   if (!params || typeof params !== "object") throw new Error("params must be an object");
   const text = messageText(params.message);
@@ -70,7 +88,7 @@ export function parseSendMessageParams(params = {}) {
     sessionId: typeof message.contextId === "string" && message.contextId ? message.contextId : undefined,
     taskId: typeof message.taskId === "string" && message.taskId ? message.taskId : undefined,
     messageId: typeof message.messageId === "string" ? message.messageId : undefined,
-    returnImmediately: configuration.returnImmediately !== false,
+    returnImmediately: configuration.returnImmediately === true,
     historyLength: Number.isInteger(configuration.historyLength) ? configuration.historyLength : 0,
   };
 }
@@ -198,10 +216,21 @@ export function a2aTask(task, { historyLength = 0 } = {}) {
   return result;
 }
 
-export function a2aListTasks(tasks, { pageSize = 50 } = {}) {
-  const list = (Array.isArray(tasks) ? tasks : []).slice(0, Math.max(1, Math.min(100, pageSize)));
+/* One page of tasks plus the totals the spec asks for. `nextPageToken` is a
+ * plain numeric offset into the matched list, so a client can page without any
+ * server-side state; the request may use pageToken or the response's own
+ * nextPageToken name. Unknown filters are ignored by the caller, not claimed
+ * here. */
+export function a2aListTasks(tasks, { pageSize = 50, pageToken = "", nextPageToken = "" } = {}) {
+  const list = Array.isArray(tasks) ? tasks : [];
+  const size = Math.max(1, Math.min(100, Number.isInteger(pageSize) ? pageSize : 50));
+  const requested = String(pageToken || nextPageToken || "").trim();
+  const requestedOffset = Number.parseInt(requested, 10);
+  const offset = Number.isFinite(requestedOffset) && requestedOffset > 0 ? requestedOffset : 0;
+  const page = list.slice(offset, offset + size);
+  const nextOffset = offset + page.length;
   return {
-    tasks: list.map((task) => a2aTask({
+    tasks: page.map((task) => a2aTask({
       taskId: task.taskId,
       sessionId: task.sessionId,
       state: task.state,
@@ -213,8 +242,8 @@ export function a2aListTasks(tasks, { pageSize = 50 } = {}) {
       startedAt: task.startedAt,
       finishedAt: task.finishedAt,
     })),
-    nextPageToken: "",
-    pageSize: list.length,
+    nextPageToken: nextOffset < list.length ? String(nextOffset) : "",
+    pageSize: page.length,
     totalSize: list.length,
   };
 }

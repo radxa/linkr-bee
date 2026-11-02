@@ -68,7 +68,6 @@ const labels = {
   approvalDenied: ["已拒绝，操作未执行。", "Denied; nothing was executed."],
   approvalBackground: ["App 不在前台，写入操作需要在手机上确认，因此未执行。", "The app is not in the foreground, so the write was not executed."],
   approvalBusy: ["已有另一个等待确认的请求。", "Another approval is already pending."],
-  approvalAccess: ["当前为只读模式。", "The server is in read-only mode."],
   tool_get_device_status: ["读取设备状态", "Read device status"],
   tool_read_serial_log: ["读取串口日志", "Read serial log"],
   tool_search_serial_log: ["查找串口日志", "Search serial log"],
@@ -256,6 +255,7 @@ export function createMcpUi({ mount, getLang, host, getBridge = () => null }) {
     tool: banner.querySelector(".mcp-approval-tool"),
     argsLabel: banner.querySelector(".mcp-approval-args-label"),
     args: banner.querySelector(".mcp-approval-args"),
+    hint: banner.querySelector('[data-mcp="approvalHint"]'),
     deny: banner.querySelector('[data-mcp="approvalDeny"]'),
     allow: banner.querySelector('[data-mcp="approvalAllow"]'),
   };
@@ -268,6 +268,10 @@ export function createMcpUi({ mount, getLang, host, getBridge = () => null }) {
   let approvalCounter = 0;
   let refreshInFlight = false;
   let refreshTimer = null;
+  let transientStatus = null;
+  /* The banner normally lives in <body>; entering real fullscreen moves it
+   * inside the fullscreen element, and hiding it puts it back. */
+  let bannerOriginalParent = null;
 
   function applyLabels() {
     section.querySelectorAll("[data-mcp]").forEach((node) => {
@@ -279,6 +283,7 @@ export function createMcpUi({ mount, getLang, host, getBridge = () => null }) {
       if (labels[key]) node.textContent = text(key);
     });
     bannerParts.argsLabel.textContent = text("approvalArgs");
+    bannerParts.hint.textContent = text("approvalHint");
     bannerParts.deny.textContent = text("approvalDeny");
     bannerParts.allow.textContent = text("approvalAllow");
     banner.querySelector(".mcp-approval-title").textContent = text("approvalTitle");
@@ -287,6 +292,29 @@ export function createMcpUi({ mount, getLang, host, getBridge = () => null }) {
   function setStatus(message, isError = false) {
     elements.status.textContent = message || "";
     elements.status.classList.toggle("field-error", Boolean(isError));
+  }
+
+  /* Handlers run refresh() after saving, and render() rewrites the status line;
+   * a one-off confirmation or validation error would vanish instantly. Keep it
+   * for a few seconds (or until the next action replaces it). */
+  function setTransientStatus(message, isError = false, ttlMs = 8000) {
+    transientStatus = { message, isError, until: Date.now() + ttlMs };
+    setStatus(message, isError);
+  }
+
+  function renderStatus(defaultMessage, isError = false) {
+    if (transientStatus && Date.now() < transientStatus.until) {
+      setStatus(transientStatus.message, transientStatus.isError);
+      return;
+    }
+    transientStatus = null;
+    setStatus(defaultMessage, isError);
+  }
+
+  /* A new user action supersedes a previous confirmation/error, otherwise a
+   * stale "new token generated" line would hide the state that action produced. */
+  function clearTransientStatus() {
+    transientStatus = null;
   }
 
   function tokenVisible() {
@@ -323,12 +351,12 @@ export function createMcpUi({ mount, getLang, host, getBridge = () => null }) {
     const snippet = claudeConfigSnippet({ url: state.url || url, token: state.token || "" });
     elements.snippet.textContent = snippet;
 
-    if (!config.enabled) setStatus(text("stopped"));
-    else if (state.lastError) setStatus(`${text("errorPrefix")}${state.lastError}`, true);
+    if (!config.enabled) renderStatus(text("stopped"));
+    else if (state.lastError) renderStatus(`${text("errorPrefix")}${state.lastError}`, true);
     else if (state.running) {
       const foreground = state.foreground ? text("foreground") : text("background");
-      setStatus(`${text("running")} · ${state.url || url} · ${foreground}`, !state.foreground);
-    } else setStatus(text("idle"), true);
+      renderStatus(`${text("running")} · ${state.url || url} · ${foreground}`, !state.foreground);
+    } else renderStatus(text("idle"), true);
 
     renderAudit(lang);
   }
@@ -369,8 +397,13 @@ export function createMcpUi({ mount, getLang, host, getBridge = () => null }) {
       else state = host.getState();
       config = host.getConfig();
       render();
-      /* Android can pause the Activity without changing WebView visibility. */
-      void notificationOnHide();
+      /* Android can pause the Activity without changing WebView visibility, and
+       * it can also resume without a stateChanged event reaching the WebView.
+       * Re-check the approval surface on every refresh as well. */
+      if (pendingApproval) {
+        if (await isAppHidden()) void notificationOnHide();
+        else void resurfacePendingApproval();
+      }
     } finally {
       refreshInFlight = false;
     }
@@ -387,10 +420,10 @@ export function createMcpUi({ mount, getLang, host, getBridge = () => null }) {
   async function copyText(value) {
     try {
       await navigator.clipboard.writeText(value);
-      setStatus(text("copied"));
+      setTransientStatus(text("copied"), false, 4000);
     } catch {
       // A WebView without clipboard permission still lets the user select text.
-      setStatus(text("copyFailed"), true);
+      setTransientStatus(text("copyFailed"), true, 6000);
     }
   }
 
@@ -401,8 +434,10 @@ export function createMcpUi({ mount, getLang, host, getBridge = () => null }) {
      * checkbox afterwards would undo the user's click. */
     const wanted = elements.enabled.checked;
     const form = readForm();
+    clearTransientStatus();
     busy = true;
     render();
+    let feedback = null;
     try {
       await host.setConfig(form);
       config = host.getConfig();
@@ -418,10 +453,12 @@ export function createMcpUi({ mount, getLang, host, getBridge = () => null }) {
         }
       } else await host.disable();
     } catch (error) {
-      setStatus(`${text("errorPrefix")}${error?.message || ""}`, true);
+      feedback = { message: `${text("errorPrefix")}${error?.message || ""}`, isError: true };
     } finally {
       busy = false;
       await refresh();
+      /* After refresh(), so render() cannot immediately overwrite the reason. */
+      if (feedback) setTransientStatus(feedback.message, feedback.isError, 15000);
     }
   });
 
@@ -441,11 +478,20 @@ export function createMcpUi({ mount, getLang, host, getBridge = () => null }) {
         render();
         return;
       }
+      clearTransientStatus();
       busy = true;
       render();
-      try { await host.setConfig(form); config = host.getConfig(); setStatus(""); }
-      catch (error) { setStatus(error?.message || text("portError"), true); }
-      finally { busy = false; await refresh(); }
+      let feedback = null;
+      try {
+        await host.setConfig(form);
+        config = host.getConfig();
+      } catch (error) {
+        feedback = { message: error?.message || text("portError"), isError: true };
+      } finally {
+        busy = false;
+        await refresh();
+        if (feedback) setTransientStatus(feedback.message, true, 15000);
+      }
     });
   }
 
@@ -461,24 +507,50 @@ export function createMcpUi({ mount, getLang, host, getBridge = () => null }) {
   elements.regenerate.addEventListener("click", async () => {
     if (busy || !state.running) return;
     if (!window.confirm(text("regenerateConfirm"))) return;
+    clearTransientStatus();
     busy = true;
     render();
+    let feedback = null;
     try {
       if (typeof host.regenerateToken === "function") await host.regenerateToken();
-      await refresh();
-      setStatus(text("regenerated"));
+      feedback = { message: text("regenerated"), isError: false };
     } catch (error) {
-      setStatus(`${text("errorPrefix")}${error?.message || ""}`, true);
+      feedback = { message: `${text("errorPrefix")}${error?.message || ""}`, isError: true };
     } finally {
       busy = false;
       await refresh();
+      if (feedback) setTransientStatus(feedback.message, feedback.isError, feedback.isError ? 15000 : 8000);
     }
   });
+
+  function placeBanner() {
+    if (typeof document === "undefined") return;
+    const target = document.fullscreenElement || document.body;
+    if (!target || banner.parentElement === target) return;
+    bannerOriginalParent = banner.parentElement || null;
+    target.append(banner);
+  }
+
+  function restoreBannerPlacement() {
+    if (bannerOriginalParent && banner.parentElement !== bannerOriginalParent) {
+      bannerOriginalParent.append(banner);
+    }
+    bannerOriginalParent = null;
+  }
+
+  /* Fullscreen can start or end while the banner is open; keep it inside the
+   * element that is actually painted. */
+  function onFullscreenChange() {
+    if (banner.hidden) return;
+    if (typeof document !== "undefined" && document.fullscreenElement) placeBanner();
+    else restoreBannerPlacement();
+  }
 
   function hideBanner() {
     banner.hidden = true;
     bannerParts.tool.textContent = "";
     bannerParts.args.textContent = "";
+    restoreBannerPlacement();
   }
 
   function showBanner(request) {
@@ -488,27 +560,47 @@ export function createMcpUi({ mount, getLang, host, getBridge = () => null }) {
     let pretty;
     try { pretty = JSON.stringify(redacted, null, 2); } catch { pretty = String(redacted); }
     bannerParts.args.textContent = pretty;
+    /* Real fullscreen only paints descendants of the fullscreen element; the
+     * fallback class is handled by the CSS z-index. */
+    placeBanner();
     banner.hidden = false;
     bannerParts.allow.focus({ preventScroll: true });
   }
 
   /* The notification body never carries raw tool arguments: it names the tool
    * and the (already redacted) summary, and the notification is PRIVATE on the
-   * lock screen. */
+   * lock screen. A resident-task summary starts with policy wording, so using
+   * it verbatim would hide the actual request; the owner must recognize what
+   * the task is about, so that tool spends the body on args.request. */
   function notificationBody(request) {
     const tool = toolText(request?.tool);
+    if (request?.tool === "start_agent_task") {
+      const text = typeof request?.args?.request === "string"
+        ? request.args.request.replace(/\s+/g, " ").trim()
+        : "";
+      return (text ? `${tool} — ${text}` : tool).slice(0, 200);
+    }
     const summary = typeof request?.summary === "string" ? request.summary : "";
     return (summary ? `${tool} — ${summary}` : tool).slice(0, 180);
   }
 
   function beginApproval(request, { notificationId = null, showBannerNow = true } = {}) {
     const timeoutMs = Math.min(120000, Math.max(5000, Number(request?.timeoutMs) || APPROVAL_TIMEOUT_MS));
+    /* Absolute deadline, not another duration: the native side needs it to
+     * cancel a notification whose approval has already expired (for example
+     * because the WebView was suspended while the app was in the background). */
+    const expiresAt = Date.now() + timeoutMs;
     return new Promise((resolve) => {
       const timer = setTimeout(() => settle(false, text("approvalTimeout")), timeoutMs);
-      const pending = { request, resolve, timer, settle: null, notificationId };
+      const pending = { request, resolve, timer, settle: null, notificationId, expiresAt };
       pendingApproval = pending;
       pending.settle = (approved, reason) => {
         if (pendingApproval !== pending) return;
+        // A resumed renderer may receive Allow before its overdue timer runs.
+        if (approved && Date.now() >= pending.expiresAt) {
+          approved = false;
+          reason = text("approvalTimeout");
+        }
         pendingApproval = null;
         clearTimeout(timer);
         request?.signal?.removeEventListener("abort", aborted);
@@ -574,6 +666,12 @@ export function createMcpUi({ mount, getLang, host, getBridge = () => null }) {
     const pending = pendingApproval;
     if (!pending || !pending.notificationId) return;
     if (String(payload?.id ?? "") !== pending.notificationId) return;
+    /* The native side cancels stale notifications at the absolute deadline and
+     * reports the expiry; fail closed with the same copy as a local timeout. */
+    if (payload?.expired === true) {
+      pending.settle(false, text("approvalTimeout"));
+      return;
+    }
     pending.settle(Boolean(payload?.approved), payload?.approved ? "" : text("approvalDenied"));
   }
 
@@ -603,6 +701,7 @@ export function createMcpUi({ mount, getLang, host, getBridge = () => null }) {
         id,
         title: text("approvalTitle"),
         body: notificationBody(pending.request),
+        deadlineMs: pending.expiresAt,
       })) === true;
     } catch {
       shown = false;
@@ -628,6 +727,35 @@ export function createMcpUi({ mount, getLang, host, getBridge = () => null }) {
     }
   }
 
+  /* When the user is looking at the app again, the in-app card is the better
+   * surface: cancel the notification that was only posted because the app was
+   * hidden and show the same pending request again. The deadline is unchanged. */
+  async function resurfacePendingApproval() {
+    const pending = pendingApproval;
+    if (!pending || !pending.notificationId || !banner.hidden) return;
+    if (await isAppHidden()) return;
+    if (pendingApproval !== pending) return;
+    if (Date.now() >= pending.expiresAt) {
+      pending.settle(false, text("approvalTimeout"));
+      return;
+    }
+    const notificationId = pending.notificationId;
+    const bridge = getBridge?.();
+    pending.notificationId = null;
+    try { Promise.resolve(bridge?.cancelApproval?.(notificationId)).catch(() => {}); } catch { /* ignore */ }
+    if (pendingApproval !== pending) return;
+    showBanner(pending.request || {});
+  }
+
+  function onVisibilityChange() {
+    if (document.visibilityState === "visible") void resurfacePendingApproval();
+    else void notificationOnHide();
+  }
+
+  function onWindowFocus() {
+    void resurfacePendingApproval();
+  }
+
   function settlePending(approved, reason) {
     pendingApproval?.settle?.(approved, reason);
   }
@@ -641,7 +769,9 @@ export function createMcpUi({ mount, getLang, host, getBridge = () => null }) {
     }
   });
 
-  document.addEventListener("visibilitychange", notificationOnHide);
+  document.addEventListener("visibilitychange", onVisibilityChange);
+  document.addEventListener("fullscreenchange", onFullscreenChange);
+  window.addEventListener("focus", onWindowFocus);
   void subscribeApprovalActions();
 
   applyLabels();
@@ -660,7 +790,9 @@ export function createMcpUi({ mount, getLang, host, getBridge = () => null }) {
     dispose() {
       if (refreshTimer) clearInterval(refreshTimer);
       refreshTimer = null;
-      document.removeEventListener("visibilitychange", notificationOnHide);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      document.removeEventListener("fullscreenchange", onFullscreenChange);
+      window.removeEventListener("focus", onWindowFocus);
       if (approvalActionSubscription?.remove) {
         Promise.resolve(approvalActionSubscription.remove()).catch(() => {});
       }

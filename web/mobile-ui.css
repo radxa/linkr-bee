@@ -235,12 +235,14 @@
 .mcp-settings .mcp-audit-row .field-hint { margin: 2px 0 0; }
 
 /* Approval is requested by an external client, so it must stay reachable no
- * matter which settings tab or terminal view the user has open. */
+ * matter which settings tab or terminal view the user has open. The terminal's
+ * fullscreen fallback paints at z-index 1000 (web/style.css); the banner must
+ * be above it or an external write looks like it silently timed out. */
 .mcp-approval {
   position: fixed;
   left: 50%;
   bottom: max(16px, var(--safe-bottom));
-  z-index: 60;
+  z-index: 1100;
   width: min(92vw, 460px);
   transform: translateX(-50%);
   padding: 14px 16px;
@@ -249,6 +251,10 @@
   background: var(--panel);
   box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
 }
+/* Real fullscreen only paints descendants of the fullscreen element; mcp_ui.js
+ * moves the banner inside that element while it is open. Keep the layer above
+ * the terminal content in both cases. */
+:fullscreen .mcp-approval { z-index: 1100; }
 .mcp-approval[hidden] { display: none; }
 .mcp-approval-title { margin: 0 0 4px; font-size: 12px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
 .mcp-approval-tool { margin: 0 0 8px; font-size: 15px; font-weight: 600; }
