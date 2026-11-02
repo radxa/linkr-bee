@@ -590,3 +590,77 @@ test("the fixed-context estimate covers parameter schemas and optional tools", a
   assert.ok(measured <= AGENT_FIXED_CONTEXT_TOKENS,
     `the assistant now costs about ${measured} tokens before any history, past AGENT_FIXED_CONTEXT_TOKENS=${AGENT_FIXED_CONTEXT_TOKENS}; raise the constant and re-check the settings warning`);
 });
+
+/* ------------------------------------------------------------------ *
+ * Resident task authority
+ * ------------------------------------------------------------------ */
+
+test("a resident run receives the resident authority prompt in every app mode", async () => {
+  for (const mode of ["manual", "auto", "full-auto"]) {
+    let prompt = "";
+    const agent = createSerialAgent({ config, authorityMode: "resident", device: {
+      mode, getStatus: () => status, readLog: () => ({}),
+      execute: () => assert.fail("read-only turn must not write"),
+      inspectExecution: () => ({ executionStatus: "unknown" }),
+    }, stream: fakeStream((context) => {
+      prompt = getCurrentSystemPrompt(context.messages);
+      return [{ type: "text", text: "ok" }];
+    }) });
+    await agent.prompt("Inspect target");
+    assert.match(prompt, /Execution mode: resident task/, mode);
+    assert.ok(!/Execution mode: (Manual|Auto|Full Auto)/.test(prompt), `${mode} leaked the human mode text`);
+    assert.match(prompt, /no wall-clock limit/);
+    assert.match(prompt, /still ask the owner/);
+    assert.ok(!prompt.includes("15 minutes per question"), `${mode} claimed the human wall clock`);
+  }
+});
+
+test("a resident run keeps its session binding when the app's execution mode reverts", async () => {
+  let deviceMode = "full-auto";
+  let turns = 0;
+  const observed = [];
+  const prompts = [];
+  const device = {
+    get mode() { return deviceMode; },
+    getStatus: () => ({ sessionId: 1, connected: true, executionMode: deviceMode }),
+    readLog: () => ({ text: "root@board:~# ", cursor: 10, latestCursor: 10 }),
+    execute: async () => ({ id: "serial-1", delivery: "sent", executionStatus: "unknown" }),
+    getRecords: () => [],
+    inspectExecution: () => ({ executionStatus: "unknown" }),
+  };
+  const agent = createSerialAgent({ config, authorityMode: "resident", device, stream: fakeStream((context) => {
+    prompts.push(getCurrentSystemPrompt(context.messages));
+    if (++turns === 1) {
+      // The 15-minute Full Auto window ends while the task is still working.
+      deviceMode = "auto";
+      return [call("get_device_status", {})];
+    }
+    observed.push(JSON.parse(context.messages.at(-1).content[0].text));
+    return [{ type: "text", text: "mode reversion ignored for this resident task" }];
+  }) });
+  await agent.prompt("Inspect target");
+  assert.equal(turns, 2);
+  assert.equal(observed[0].executionMode, "resident");
+  assert.equal(observed[0].appExecutionMode, "auto");
+  assert.match(prompts[1], /Execution mode: resident task/);
+});
+
+test("a human run still stops when the app's execution mode changes mid-run", async () => {
+  let deviceMode = "full-auto";
+  let turns = 0;
+  const device = {
+    get mode() { return deviceMode; },
+    getStatus: () => ({ sessionId: 1, connected: true }),
+    readLog: () => ({ text: "", cursor: 0, latestCursor: 0 }),
+    execute: async () => { throw new Error("should not be reached"); },
+    inspectExecution: () => ({ executionStatus: "unknown" }),
+  };
+  const agent = createSerialAgent({ config, device, stream: fakeStream(() => {
+    turns++;
+    // The user changes the mode while the tool is running.
+    deviceMode = "manual";
+    return [call("read_serial_log", {})];
+  }) });
+  await assert.rejects(agent.prompt("Inspect target"), /session or mode changed/);
+  assert.equal(turns, 1);
+});

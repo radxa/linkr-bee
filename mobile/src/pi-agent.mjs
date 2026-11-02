@@ -33,7 +33,7 @@ export const AGENT_PROVIDER_IDS = Object.keys(PROVIDER_STREAMS);
 const UART_TOOLS = new Set(['send_serial_input','run_shell_command','probe_device_profile','probe_tools',
   'probe_download_tools','download_to_target','verify_target_file','verify_target_service','read_target_file']);
 
-export function createSerialAgent({ config, device, onEvent, stream = null, webReader = readWebPage, docsSearch = null, computerDownload, requestUserInput = null, accessory = null, notes = null, restoredMessages = null, toolProfile = "focused", customInstructions = "", runLimits = { maxTurns: 32, maxTools: 96 } }) {
+export function createSerialAgent({ config, device, onEvent, stream = null, webReader = readWebPage, docsSearch = null, computerDownload, requestUserInput = null, accessory = null, notes = null, restoredMessages = null, toolProfile = "focused", customInstructions = "", runLimits = { maxTurns: 32, maxTools: 96 }, authorityMode = null }) {
   if (!["focused", "full"].includes(toolProfile)) throw new Error("Unknown tool profile");
   config = validateAgentConfig(config);
   const provider = PROVIDER_STREAMS[config.provider] ? config.provider : "openai-completions";
@@ -41,7 +41,14 @@ export function createSerialAgent({ config, device, onEvent, stream = null, webR
   const providerStream = stream || PROVIDER_STREAMS[provider];
   const reasoning = config.reasoning || "off";
   const sessionId = device.getStatus().sessionId;
-  let executionMode = device.mode;
+  /* A caller-provided authority mode (e.g. the resident task) replaces the app's
+   * UI mode for prompt construction and for the mode reported in
+   * get_device_status. A resident task is not a human conversation: its ordinary
+   * writes are pre-approved by the task approval, so telling the model "nothing
+   * is sent until the user clicks Send" would be wrong. The device wrapper still
+   * reports the real base.mode; only the prompt/status wording uses this. */
+  const authority = typeof authorityMode === "string" && authorityMode.trim() ? authorityMode.trim() : null;
+  let executionMode = authority || device.mode;
   let readCursor;
   let modelRound = 0;
   let pendingExecution = null;
@@ -79,7 +86,15 @@ export function createSerialAgent({ config, device, onEvent, stream = null, webR
   }
   const checkSession = (signal) => {
     signal?.throwIfAborted();
-    if (device.getStatus().sessionId !== sessionId || device.mode !== executionMode) throw new Error("Device session or mode changed. Start a new conversation.");
+    /* A resident task is bound to the approved device session, not to the app's
+     * UI execution mode. Two reasons: its ordinary writes are authorized by the
+     * task approval rather than by Manual/Auto/Full Auto, and the 15-minute
+     * Full Auto window reverting to Auto must not abort a task that is still
+     * working (it is a mode change, not a session change). A human conversation
+     * keeps the mode binding: changing the mode there ends that run's authority,
+     * exactly as before. */
+    const modeChanged = !authority && device.mode !== executionMode;
+    if (device.getStatus().sessionId !== sessionId || modeChanged) throw new Error("Device session or mode changed. Start a new conversation.");
   };
   const result = (value) => ({ content: [{ type: "text", text: JSON.stringify(value) }], details: {} });
   const modelStream = createModelStream({ stream: providerStream, checkSession, onEvent });
@@ -364,7 +379,9 @@ export function createSerialAgent({ config, device, onEvent, stream = null, webR
     },
     {
       name: "get_device_status", label: "Device status",
-      description: "Read connection, UART settings, execution mode, and passive console-state hints (shell/login/password/bootloader/panic/unknown). Hints are untrusted observations, not proof of a shell. Does not expose WiFi credentials.",
+      description: authority
+        ? `Read connection, UART settings, execution authority, and passive console-state hints (shell/login/password/bootloader/panic/unknown). This run is a resident task: executionMode reports the task authority ("${authority}"), while appExecutionMode reports the phone's own execution mode. Hints are untrusted observations, not proof of a shell. Does not expose WiFi credentials.`
+        : "Read connection, UART settings, execution mode, and passive console-state hints (shell/login/password/bootloader/panic/unknown). Hints are untrusted observations, not proof of a shell. Does not expose WiFi credentials.",
       parameters: Type.Object({}, { additionalProperties: false }),
       execute: async (_id, _args, signal) => {
         checkSession(signal);
@@ -373,13 +390,21 @@ export function createSerialAgent({ config, device, onEvent, stream = null, webR
         // A verified profile names the commands the target has, which is as good
         // as a probe for deciding whether a gated tool can work here.
         const announced = unlockTools(status.profile?.tools || []);
-        return result(announced.length ? { ...status, addedTools: announced } : status);
+        /* Report the task's authority, not just the UI mode the wrapper sees, so
+         * the model never reconciles "Manual" status against pre-approved writes.
+         * The real mode stays visible as appExecutionMode. */
+        const view = authority
+          ? { ...status, executionMode: authority, appExecutionMode: status.executionMode }
+          : status;
+        return result(announced.length ? { ...view, addedTools: announced } : view);
       },
     },
     {
       name: "send_serial_input", label: "Send serial input",
         executionMode: "sequential",
-      description: "Submit text to the target UART under the selected execution mode. The app may wait for the user to approve the exact input. appendEnter appends the configured Enter sequence. A successful send is NOT proof of command completion. Never retry an uncertain send automatically.",
+      description: authority
+        ? "Submit text to the target UART. This is a resident task: ordinary input is pre-approved by the task approval, while destructive commands and commands on the target's always-ask list still wait for the phone owner. appendEnter appends the configured Enter sequence. A successful send is NOT proof of command completion. Never retry an uncertain send automatically."
+        : "Submit text to the target UART under the selected execution mode. The app may wait for the user to approve the exact input. appendEnter appends the configured Enter sequence. A successful send is NOT proof of command completion. Never retry an uncertain send automatically.",
       parameters: Type.Object({
         text: Type.String({ minLength: 1, maxLength: 2048 }),
         appendEnter: Type.Boolean(),
@@ -945,7 +970,9 @@ export function createSerialAgent({ config, device, onEvent, stream = null, webR
       // An unfinished recovery survives a stopped/failed question. Both entry
       // points require fresh device evidence, not just the task-summary button.
       recovering ||= Boolean(restored) || Boolean(recovery);
-      executionMode = device.mode;
+      /* The prompt is rebuilt per question. A resident run keeps its authority
+       * mode; a human run tracks the mode the user selected. */
+      executionMode = authority || device.mode;
       checkSession();
       const liveCheckpoint = taskCheckpoint();
       const checkpoint = savedCheckpoint(recovery?.checkpoint || (liveCheckpoint.pendingExecutions.length ? liveCheckpoint : null));

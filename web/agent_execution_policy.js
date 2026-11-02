@@ -47,15 +47,21 @@ export function requiresInputApproval(mode, args, payload, inputPending = false,
  * completely with these patterns.
  *
  * Matching starts at a command position — the beginning of the wire text, after
- * a shell separator, or inside the tracked `sh -c '…'` wrapper — so text that
- * merely *mentions* a tool name does not demand approval. The app's own probes
- * are the reason: PROFILE_PROBE runs `for t in … sudo systemctl …` to detect
- * available tools, and that must stay unattended.
+ * a shell separator or a compound-command keyword (`then`, `do`, `else`,
+ * `elif`, `{`), inside a subshell, or inside the tracked `sh -c '…'` wrapper —
+ * so text that merely *mentions* a tool name does not demand approval. The
+ * app's own probes are the reason: PROFILE_PROBE runs `for t in … sudo
+ * systemctl …` to detect available tools, and that must stay unattended.
+ *
+ * The wire form is normalized first: the tty erases the previous character on
+ * backspace/DEL, and the shell expands `${IFS}` before parsing, so both can
+ * hide a command or its argument separator. This is still a best-effort guard
+ * for recognized forms, not a shell parser.
  *
  * Recoverable actions are deliberately absent: reboot, poweroff, mount/umount
  * and service restarts stay unguarded so Full Auto remains usable for the
  * normal bench loop, and they still require a click in Auto and Manual. */
-const COMMAND_BOUNDARY = "(?:^|[\\r\\n;&|`()]\\s*|(?:/[^\\s'\"]*/)?(?:sh|bash|dash|ash|zsh)\\s+-c\\s*['\"])\\s*";
+const COMMAND_BOUNDARY = "(?:^|[\\r\\n;&|`(){}]\\s*|(?:then|do|else|elif)\\s+|(?:/[^\\s'\"]*/)?(?:sh|bash|dash|ash|zsh)\\s+-[a-z]*c[a-z]*\\s*['\"])\\s*";
 const COMMAND_PATH = "(?:[./a-z0-9_-]+/)?";
 // Resolve ordinary command prefixes, without treating argument mentions as commands.
 const ASSIGNMENT = "[a-z_][a-z0-9_]*=[^\\s;&|]+\\s+";
@@ -90,8 +96,24 @@ const guardedPipelines = [
 
 const guarded = guardedCommands.concat(guardedPipelines);
 
+/* Undo the two wire-level transformations that can hide a guarded command:
+ * tty erase on backspace/DEL, and shell expansion of ${IFS}/$IFS into a word
+ * separator. Everything else is matched against the literal wire text. */
+function normalizeForGuardCommand(text) {
+  let erased = "";
+  for (const char of text) {
+    if (char === "\x08" || char === "\x7f") erased = erased.slice(0, -1);
+    else erased += char;
+  }
+  return erased
+    .replace(/\$\{IFS(?::-[^}]*)?\}/gi, " ")
+    .replace(/\$IFS\b/gi, " ");
+}
+
 export function isGuardedCommand(text) {
-  return typeof text === "string" && guarded.some((pattern) => pattern.test(text));
+  if (typeof text !== "string") return false;
+  const normalized = normalizeForGuardCommand(text);
+  return guarded.some((pattern) => pattern.test(normalized));
 }
 
 export function inputLeavesPendingLine(bytes, pending) {

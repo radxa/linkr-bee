@@ -7369,8 +7369,10 @@ function initMcp() {
   /* The resident assistant is the app's own agent runtime, made callable by
    * MCP/A2A clients. It uses the same device executor, accessory helpers,
    * notes and board prompt as the human conversation; only its conversation is
-   * separate. Starting a task is approved once in MCP/A2A, and that approval is
-   * what the task's own writes rely on. */
+   * separate. Starting a task is approved once in MCP/A2A, and that approval
+   * covers the task's ordinary writes. The app's destructive-command class and
+   * every accessory/WiFi change still ask per call through this same approval
+   * surface (a card while the app is visible, a notification while it is not). */
   residentAgent = createResidentAgent({
     storage,
     getConfig: () => agentSettings?.getConfig?.() || null,
@@ -7383,6 +7385,15 @@ function initMcp() {
       diagnostics: collectAccessoryDiagnostics,
       scan: scanWifi,
     },
+    /* Resolved at call time: mcpUi is created later in this function, and a
+     * missing UI must fail closed rather than execute a sensitive call. */
+    requestApproval: (request) => mcpUi
+      ? mcpUi.requestApproval(request)
+      : Promise.resolve({ approved: false, reason: "MCP approval UI is unavailable." }),
+    /* The resident device wrapper re-reads the target's always-ask list per
+     * command, so a task cannot send a command the user pinned for approval. */
+    getCommandPolicy: () => agentPanel?.getCommandPolicy?.() || null,
+    getLang: () => lang,
     isHumanAgentBusy: () => Boolean(agentPanel?.isBusy?.()),
     onTaskChange: () => {
       agentPanel?.residentChanged();

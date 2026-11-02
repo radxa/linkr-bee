@@ -108,3 +108,22 @@ test('guarded commands recognize paths, wrappers and assignments', () => {
   assert.equal(isGuardedCommand('env LANG=C uname -a'),false);
   assert.equal(isGuardedCommand('echo /bin/rm -rf /tmp/example'),false);
 });
+
+test("guarded matching sees through compound commands, wrapper flags and IFS/erase tricks", () => {
+  for (const text of [
+    "{ rm -rf /tmp/x; }",
+    "if true; then rm -rf /; fi",
+    "for f in a; do shred -u \"$f\"; done",
+    "bash -lc 'rm -rf /tmp/x'",
+    "/bin/bash -cl \"dd if=/dev/zero of=/dev/sda\"",
+    "rm${IFS}-rf /tmp/x",
+    "rm$IFS-rf /tmp/x",
+    "x\x08rm -rf /tmp/x",
+    "x\x7frm -rf /tmp/x",
+  ]) {
+    assert.equal(isGuardedCommand(text), true, JSON.stringify(text));
+  }
+  // The normalization must not turn a literal mention into execution.
+  assert.equal(isGuardedCommand("echo 'rm${IFS}-rf /'"), false);
+  assert.equal(isGuardedCommand("grep -n 'rm -rf /' /tmp/notes.txt"), false);
+});

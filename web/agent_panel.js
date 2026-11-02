@@ -1281,6 +1281,10 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
      * owns the device session, approvals and evidence, so an external client
      * can never open a second write path to the UART. */
     getDevice: () => device,
+    /* Read-only view of the user's per-target command policy. A resident task
+     * executes through this same executor, so its device wrapper reads the
+     * always-ask list here; the resident agent never writes the policy. */
+    getCommandPolicy: () => policyStore.get(deviceKeyOf()),
     isBusy: () => busy,
     residentChanged() { refreshActivity(); refreshHistory(); },
     hasInputFocus: () => opened && dialog.contains(document.activeElement) && document.activeElement.matches("input:not([type=radio]), textarea"),

@@ -7,10 +7,13 @@
  * executors and evidence rules as the human conversation.
  *
  * One task runs at a time. A task is approved once by the phone owner (the MCP
- * tool or A2A handler asks before calling startTask); inside that approved task
- * the agent's serial writes and accessory changes run without another prompt.
- * The normal in-app assistant stays untouched: it keeps its own conversation,
- * and this module refuses to start while a human question is running so the two
+ * tool or A2A handler asks before calling startTask); that approval covers the
+ * ordinary serial writes the task needs. It is not a blank cheque: a serial
+ * write the app classifies as destructive, every accessory change the resident
+ * agent can make (UART, WiFi, WebDAV) and every WiFi scan ask the same phone
+ * approval surface again, per call, exactly like the panel's own assistant. The
+ * normal in-app assistant stays untouched: it keeps its own conversation, and
+ * this module refuses to start while a human question is running so the two
  * never fight over the one serial gate.
  *
  * Sessions are conversations, not tasks. A caller may pass a sessionId to
@@ -25,6 +28,14 @@ import { validateAgentConfig } from "./agent_config.js";
 import { createNoteStore } from "./agent_notes.js";
 import { deviceIdentity } from "./agent_tasks.js";
 import { addUsage as accumulateUsage, emptyUsage } from "./agent_usage.js";
+import { isGuardedCommand } from "./agent_execution_policy.js";
+import { isAlwaysAsk } from "./command_policy.js";
+
+/* The authority mode handed to the agent runtime for a resident task. It is not
+ * one of the app's UI modes (manual/auto/full-auto): the task approval, not the
+ * UI mode, is what authorizes ordinary writes. Keep in sync with
+ * mobile/src/agent-prompt.mjs RESIDENT_AUTHORITY_MODE. */
+export const RESIDENT_AUTHORITY_MODE = "resident";
 
 export const RESIDENT_TASK_STATES = Object.freeze(["queued", "running", "canceling", "completed", "failed", "canceled"]);
 export const RESIDENT_SESSION_KEY = "linkr-resident-agent-sessions-v1";
@@ -46,6 +57,9 @@ export const RESIDENT_MAX_RESULT_CHARS = 30000;
 export const RESIDENT_MAX_TURNS = 64;
 export const RESIDENT_MAX_TOOLS = 200;
 export const RESIDENT_SESSION_ID = /^[A-Za-z0-9._:-]{1,128}$/;
+/* One phone approval must outlive a model turn or a slow accessory read-back,
+ * but it still has to end: the MCP path uses the same 120-second bound. */
+export const RESIDENT_APPROVAL_TIMEOUT_MS = 120000;
 
 const TERMINAL = new Set(["completed", "failed", "canceled"]);
 
@@ -124,37 +138,173 @@ export function validateResidentTaskArgs(args = {}) {
   return { request, context, sessionId: args.sessionId, newSession: args.newSession === true, maxTurns, maxTools, timeoutMs };
 }
 
-/* A device view for an approved task. The task-start approval is the one
- * consent for its serial writes, so the executor is told the input is already
- * approved instead of raising a second per-command question the caller cannot
- * answer. `mode` is pinned so a session change (not a mode change) is what
- * invalidates the run. */
-function approvedDevice(base, getStatus) {
+/* Approval payloads go to the same card and lock-screen notification as MCP.
+ * Keep credential-like values out of both the arguments and the summary: the
+ * UI renders whatever it is handed, and a resident task must never put a WiFi
+ * password where a notification could show it. */
+function maskUrlUserinfo(value) {
+  return String(value ?? "").replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/@\s]+@/i, "$1<redacted>@");
+}
+
+function safeApprovalArgs(args) {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return {};
+  const copy = { ...args };
+  for (const key of Object.keys(copy)) {
+    if (/(?:password|passwd|secret|token|api[_-]?key|authorization|credential)/i.test(key)) {
+      copy[key] = "<redacted>";
+    } else if (key === "url") {
+      copy[key] = maskUrlUserinfo(copy[key]);
+    }
+  }
+  return copy;
+}
+
+function approvalPreview(value, limit = 120) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  return text.length > limit ? `${text.slice(0, limit - 3)}...` : text;
+}
+
+function uartSettings(args = {}) {
+  return `${args.baud ?? ""},${args.dataBits ?? 8},${args.parity ?? "n"},${args.stopBits ?? 1},${args.flow ?? "none"}`;
+}
+
+/* Mirror the MCP approval summaries for the calls a resident task can make on
+ * its own. `args` is already redacted by safeApprovalArgs(). */
+function sensitiveApprovalSummary({ tool, args = {}, zh = false }) {
+  switch (tool) {
+    case "send_serial_input": {
+      const preview = approvalPreview(args.text);
+      return zh
+        ? `向目标串口发送敏感命令：「${preview}」`
+        : `Send this sensitive command to the target serial console: "${preview}"`;
+    }
+    case "set_uart_config":
+      return zh
+        ? `把桥接串口改为 ${uartSettings(args)}？`
+        : `Set the bridge UART to ${uartSettings(args)}?`;
+    case "set_wifi":
+      if (String(args.action ?? "connect").toLowerCase() === "off") {
+        return zh ? "断开配件 WiFi 并清除当前配置？" : "Disconnect the accessory WiFi and clear its current configuration?";
+      }
+      return zh
+        ? `让配件连接 WiFi「${args.ssid ?? ""}」（密码不显示）？`
+        : `Join WiFi "${args.ssid ?? ""}" with the accessory (password hidden)?`;
+    case "set_webdav":
+      if (String(args.action ?? "on").toLowerCase() === "off") {
+        return zh ? "关闭配件 WebDAV 日志上传？" : "Disable WebDAV log upload on the accessory?";
+      }
+      return zh
+        ? `启用配件日志上传到 ${maskUrlUserinfo(args.url ?? "")}？`
+        : `Enable accessory log upload to ${maskUrlUserinfo(args.url ?? "")}?`;
+    case "wifi_scan":
+      return zh ? "让配件扫描附近的 2.4 GHz WiFi 网络？" : "Scan for nearby 2.4 GHz WiFi networks with the accessory?";
+    default:
+      return tool;
+  }
+}
+
+/* Reject instead of hanging when the task is stopped while a card is open. */
+function raceAbort(promise, signal) {
+  if (!signal) return Promise.resolve(promise);
+  const reason = () => signal.reason instanceof Error ? signal.reason : new Error("Operation cancelled.");
+  if (signal.aborted) return Promise.reject(reason());
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(reason());
+    signal.addEventListener("abort", onAbort, { once: true });
+    Promise.resolve(promise).then(
+      (value) => { signal.removeEventListener("abort", onAbort); resolve(value); },
+      (error) => { signal.removeEventListener("abort", onAbort); reject(error); },
+    );
+  });
+}
+
+/* Read the user's per-target policy through the panel's read-only accessor. A
+ * missing accessor or an unreadable policy means "no extra list": the
+ * destructive guard remains the hard floor, and a resident task must not become
+ * unusable because the policy store is unavailable. Matching mirrors the panel
+ * (same entries, substring match on the command text); policy entries cannot
+ * contain control characters, so the extra wire payload adds nothing here. */
+function matchesAlwaysAsk(text, getCommandPolicy) {
+  if (typeof getCommandPolicy !== "function") return false;
+  let policy;
+  try {
+    policy = getCommandPolicy();
+  } catch {
+    return false;
+  }
+  const entries = Array.isArray(policy?.alwaysAsk) ? policy.alwaysAsk : [];
+  return entries.length > 0 && isAlwaysAsk(entries, text);
+}
+
+/* A device view for an approved task. The task-start approval covers ordinary
+ * serial writes, so the executor is told the input is already approved. It does
+ * not cover the commands the app classifies as destructive, nor commands the
+ * user put on this target's always-ask list: those ask again, on the same
+ * surface as MCP, and a denial sends nothing. `mode` is the app's real execution
+ * mode: the tool runtime must see what the user selected. */
+function approvedDevice(base, getStatus, requestSensitiveApproval, getCommandPolicy) {
   if (!base) return null;
   return {
     get mode() {
-      return "full-auto";
+      return base.mode;
     },
     getStatus: () => getStatus(),
     readLog: (options) => base.readLog(options),
     getRecords: () => base.getRecords?.(),
     inspectExecution: (id, options) => base.inspectExecution(id, options),
     observe: () => base.observe?.(),
-    execute: (args, signal) => base.execute(args, signal, { userApproved: true }),
+    execute: async (args, signal) => {
+      const text = typeof args?.text === "string" ? args.text : "";
+      if (text && (isGuardedCommand(text) || matchesAlwaysAsk(text, getCommandPolicy))) {
+        await requestSensitiveApproval({
+          tool: "send_serial_input",
+          args: { text, appendEnter: args.appendEnter === true },
+          signal,
+          denied: "Not executed: the phone owner denied this sensitive command. It was not sent.",
+        });
+      }
+      return base.execute(args, signal, { userApproved: true });
+    },
   };
 }
 
-/* Accessory changes go through the app's own command builders and read-back;
- * only the panel's click is replaced by the task-start approval. */
-function approvedAccessory(accessory) {
+const ACCESSORY_APPROVALS = {
+  "set-uart": { tool: "set_uart_config", denied: "Not executed: the phone owner denied this bridge UART change." },
+  "set-wifi": { tool: "set_wifi", denied: "Not executed: the phone owner denied this WiFi change." },
+  "set-webdav": { tool: "set_webdav", denied: "Not executed: the phone owner denied this WebDAV change." },
+};
+
+/* Accessory changes go through the app's own command builders and read-back.
+ * Unlike an ordinary serial write, every one of them asks per call: changing
+ * the bridge UART, joining a network or uploading logs to an endpoint is not
+ * covered by the task-start approval (the panel asks the same way). */
+function approvedAccessory(accessory, requestSensitiveApproval) {
   if (!accessory) return null;
   return {
     capability: () => accessory.capability(),
     diagnostics: (options = {}) => accessory.diagnostics({ signal: options.signal }),
-    scan: (options = {}) => accessory.scan({ signal: options.signal }),
-    change: ({ action, args, signal }) => accessory.execute({
-      action, args, command: accessory.command(action, args), signal,
-    }),
+    scan: async (options = {}) => {
+      await requestSensitiveApproval({
+        tool: "wifi_scan",
+        args: {},
+        signal: options.signal,
+        denied: "Not executed: the phone owner denied this WiFi scan.",
+      });
+      return accessory.scan({ signal: options.signal });
+    },
+    change: async ({ action, args = {}, signal }) => {
+      const approval = ACCESSORY_APPROVALS[action];
+      if (!approval) throw new Error(`Unsupported accessory action: ${action}`);
+      await requestSensitiveApproval({
+        tool: approval.tool,
+        args: { ...args },
+        signal,
+        denied: approval.denied,
+      });
+      return accessory.execute({
+        action, args, command: accessory.command(action, args), signal,
+      });
+    },
   };
 }
 
@@ -244,6 +394,42 @@ export function createResidentAgent(deps = {}) {
     );
     lastError = error.message;
     throw error;
+  }
+
+  function approvalLang() {
+    try {
+      return deps.getLang?.() === "zh" ? "zh" : "en";
+    } catch {
+      return "en";
+    }
+  }
+
+  /* The one place a resident task asks the phone owner for consent per call.
+   * It uses the same surface as MCP (card when visible, notification when the
+   * app is hidden) and fails closed: without an approval surface the sensitive
+   * action is refused rather than silently executed. */
+  async function requestSensitiveApproval({ tool, args = {}, signal, denied }) {
+    const requestApproval = typeof deps.requestApproval === "function" ? deps.requestApproval : null;
+    if (!requestApproval) {
+      throw new Error("Not executed: this app build has no approval surface, so sensitive resident-agent actions are disabled.");
+    }
+    signal?.throwIfAborted();
+    const safeArgs = safeApprovalArgs(args);
+    const request = {
+      tool,
+      args: safeArgs,
+      summary: sensitiveApprovalSummary({ tool, args: safeArgs, zh: approvalLang() === "zh" }),
+      timeoutMs: RESIDENT_APPROVAL_TIMEOUT_MS,
+      signal,
+    };
+    let decision;
+    try {
+      decision = await raceAbort(requestApproval(request), signal);
+    } catch (error) {
+      if (signal?.aborted) throw new Error("Not executed: the approval request was cancelled; nothing was sent.");
+      throw new Error(`Not executed: the approval request did not complete (${error?.message || error}).`);
+    }
+    if (decision !== true && decision?.approved !== true) throw new Error(denied);
   }
 
   function publicTask(task, { includeResult = true } = {}) {
@@ -390,20 +576,32 @@ export function createResidentAgent(deps = {}) {
       notifyTask(task);
       session = ensureSession(task.sessionId);
       if (!session.promptLoaded) {
+        let loaded = true;
         try {
           session.prompt = String((await deps.readBoardPrompt?.()) ?? "").trim();
         } catch {
+          /* A transient board/BLE failure must not cache an empty prompt for
+           * the whole session: use "" for this task only and retry next time. */
           session.prompt = "";
+          loaded = false;
         }
         if (isTerminal(task.state)) return;
         checkTarget(task);
-        session.promptLoaded = true;
-        saveSession(task.sessionId, session);
+        session.promptLoaded = loaded;
+        if (loaded) saveSession(task.sessionId, session);
       }
+      const approveForTask = async (request) => {
+        checkTarget(task);
+        await requestSensitiveApproval(request);
+        request.signal?.throwIfAborted();
+        // Approval belongs to the captured target, not to whichever board is
+        // connected after the owner answers the card or notification.
+        checkTarget(task);
+      };
       const options = {
         config,
-        device: approvedDevice(base, () => base.getStatus()),
-        accessory: approvedAccessory(deps.accessory),
+        device: approvedDevice(base, () => base.getStatus(), approveForTask, deps.getCommandPolicy),
+        accessory: approvedAccessory(deps.accessory, approveForTask),
         notes: noteStore ? {
           remember: async ({ text, evidence, signal }) => {
             signal?.throwIfAborted();
@@ -414,6 +612,11 @@ export function createResidentAgent(deps = {}) {
         customInstructions: session.prompt,
         restoredMessages: session.messages?.length ? session.messages : null,
         runLimits: { maxTurns: task.maxTurns, maxTools: task.maxTools },
+        /* The runtime builds its prompt from this authority instead of the app's
+         * Manual/Auto/Full Auto text: the task approval is what authorizes
+         * ordinary writes, and the resident run is bound to its session rather
+         * than to the UI mode. */
+        authorityMode: RESIDENT_AUTHORITY_MODE,
         onEvent: (event) => onRunnerEvent(task, event),
       };
       if (typeof deps.createAgent === "function") runner = await deps.createAgent(options);
