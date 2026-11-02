@@ -176,6 +176,7 @@ export function createBondUi({ card, context, send, supported, beforeSelfDelete,
         input.addEventListener('compositionstart', () => { composing = true; });
         input.addEventListener('compositionend', () => { composing = false; });
         input.addEventListener('keydown', event => {
+          if (composing || event.isComposing || event.keyCode === 229) return;
           if (event.key === 'Enter') {
             event.preventDefault();
             saveLabel(peer, input.value);

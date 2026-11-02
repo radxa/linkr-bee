@@ -793,6 +793,10 @@ pub struct App {
     /// Whether the label command in flight is the automatic "this host has no
     /// label yet" report, whose refusal is not worth a notice.
     pub bond_self_write: bool,
+    /// An explicit label write/removal needs its own acknowledgement; the
+    /// view's cached value and the end of a wait cannot confirm it.
+    pub bond_mutation_pending: bool,
+    pub bond_mutation_result: Option<Result<String, String>>,
     /// Whether this link has already tried to report this host's label.
     pub bond_self_reported: bool,
     /// The LAN access state `@s?` reported, token included.
@@ -1015,6 +1019,8 @@ impl Default for App {
             bonds_read_pending: false,
             bond_refresh_due: None,
             bond_self_write: false,
+            bond_mutation_pending: false,
+            bond_mutation_result: None,
             bond_self_reported: false,
             lan_status: LanStatus::default(),
             lan_captured: LanCapture::default(),
@@ -2645,6 +2651,8 @@ impl App {
         self.bonds_read_pending = false;
         self.bond_refresh_due = None;
         self.bond_self_write = false;
+        self.bond_mutation_pending = false;
+        self.bond_mutation_result = None;
         self.bond_self_reported = false;
         self.network.bonds = None;
         self.network.bonds_pending = false;
@@ -3607,13 +3615,15 @@ impl App {
         self.bond_label_queue.clear();
         self.bond_refresh_due = None;
         self.bond_self_write = false;
+        self.bond_mutation_pending = false;
+        self.bond_mutation_result = None;
         self.ask_device(Query::Bonds)
     }
 
     /// Store a display label for one bonded host and read it back.
     pub fn set_bond_label(&mut self, address: &str, label: &str) -> Result<(), String> {
         let command = accessory::bond_label_set_command(address, label);
-        self.send_accessory(&command, Query::BondLabel)
+        self.send_bond_mutation(&command)
     }
 
     /// Ask the bridge to remove one pairing.
@@ -3623,7 +3633,24 @@ impl App {
     /// after the firmware's delayed unpair instead of folding a label, see
     /// [`App::apply_reply`].
     pub fn remove_bond(&mut self, address: &str) -> Result<(), String> {
-        self.send_accessory(&format!("@linkr bonds remove {address}"), Query::BondLabel)
+        self.send_bond_mutation(&format!("@linkr bonds remove {address}"))
+    }
+
+    fn send_bond_mutation(&mut self, command: &str) -> Result<(), String> {
+        self.bond_label_queue.clear();
+        self.bond_self_write = false;
+        self.bond_mutation_result = None;
+        self.bond_mutation_pending = false;
+        self.send_accessory(command, Query::BondLabel)?;
+        self.bond_mutation_pending = true;
+        Ok(())
+    }
+
+    /// A finished wait may mean a rejection, timeout, or disconnect. Only a
+    /// matching, valid device acknowledgement is evidence of success.
+    pub fn take_bond_mutation_result(&mut self) -> Option<Result<String, String>> {
+        self.bond_mutation_pending = false;
+        self.bond_mutation_result.take()
     }
 
     /// Ask for the next queued label, if the link is still up.
@@ -3825,7 +3852,21 @@ impl App {
         // Whatever happened, nothing is waiting for it any more — and clearing
         // that first is what stops a failed read from leaving its view reading
         // "loading…" underneath an error.
+        let mutation = reply.query == Query::BondLabel && self.bond_mutation_pending;
         self.stop_waiting(reply.query);
+        if mutation {
+            self.bond_mutation_pending = false;
+            let text = reply.lines.join("\n");
+            self.bond_mutation_result = Some(if !reply.status.ok {
+                Err(reply.status.error.clone())
+            } else if let Some(label) = accessory::parse_bond_label(&text) {
+                Ok(label.label.unwrap_or_default())
+            } else if text.trim() == "OK bonds queued" {
+                Ok("accepted; the board removes it shortly".to_string())
+            } else {
+                Err(self.strings().net_paired_bad_reply.to_string())
+            });
+        }
         if !reply.status.ok {
             // A busy refusal is not a failure to report: the board's gate is
             // held by whatever WiFi work is in flight, and it clears on its
@@ -3882,7 +3923,7 @@ impl App {
                 }
                 // The bond went away between the list and its label read.
                 // That is not the end of the series; the next address is.
-                if error.contains("not found") {
+                if error.contains("not found") && !mutation {
                     self.ask_next_bond_label();
                     return;
                 }
@@ -4075,7 +4116,9 @@ impl App {
                             entry.label = parsed.label;
                         }
                     }
-                    self.ask_next_bond_label();
+                    if !mutation {
+                        self.ask_next_bond_label();
+                    }
                 } else if text.trim() == "OK bonds queued" {
                     // Removal is accepted but the firmware unplugs 500 ms
                     // later. Read the list after that window, not now.
@@ -4523,6 +4566,9 @@ impl App {
 
     /// Clear the in-flight flag this question set, whichever view it set it on.
     fn stop_waiting(&mut self, query: Query) {
+        if query == Query::BondLabel {
+            self.bond_mutation_pending = false;
+        }
         match query {
             Query::Diagnostics => self.diagnostics.loading = false,
             Query::Uart
@@ -9031,5 +9077,74 @@ mod tests {
                 "exiting must close even an uncollected dial"
             );
         }
+    }
+    #[test]
+    fn cli_bond_mutations_report_device_errors_and_success() {
+        for remove in [false, true] {
+            for reply in [
+                "ERR control=readonly",
+                "ERR bonds not found",
+                "ERR bonds unsupported",
+                "OK malformed",
+                if remove {
+                    "OK bonds queued"
+                } else {
+                    "OK bonds label=0/AA:BB:CC:DD:EE:01 hex=54657374"
+                },
+            ] {
+                let (mut app, wire) = connected_over_ble(Lang::En);
+                let peer = "0/AA:BB:CC:DD:EE:01".to_string();
+                let requests = if remove {
+                    crate::cli::Requests {
+                        bond_remove: Some(peer),
+                        ..Default::default()
+                    }
+                } else {
+                    crate::cli::Requests {
+                        bond_label: Some((peer, "Test".to_string())),
+                        ..Default::default()
+                    }
+                };
+                let responder = std::thread::spawn(move || {
+                    let deadline = Instant::now() + Duration::from_secs(2);
+                    while Instant::now() < deadline {
+                        for frame in crate::transport::testing::asked_frames(&wire) {
+                            if frame[crate::protocol::MGMT_HEADER_SIZE..]
+                                .starts_with(b"@linkr bonds ")
+                            {
+                                let id =
+                                    u32::from_le_bytes([frame[4], frame[5], frame[6], frame[7]]);
+                                wire.feed_management(crate::transport::testing::answer(id, reply));
+                                return;
+                            }
+                        }
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                    panic!("bond command was not sent");
+                });
+                let failures = crate::cli::run_requests(
+                    &mut app,
+                    &requests,
+                    crate::cli::Format::Json,
+                    Duration::from_millis(100),
+                );
+                responder.join().unwrap();
+                let success = reply == "OK bonds queued" || reply.contains("hex=");
+                assert_eq!(
+                    failures,
+                    i32::from(!success),
+                    "remove={remove}, reply={reply}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unanswered_bond_mutations_have_no_success_result() {
+        let (mut app, _wire) = connected_over_ble(Lang::En);
+        app.remove_bond("0/AA:BB:CC:DD:EE:01").unwrap();
+        app.talk.abandon(Instant::now() + Duration::from_secs(30));
+        app.report_unanswered(Query::BondLabel, Instant::now());
+        assert!(app.take_bond_mutation_result().is_none());
     }
 }

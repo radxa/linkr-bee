@@ -155,3 +155,24 @@ test('named hosts keep their identity visible in delete confirmation', async ({p
   await page.locator('.bond-row').last().locator('[data-bond-action="remove"]').click();
   expect(warning).toContain('Chrome · Linux (1/AA:BB:CC:DD:EE:02)');
 });
+
+for (const confirmation of ['composing', 'event', 'legacy']) {
+  test(`IME ${confirmation} Enter keeps the label editor open`, async ({page}) => {
+    const row = page.locator('.bond-row').first();
+    await row.locator('[data-bond-action="rename"]').click();
+    const input = row.locator('.bond-input');
+    await input.fill('ce');
+    await page.evaluate(() => window.commands = []);
+    if (confirmation === 'composing') await input.dispatchEvent('compositionstart');
+    await input.dispatchEvent('keydown', {
+      key: 'Enter', code: 'Enter',
+      isComposing: confirmation === 'event', keyCode: confirmation === 'legacy' ? 229 : 13,
+    });
+    expect(await page.evaluate(() => window.commands.filter(c => c.startsWith('@linkr bonds name')))).toEqual([]);
+    await expect(input).toBeVisible();
+    if (confirmation === 'composing') await input.dispatchEvent('compositionend');
+    await input.fill('测试设备');
+    await input.press('Enter');
+    await expect(row.locator('.bond-name')).toHaveText('测试设备');
+  });
+}

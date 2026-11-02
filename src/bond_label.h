@@ -13,5 +13,7 @@ int linkr_bond_label_get(const bt_addr_le_t *addr, char *out, size_t out_len);
  * errno. */
 int linkr_bond_label_set(const bt_addr_le_t *addr, const char *utf8, size_t len);
 
-/* Remove the label. A missing key is not an error. */
+/* Remove the label. A missing key is not an error; storage failures are
+ * returned. All operations lazily migrate the previous blob format and must
+ * be serialized by the caller with bond_lock. */
 int linkr_bond_label_clear(const bt_addr_le_t *addr);

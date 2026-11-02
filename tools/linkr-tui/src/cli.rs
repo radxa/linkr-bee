@@ -1607,22 +1607,7 @@ pub fn run_requests(app: &mut App, requests: &Requests, format: Format, connect:
         match app.set_bond_label(address, label) {
             Err(why) => failed += report(format, "bond-label", false, &why),
             Ok(()) => {
-                if !wait_for_query(app, crate::device::Query::BondLabel, format) {
-                    failed += report(format, "bond-label", false, &why_no_answer(app));
-                } else {
-                    let shown = app
-                        .network
-                        .bonds
-                        .as_ref()
-                        .and_then(|bonds| {
-                            bonds
-                                .iter()
-                                .find(|bond| bond.id.eq_ignore_ascii_case(address))
-                        })
-                        .and_then(|bond| bond.label.clone())
-                        .unwrap_or_default();
-                    failed += report(format, "bond-label", true, &shown);
-                }
+                failed += report_bond_mutation(app, format, "bond-label");
             }
         }
     }
@@ -1630,16 +1615,7 @@ pub fn run_requests(app: &mut App, requests: &Requests, format: Format, connect:
         match app.remove_bond(address) {
             Err(why) => failed += report(format, "bond-remove", false, &why),
             Ok(()) => {
-                if !wait_for_query(app, crate::device::Query::BondLabel, format) {
-                    failed += report(format, "bond-remove", false, &why_no_answer(app));
-                } else {
-                    let detail = if app.network.bonds_pending {
-                        "accepted; the board removes it shortly"
-                    } else {
-                        "removed"
-                    };
-                    failed += report(format, "bond-remove", true, detail);
-                }
+                failed += report_bond_mutation(app, format, "bond-remove");
             }
         }
     }
@@ -1996,6 +1972,15 @@ pub fn ask_and_wait(
         return Err(why_no_answer(app));
     }
     answer_of(app, query)
+}
+
+fn report_bond_mutation(app: &mut App, format: Format, what: &str) -> i32 {
+    let settled = wait_for_query(app, crate::device::Query::BondLabel, format);
+    match app.take_bond_mutation_result() {
+        Some(Ok(detail)) if settled => report(format, what, true, &detail),
+        Some(Err(why)) => report(format, what, false, &why),
+        _ => report(format, what, false, &why_no_answer(app)),
+    }
 }
 
 /// Wait for the answer to the question that was just asked, and say whether it

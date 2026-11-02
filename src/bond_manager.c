@@ -25,7 +25,7 @@ static void remove_bond(struct k_work *work)
 	 * it the label. */
 	if ((last_result == 0 || last_result == -ENOENT) &&
 	    IS_ENABLED(CONFIG_SETTINGS)) {
-		(void)linkr_bond_label_clear(&pending_addr);
+		last_result = linkr_bond_label_clear(&pending_addr);
 	}
 	pending = false;
 	k_mutex_unlock(&bond_lock);
@@ -260,7 +260,10 @@ static void bond_label_command(uint8_t id, const char *args, char *reply,
 	}
 
 	if (!strcmp(value, "clear")) {
-		(void)linkr_bond_label_clear(&address);
+		if (linkr_bond_label_clear(&address) < 0) {
+			snprintk(reply, size, "ERR bonds save\n");
+			return;
+		}
 		snprintk(reply, size, "OK bonds label=%u/%s none\n",
 			 (unsigned int)address.type, address_text);
 		return;
@@ -413,7 +416,10 @@ static void bond_name_command(struct bt_conn *conn, uint8_t id,
 		return;
 	}
 	if (length == 0u) {
-		(void)linkr_bond_label_clear(self);
+		if (linkr_bond_label_clear(self) < 0) {
+			snprintk(reply, size, "ERR bonds name save\n");
+			return;
+		}
 		snprintk(reply, size, "OK bonds name\n");
 		return;
 	}

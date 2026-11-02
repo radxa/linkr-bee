@@ -106,8 +106,10 @@ static void bt_foreach_bond(uint8_t id, void (*cb)(const struct bt_bond_info *, 
 }
 
 /* Ten kilobytes of key/value memory is far more than eight labels need. */
-struct entry { char key[40]; char val[96]; int len; bool used; };
+struct entry { char key[40]; char val[512]; int len; bool used; };
 static struct entry store[8];
+static int delete_error;
+static int saves_until_error = -1;
 static int store_find(const char *k)
 {
 	for (int i = 0; i < 8; i++) if (store[i].used && !strcmp(store[i].key, k)) return i;
@@ -122,6 +124,8 @@ static int settings_save_one(const char *k, const void *v, size_t n)
 {
 	int i;
 
+	if (saves_until_error == 0) return -EIO;
+	if (saves_until_error > 0) saves_until_error--;
 	if (n > sizeof store[0].val) return -EINVAL;
 	i = store_find(k);
 	if (i < 0) {
@@ -147,6 +151,8 @@ static int settings_delete(const char *k)
 {
 	int i = store_find(k);
 
+	if (delete_error) return delete_error;
+
 	if (i < 0) return -ENOENT;
 	store[i].used = false;
 	return 0;
@@ -155,6 +161,76 @@ static int settings_delete(const char *k)
 #include "bond_label_production.inc"
 #include "bond_production.inc"
 
+static void seed_legacy(void)
+{
+	/* Exact version-2 layout from the released blob-based implementation. */
+	uint8_t blob[426] = { 2, 2 };
+	uint8_t *slot = blob + 2;
+
+	slot[0] = 0;
+	memcpy(slot + 1, "AA:BB:CC:DD:EE:01", 18);
+	slot[19] = 11;
+	memcpy(slot + 20, "Custom Host", 12);
+	slot += 53;
+	slot[0] = 1;
+	memcpy(slot + 1, "AA:BB:CC:DD:EE:02", 18);
+	slot[19] = 6;
+	memcpy(slot + 20, "Tablet", 7);
+	assert(settings_save_one("linkr_bond/labels", blob, sizeof(blob)) == 0);
+}
+
+static void test_legacy_migration(void)
+{
+	char label[64];
+	bt_addr_le_t other;
+
+	assert(bt_addr_le_from_str("AA:BB:CC:DD:EE:02", "random", &other) == 0);
+	seed_legacy();
+	assert(linkr_bond_label_get(&self, label, sizeof(label)) == 11);
+	assert(!strcmp(label, "Custom Host"));
+	assert(store_find("linkr_bond/labels") < 0);
+	assert(linkr_bond_label_get(&other, label, sizeof(label)) == 6);
+	assert(!strcmp(label, "Tablet"));
+
+	/* A partially completed migration can be retried without replacing a
+	 * value already saved in the new format. The old source stays on failure. */
+	memset(store, 0, sizeof(store));
+	seed_legacy();
+	saves_until_error = 1;
+	assert(linkr_bond_label_get(&self, label, sizeof(label)) == -EIO);
+	assert(store_find("linkr_bond/labels") >= 0);
+	saves_until_error = -1;
+	assert(settings_save_one("linkr/bond/aabbccddee010", "New", 3) == 0);
+	assert(linkr_bond_label_get(&self, label, sizeof(label)) == 3);
+	assert(!strcmp(label, "New"));
+	assert(store_find("linkr_bond/labels") < 0);
+	assert(linkr_bond_label_get(&other, label, sizeof(label)) == 6);
+
+	/* Refuse a clear while the legacy source cannot be retired, then retry.
+	 * A successful clear must not resurrect the old name on the next read. */
+	memset(store, 0, sizeof(store));
+	seed_legacy();
+	delete_error = -EIO;
+	assert(linkr_bond_label_clear(&self) == -EIO);
+	assert(store_find("linkr_bond/labels") >= 0);
+	delete_error = 0;
+	assert(linkr_bond_label_clear(&self) == 0);
+	assert(linkr_bond_label_get(&self, label, sizeof(label)) == 0);
+
+	/* A write made before the first read also takes precedence over legacy. */
+	memset(store, 0, sizeof(store));
+	seed_legacy();
+	assert(linkr_bond_label_set(&self, "Override", 8) == 8);
+	assert(linkr_bond_label_get(&self, label, sizeof(label)) == 8);
+	assert(!strcmp(label, "Override"));
+
+	/* Torn or incompatible records are never interpreted as labels. */
+	memset(store, 0, sizeof(store));
+	assert(settings_save_one("linkr_bond/labels", "bad", 3) == 0);
+	assert(linkr_bond_label_get(&self, label, sizeof(label)) == 0);
+	memset(store, 0, sizeof(store));
+}
+
 int main(void)
 {
 	struct bt_conn conn = { 0 };
@@ -162,6 +238,8 @@ int main(void)
 	char label[64];
 	char hex[99];
 	char cmd[160];
+
+	test_legacy_migration();
 
 	/* Storage: absent reads as empty, round-trips, and lands on the expected
 	 * key (address bytes reversed, then the type). */
@@ -243,6 +321,21 @@ int main(void)
 	linkr_bond_command(&conn, "bonds remove 0/AA:BB:CC:DD:EE:01", out, sizeof out);
 	assert(strstr(out, "ERR") != NULL);
 	assert(linkr_bond_label_get(&self, label, sizeof label) == 4);
+
+	/* Flash failures must reach both clear commands and delayed removal. */
+	security = 2;
+	delete_error = -EIO;
+	assert(linkr_bond_label_clear(&self) == -EIO);
+	linkr_bond_command(&conn, "bonds label 0/AA:BB:CC:DD:EE:01 clear", out, sizeof(out));
+	assert(strstr(out, "ERR bonds save") != NULL);
+	linkr_bond_command(&conn, "bonds name", out, sizeof(out));
+	assert(strstr(out, "ERR bonds name save") != NULL);
+	assert(linkr_bond_label_get(&self, label, sizeof(label)) == 4);
+	linkr_bond_command(&conn, "bonds remove 0/AA:BB:CC:DD:EE:01", out, sizeof(out));
+	remove_work.fn(NULL);
+	assert(last_result == -EIO);
+	assert(linkr_bond_label_get(&self, label, sizeof(label)) == 4);
+	delete_error = 0;
 
 	return 0;
 }
