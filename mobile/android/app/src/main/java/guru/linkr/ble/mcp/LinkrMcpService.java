@@ -63,7 +63,9 @@ public class LinkrMcpService extends Service {
             return START_NOT_STICKY;
         }
         if (ACTION_STOP.equals(intent.getAction())) {
-            McpServerManager.getInstance(this).stop();
+            /* The notification Stop is an explicit "do not start this again":
+             * persist autoStart=false before tearing the server down. */
+            McpServerManager.getInstance(this).onNotificationStop();
             stopSelf();
             return START_NOT_STICKY;
         }

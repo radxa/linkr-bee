@@ -615,6 +615,12 @@ public class McpHttpServerTest {
             } catch (java.net.SocketException closed) {
                 // Reset is also a valid close of an unparsed request.
             }
+            Field clientsField = McpHttpServer.class.getDeclaredField("clients");
+            clientsField.setAccessible(true);
+            java.util.Set<?> tracked = (java.util.Set<?>) clientsField.get(started);
+            long cleanupDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (!tracked.isEmpty() && System.nanoTime() < cleanupDeadline) Thread.sleep(5);
+            assertTrue("stopped queued sockets must not remain retained", tracked.isEmpty());
         } finally {
             release.countDown();
             for (Socket client : clients) client.close();
@@ -699,13 +705,270 @@ public class McpHttpServerTest {
         assertEquals(200, response.status);
     }
 
+    @Test
+    public void restartAfterStopBindsAndServesAgain() throws Exception {
+        McpHttpServer started = start(request ->
+                CompletableFuture.completedFuture(new McpHttpServer.Response(200, "{}")));
+        started.stop();
+        assertFalse(started.isRunning());
+
+        started.start(0);
+
+        assertTrue(started.isRunning());
+        RawResponse response = exchange(started.getPort(),
+                http("POST", "/mcp", authorizedHeaders("{}"), bytes("{}")));
+        assertEquals(200, response.status);
+    }
+
+    // ---------------------------------------------------------- slowloris guards
+
+    @Test
+    public void slowHeaderTrickleIsCutAtTheRequestDeadline() throws Exception {
+        AtomicInteger calls = new AtomicInteger();
+        /* 1.5 s deadline: every individual read is far below the 10 s per-read
+         * timeout, so only the shared deadline can end this request. */
+        McpHttpServer started = start(request -> {
+            calls.incrementAndGet();
+            return CompletableFuture.completedFuture(new McpHttpServer.Response(200, "{}"));
+        }, 1_500);
+        try (Socket client = new Socket(InetAddress.getLoopbackAddress(), started.getPort())) {
+            client.setSoTimeout(10_000);
+            OutputStream output = client.getOutputStream();
+            output.write(bytes("GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Slow: "));
+            output.flush();
+            long startNanos = System.nanoTime();
+            byte[] oneByte = new byte[] {'a'};
+            while (System.nanoTime() - startNanos < TimeUnit.SECONDS.toNanos(8)) {
+                if (client.getInputStream().available() > 0) {
+                    break;
+                }
+                try {
+                    output.write(oneByte);
+                    output.flush();
+                } catch (IOException peerGone) {
+                    break;
+                }
+                Thread.sleep(100);
+            }
+            client.setSoTimeout(5_000);
+            RawResponse response = null;
+            try {
+                response = readResponse(client.getInputStream());
+            } catch (IOException closedByDeadline) {
+                // A hard close is also a valid "abort" for an over-budget request.
+            }
+            long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+            if (response != null) {
+                assertEquals("an over-budget trickle must be rejected, not answered", 408, response.status);
+            }
+            assertTrue("the shared deadline must cut the trickle well before the 10 s per-read"
+                    + " timeout, took " + elapsedMs + " ms", elapsedMs < 6_000);
+            assertEquals(0, calls.get());
+        }
+    }
+
+    @Test
+    public void heldConnectionsCannotBlockAnAuthenticatedRequestPastTheDeadline() throws Exception {
+        McpHttpServer started = start(request ->
+                CompletableFuture.completedFuture(new McpHttpServer.Response(200, "{\"ok\":true}")), 1_500);
+        List<Socket> held = new ArrayList<>();
+        try {
+            for (int index = 0; index < McpHttpServer.MAX_CONCURRENT_REQUESTS; index++) {
+                Socket socket = new Socket(InetAddress.getLoopbackAddress(), started.getPort());
+                held.add(socket);
+                socket.getOutputStream().write(bytes("GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Slow: "));
+                socket.getOutputStream().flush();
+            }
+            /* Let all eight workers enter the read phase with partial headers. */
+            Thread.sleep(300);
+
+            long startNanos = System.nanoTime();
+            RawResponse response = exchange(started.getPort(),
+                    http("POST", "/mcp", authorizedHeaders("{}"), bytes("{}")));
+            long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+
+            assertEquals(200, response.status);
+            assertTrue("the queued authenticated request must be served once the slowloris"
+                    + " deadline releases the workers, took " + elapsedMs + " ms", elapsedMs < 8_000);
+        } finally {
+            for (Socket socket : held) {
+                socket.close();
+            }
+        }
+    }
+
+    @Test
+    public void stopClosesASocketBlockedInRead() throws Exception {
+        McpHttpServer started = start(request -> {
+            throw new AssertionError("a partial header must never reach the WebView sink");
+        });
+        try (Socket client = new Socket(InetAddress.getLoopbackAddress(), started.getPort())) {
+            client.setSoTimeout(5_000);
+            client.getOutputStream().write(bytes("GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Wait: "));
+            client.getOutputStream().flush();
+            assertTrue("the worker must be blocked in a read", awaitServerRead(5_000));
+
+            started.stop();
+
+            client.setSoTimeout(2_000);
+            int value;
+            try {
+                value = client.getInputStream().read();
+            } catch (java.net.SocketException closed) {
+                value = -1;
+            }
+            assertEquals("the client must see EOF/reset, not hang past stop()", -1, value);
+        }
+    }
+
+    // ---------------------------------------------------------- parser hardening
+
+    @Test
+    public void expectContinueIsRejectedWith417() throws Exception {
+        AtomicInteger calls = new AtomicInteger();
+        McpHttpServer started = start(request -> {
+            calls.incrementAndGet();
+            return CompletableFuture.completedFuture(new McpHttpServer.Response(200, "{}"));
+        });
+        Map<String, String> requestHeaders = headers(
+                "Authorization", "Bearer " + TOKEN,
+                "Content-Length", "2",
+                "Expect", "100-continue");
+
+        RawResponse response = exchange(started.getPort(), http("POST", "/mcp", requestHeaders, null));
+
+        assertEquals(417, response.status);
+        assertEquals(0, calls.get());
+    }
+
+    @Test
+    public void headOnMcpIsMethodNotAllowedWithoutBody() throws Exception {
+        McpHttpServer started = start(request -> {
+            throw new AssertionError("HEAD /mcp must not reach the WebView sink");
+        });
+
+        RawResponse response = exchange(started.getPort(), http("HEAD", "/mcp", headers(), null));
+
+        assertEquals(405, response.status);
+        assertEquals("POST", response.headers.get("allow"));
+        assertEquals("", response.body);
+        assertEquals("0", response.headers.get("content-length"));
+    }
+
+    @Test
+    public void putAndPatchOnMcpAreMethodNotAllowed() throws Exception {
+        McpHttpServer started = start(request -> {
+            throw new AssertionError("Only POST /mcp may reach the WebView sink");
+        });
+
+        for (String method : new String[] {"PUT", "PATCH"}) {
+            RawResponse response = exchange(started.getPort(), http(method, "/mcp", headers(), null));
+            assertEquals(405, response.status);
+            assertEquals("POST", response.headers.get("allow"));
+        }
+    }
+
+    @Test
+    public void unsupportedHttpVersionIsBadRequest() throws Exception {
+        McpHttpServer started = start(request -> {
+            throw new AssertionError("An unsupported HTTP version must not reach the WebView sink");
+        });
+
+        RawResponse response = exchange(
+                started.getPort(), httpVersion("GET", "/", "HTTP/2.0", headers(), null));
+
+        assertEquals(400, response.status);
+    }
+
     // ----------------------------------------------------------------- helpers
+
+    @Test
+    public void queuedRequestDeadlineIncludesQueueWait() throws Exception {
+        CountDownLatch busy = new CountDownLatch(McpHttpServer.MAX_CONCURRENT_REQUESTS);
+        List<CompletableFuture<McpHttpServer.Response>> held = new java.util.concurrent.CopyOnWriteArrayList<>();
+        AtomicInteger calls = new AtomicInteger();
+        McpHttpServer started = start(request -> {
+            if (calls.incrementAndGet() <= McpHttpServer.MAX_CONCURRENT_REQUESTS) {
+                CompletableFuture<McpHttpServer.Response> future = new CompletableFuture<>();
+                held.add(future);
+                busy.countDown();
+                return future;
+            }
+            return CompletableFuture.completedFuture(new McpHttpServer.Response(200, "{}"));
+        }, 1000);
+        List<Socket> sockets = new ArrayList<>();
+        try {
+            for (int index = 0; index < McpHttpServer.MAX_CONCURRENT_REQUESTS; index++) {
+                Socket socket = new Socket(InetAddress.getLoopbackAddress(), started.getPort());
+                sockets.add(socket);
+                socket.getOutputStream().write(http("POST", "/mcp", authorizedHeaders("{}"), bytes("{}")));
+            }
+            assertTrue(busy.await(5, TimeUnit.SECONDS));
+            Socket queued = new Socket(InetAddress.getLoopbackAddress(), started.getPort());
+            sockets.add(queued);
+            queued.setSoTimeout(5000);
+            queued.getOutputStream().write(http("POST", "/mcp", authorizedHeaders("{}"), bytes("{}")));
+            Field field = McpHttpServer.class.getDeclaredField("executor");
+            field.setAccessible(true);
+            ThreadPoolExecutor pool = (ThreadPoolExecutor) field.get(started);
+            long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (pool.getQueue().isEmpty() && System.nanoTime() < until) Thread.sleep(5);
+            assertFalse(pool.getQueue().isEmpty());
+            Thread.sleep(1100);
+            for (CompletableFuture<McpHttpServer.Response> future : held) {
+                future.complete(new McpHttpServer.Response(200, "{}"));
+            }
+            ByteArrayOutputStream response = new ByteArrayOutputStream();
+            byte[] chunk = new byte[1024];
+            int count;
+            try {
+                while ((count = queued.getInputStream().read(chunk)) >= 0) response.write(chunk, 0, count);
+            } catch (java.net.SocketException expired) {
+                // Closing an expired socket with unread bytes can reset TCP.
+                // The invariant below is that no expired request is forwarded.
+            }
+            if (response.size() > 0) {
+                assertTrue(response.toString("UTF-8"), response.toString("UTF-8").startsWith("HTTP/1.1 408 "));
+            }
+            assertEquals(McpHttpServer.MAX_CONCURRENT_REQUESTS, calls.get());
+        } finally {
+            for (CompletableFuture<McpHttpServer.Response> future : held) {
+                future.complete(new McpHttpServer.Response(503, "{}"));
+            }
+            for (Socket socket : sockets) socket.close();
+        }
+    }
 
     private McpHttpServer start(McpHttpServer.Handler handler) throws IOException {
         McpHttpServer started = new McpHttpServer(handler, TOKEN, false);
         server = started;
         started.start(0);
         return started;
+    }
+
+    private McpHttpServer start(McpHttpServer.Handler handler, int requestDeadlineMs) throws IOException {
+        McpHttpServer started = new McpHttpServer(handler, TOKEN, false, requestDeadlineMs);
+        server = started;
+        started.start(0);
+        return started;
+    }
+
+    /** True when a worker thread is blocked parsing inside the server. */
+    private static boolean awaitServerRead(long timeoutMs) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
+        while (System.nanoTime() < deadline) {
+            for (StackTraceElement[] trace : Thread.getAllStackTraces().values()) {
+                for (StackTraceElement frame : trace) {
+                    if (frame.getClassName().startsWith(McpHttpServer.class.getName())
+                            && (frame.getMethodName().equals("readLine")
+                                    || frame.getMethodName().equals("read"))) {
+                        return true;
+                    }
+                }
+            }
+            Thread.sleep(10);
+        }
+        return false;
     }
 
     private static Map<String, String> headers(String... pairs) {
@@ -732,8 +995,13 @@ public class McpHttpServerTest {
     }
 
     private static byte[] http(String method, String target, Map<String, String> requestHeaders, byte[] body) {
+        return httpVersion(method, target, "HTTP/1.1", requestHeaders, body);
+    }
+
+    private static byte[] httpVersion(
+            String method, String target, String version, Map<String, String> requestHeaders, byte[] body) {
         StringBuilder head = new StringBuilder(256);
-        head.append(method).append(' ').append(target).append(" HTTP/1.1\r\n");
+        head.append(method).append(' ').append(target).append(' ').append(version).append("\r\n");
         head.append("Host: 127.0.0.1\r\n");
         for (Map.Entry<String, String> header : requestHeaders.entrySet()) {
             head.append(header.getKey()).append(": ").append(header.getValue()).append("\r\n");

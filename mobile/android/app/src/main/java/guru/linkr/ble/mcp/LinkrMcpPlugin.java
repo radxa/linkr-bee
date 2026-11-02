@@ -129,7 +129,12 @@ public class LinkrMcpPlugin extends Plugin {
             call.reject("Approval id is required");
             return;
         }
-        boolean posted = manager.showApproval(id, call.getString("title"), call.getString("body"));
+        Long deadlineMs = call.getLong("deadlineMs");
+        boolean posted = manager.showApproval(
+                id,
+                call.getString("title"),
+                call.getString("body"),
+                deadlineMs == null ? 0L : deadlineMs);
         /* Capacitor's PluginCall can only resolve a JSON object, so the boolean
          * travels as {posted}; the TypeScript bridge unwraps it to a boolean. */
         JSObject result = new JSObject();
@@ -141,22 +146,35 @@ public class LinkrMcpPlugin extends Plugin {
      * Asks for POST_NOTIFICATIONS on Android 13+ so background approvals can be
      * posted later. The web layer calls this when the user enables the server (a
      * foreground moment); the OS dialog is asynchronous, so this resolves
-     * immediately. Without the permission the feature degrades to the in-app
+     * immediately.
+     *
+     * <p>Both the permission request and the resolve run on the UI thread: the
+     * Capacitor bridge may invoke a plugin method on a worker, while
+     * {@code requestPermissions} must be called from an Activity on the main
+     * thread. Without the permission the feature degrades to the in-app
      * approval card and background requests are refused.
      */
     @PluginMethod
     public void requestApprovalPermission(PluginCall call) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && getActivity() != null) {
-            boolean granted = getContext().checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
-                    == PackageManager.PERMISSION_GRANTED;
-            if (!granted) {
-                ActivityCompat.requestPermissions(
-                        getActivity(),
-                        new String[] {Manifest.permission.POST_NOTIFICATIONS},
-                        8712);
-            }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU || getActivity() == null) {
+            call.resolve();
+            return;
         }
-        call.resolve();
+        getActivity().runOnUiThread(() -> {
+            if (getActivity() != null
+                    && getContext().checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                            != PackageManager.PERMISSION_GRANTED) {
+                try {
+                    ActivityCompat.requestPermissions(
+                            getActivity(),
+                            new String[] {Manifest.permission.POST_NOTIFICATIONS},
+                            8712);
+                } catch (RuntimeException ignored) {
+                    /* The activity may be finishing; the in-app fallback remains. */
+                }
+            }
+            call.resolve();
+        });
     }
 
     /** Dismisses a pending approval notification. Unknown ids are a no-op. */

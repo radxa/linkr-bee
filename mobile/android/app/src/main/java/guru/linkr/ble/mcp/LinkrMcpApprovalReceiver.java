@@ -10,7 +10,8 @@ import android.content.Intent;
  * <p>The receiver is not exported (see AndroidManifest.xml): the only sender is
  * the app's own {@link android.app.PendingIntent#getBroadcast}. It forwards the
  * decision to {@link McpServerManager}, which dismisses the notification and
- * emits the {@code approvalAction} event to the WebView on the main thread.
+ * emits the {@code approvalAction} event to the WebView on the main thread. A
+ * notification dismissal also arrives here (reported as a deny).
  */
 public class LinkrMcpApprovalReceiver extends BroadcastReceiver {
 
@@ -24,6 +25,7 @@ public class LinkrMcpApprovalReceiver extends BroadcastReceiver {
             return;
         }
         boolean approved = intent.getBooleanExtra(McpServerManager.EXTRA_APPROVAL_APPROVED, false);
-        McpServerManager.getInstance(context).onApprovalAction(id, approved);
+        boolean expired = intent.getBooleanExtra(McpServerManager.EXTRA_APPROVAL_EXPIRED, false);
+        McpServerManager.getInstance(context).onApprovalAction(id, approved, expired);
     }
 }
