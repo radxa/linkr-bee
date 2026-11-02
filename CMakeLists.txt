@@ -6,11 +6,16 @@ cmake_minimum_required(VERSION 3.20.0)
 # which is where Zephyr resolves the board.
 list(APPEND BOARD_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
 
-# The module runs after the SoC is configured, before Zephyr collects its
-# post-build commands. Keep the pinned Zephyr checkout unmodified.
 list(APPEND EXTRA_ZEPHYR_MODULES "${CMAKE_CURRENT_SOURCE_DIR}/cmake/esp_simpleboot")
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(linkr_ble_bridge)
+
+# External BSS must be excluded from the runtime PSRAM heap on every C5 build,
+# including builds that select a custom HAL through ZEPHYR_MODULES.
+if(CONFIG_SOC_SERIES_ESP32C5 AND CONFIG_ESP_SPIRAM AND
+   NOT CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY)
+  message(FATAL_ERROR "C5 PSRAM requires SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY")
+endif()
 
 if(CONFIG_SOC_SERIES_ESP32C3)
   include(cmake/esp32c3_hci_order.cmake)
@@ -22,6 +27,7 @@ if(CONFIG_SOC_SERIES_ESP32 AND NOT CONFIG_SOC_SERIES_ESP32C3)
 endif()
 
 target_sources(app PRIVATE
+  src/ext_ram.c
   src/serial_session.c
   src/ble_peers.c
   src/target_binding.c

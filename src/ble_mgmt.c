@@ -19,6 +19,7 @@
 #include <zephyr/sys/util.h>
 
 #include "ble_mgmt.h"
+#include "ext_ram.h"
 #include "serial_session.h"
 #include "watchdog.h"
 
@@ -103,7 +104,11 @@ static const struct linkr_mgmt_protocol_info protocol_info = {
 
 static uint8_t stable_device_id[16];
 static linkr_mgmt_request_handler_t request_handler;
-static struct linkr_mgmt_rx_state rx_states[CONFIG_BT_MAX_CONN];
+/* Per-connection reassembly state: 512 B of payload each, only ever touched
+ * from thread context (GATT command callback, WebDAV/WebSocket control path
+ * and the mgmt_request thread) under rx_lock. */
+static struct linkr_mgmt_rx_state rx_states[CONFIG_BT_MAX_CONN]
+	LINKR_EXT_RAM_BSS;
 static struct k_mutex rx_lock;
 struct mgmt_tx_peer {
 	struct k_mutex lock;
@@ -116,6 +121,10 @@ struct mgmt_tx_peer {
 };
 static struct mgmt_tx_peer tx_peers[CONFIG_BT_MAX_CONN];
 
+/* Kept in DRAM, unlike rx_states above: the queue holds at most
+ * LINKR_MGMT_REQUEST_QUEUE_DEPTH (2) requests, so its payload is ~1 KB, and
+ * tests/test_ble_multipeer.py compiles this section of the file into a host
+ * harness that expects the stock K_MSGQ_DEFINE expansion. */
 K_MSGQ_DEFINE(request_queue, sizeof(struct linkr_mgmt_request),
 	      LINKR_MGMT_REQUEST_QUEUE_DEPTH, 4);
 

@@ -13,6 +13,7 @@
 #include "ws_bridge.h"
 #include "wifi.h"
 #include "serial_session.h"
+#include "ext_ram.h"
 
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(linkr_ws, LOG_LEVEL_INF);
@@ -71,8 +72,8 @@ struct ws_client {
 	struct k_sem start_sem;
 	struct k_sem tx_sem;
 	struct k_mutex tx_lock;
+	/* Backed by ws_tx_bufs[] (PSRAM on the C5 build). */
 	struct ring_buf tx_ring;
-	uint8_t tx_buf[WS_TX_BUF_SIZE];
 	atomic_t tx_bytes;
 	atomic_t rx_bytes;
 	atomic_t tx_dropped;
@@ -81,14 +82,21 @@ struct ws_client {
 };
 
 static struct ws_client clients[WS_MAX_CLIENTS];
+/* Per-client TX payload. Kept out of struct ws_client because GCC refuses a
+ * section attribute on a struct member, and because the ring_buf/k_sem/k_thread
+ * objects next to it are kernel objects that must stay in DRAM. Only pure data
+ * lives here: producers run on the uart_to_ble thread, the consumer on each
+ * client's thread, and both hold that client's tx_lock. */
+static uint8_t
+	ws_tx_bufs[WS_MAX_CLIENTS][WS_TX_BUF_SIZE] __aligned(4) LINKR_EXT_RAM_BSS;
 static struct k_thread ws_handler_threads[WS_MAX_CLIENTS];
 K_THREAD_STACK_ARRAY_DEFINE(ws_client_stacks, WS_MAX_CLIENTS,
 			    CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_STACK);
 
 /* All upgraded-socket receive calls are serialized by ws_rx_lock, so one
  * scratch buffer is sufficient regardless of the configured client count. */
-static uint8_t ws_rx_buf[WS_RX_BUF_SIZE];
-static uint8_t ws_handshake_buf[1024];
+static uint8_t ws_rx_buf[WS_RX_BUF_SIZE] __aligned(4) LINKR_EXT_RAM_BSS;
+static uint8_t ws_handshake_buf[1024] __aligned(4) LINKR_EXT_RAM_BSS;
 /* Zephyr's HTTP resource API supplies one receive scratch buffer per resource,
  * not per upgraded socket. Drain it to EAGAIN under this lock so two client
  * parsers never retain or overwrite each other's buffered bytes. */
@@ -749,8 +757,8 @@ int linkr_ws_init(void)
 		k_sem_init(&client->start_sem, 0, 1);
 		k_sem_init(&client->tx_sem, 0, 1);
 		k_mutex_init(&client->tx_lock);
-		ring_buf_init(&client->tx_ring, sizeof(client->tx_buf),
-			      client->tx_buf);
+		ring_buf_init(&client->tx_ring, sizeof(ws_tx_bufs[i]),
+			      ws_tx_bufs[i]);
 		k_thread_create(&ws_handler_threads[i], ws_client_stacks[i],
 				K_THREAD_STACK_SIZEOF(ws_client_stacks[i]),
 				ws_client_thread, INT_TO_POINTER(i), NULL, NULL,

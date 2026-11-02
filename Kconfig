@@ -1,3 +1,9 @@
+# The HAL defaults this hidden symbol only for ESP32/S2/S3. Extend its
+# defaults here so Kconfig resolves the C5 heap boundary on the first configure,
+# with any selected HAL checkout, without modifying external source trees.
+config SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY
+	default y if SOC_SERIES_ESP32C5 && ESP_SPIRAM
+
 menu "Linkr Bee bridge"
 
 config LINKR_BLE_BRIDGE_PEER_TX_QUEUE_DEPTH

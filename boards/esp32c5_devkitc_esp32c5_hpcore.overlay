@@ -77,6 +77,15 @@
 	status = "okay";
 };
 
+/* The WROOM-1 module on this devkit carries 8 MB of QSPI PSRAM, but the
+ * upstream esp32c5_wroom_n8r4.dtsi declares only 4 MB. CONFIG_ESP_SPIRAM_SIZE
+ * is derived from this node, and only an 8 MB size selects the matching
+ * SPIRAM_TYPE_ESPPSRAM64 in Kconfig.spiram, so the overlay has to correct it
+ * before CONFIG_ESP_SPIRAM can claim the whole part. */
+&psram0 {
+	size = <DT_SIZE_M(8)>;
+};
+
 /* Use USB Serial/JTAG (built-in USB-C port) for console output.
  * UART0 (GPIO11/12) is reserved for the bridge UART1. */
 &usb_serial {
