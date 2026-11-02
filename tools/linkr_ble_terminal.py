@@ -16,6 +16,7 @@ import socket
 import struct
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -54,6 +55,9 @@ MGMT_FLAG_FINAL = 1 << 0
 MGMT_FLAG_ERROR = 1 << 1
 WIFI_OPERATION_TIMEOUT = 35.0
 WIFI_SCAN_TIMEOUT = 35.0
+# Seconds between --reconnect attempts; long enough for the board to
+# finish rebooting its radio, short enough to stay in a script's patience.
+RECONNECT_DELAY = 2.0
 
 # The device rejects anything outside these ranges (src/main.c parse_uart_line),
 # so the CLI validates the spec locally and fails before touching the link.
@@ -201,6 +205,69 @@ def ble_write_size(value: str) -> int:
     if not 0 <= parsed <= 244:
         raise argparse.ArgumentTypeError("BLE write size must be between 0 and 244")
     return parsed
+
+
+def led_colour(value: str) -> str:
+    """`off`, or six hex digits with or without a leading `#`."""
+    text = value.strip().lower()
+    if text == "off":
+        return text
+    if text.startswith("#"):
+        text = text[1:]
+    if len(text) != 6 or any(char not in "0123456789abcdef" for char in text):
+        raise argparse.ArgumentTypeError(
+            "LED colour must be 'off' or six hex digits, e.g. 1a2b3c")
+    return text
+
+
+def pulse_ms(value: str) -> int:
+    """Contact pulse length; the firmware accepts 1-60000 ms."""
+    try:
+        ms = int(value, 10)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "pulse length must be whole milliseconds") from exc
+    if not 1 <= ms <= 60000:
+        raise argparse.ArgumentTypeError("pulse length must be 1-60000 ms")
+    return ms
+
+
+def management_command(value: str) -> str:
+    """A bare management command, exactly as the board expects to receive it."""
+    text = value.strip()
+    # `@a` (start autobaud) is the shortest real command, so one character after
+    # the sigil is the floor; a lone '@' is a typo, not a command.
+    if len(text) < 2 or not text.startswith("@"):
+        raise argparse.ArgumentTypeError(
+            "management command must start with '@', e.g. @l? or @linkr bonds?")
+    return text
+
+
+def bond_address(value: str) -> str:
+    """`<type>/<address>` exactly as the board prints a pairing, e.g. 0/AA:..:01."""
+    text = value.strip()
+    kind, _, address = text.partition("/")
+    if not kind.isdigit() or not 0 <= int(kind) <= 3:
+        raise argparse.ArgumentTypeError(
+            "address type must be 0-3, e.g. 0/AA:BB:CC:DD:EE:01")
+    if len(address) != 17 or any(
+            (index % 3 == 2 and char != ":") or
+            (index % 3 != 2 and char not in "0123456789abcdefABCDEF")
+            for index, char in enumerate(address)):
+        raise argparse.ArgumentTypeError(
+            "address must be six hex pairs separated by colons")
+    return f"{int(kind)}/{address.upper()}"
+
+
+def reconnect_attempts(value: str) -> int:
+    try:
+        attempts = int(value, 10)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "attempts must be a whole number") from exc
+    if not 0 <= attempts <= 50:
+        raise argparse.ArgumentTypeError("attempts must be 0-50")
+    return attempts
 
 
 def normalize_ble_name(value: str) -> str:
@@ -457,15 +524,26 @@ async def discover_devices(timeout: float) -> list[DiscoveredDevice]:
     ]
 
 
-async def scan_devices(timeout: float) -> list:
+async def scan_devices(timeout: float, *, json_output: bool = False) -> list:
     """List every nearby BLE device, named or not.
 
     Unnamed peripherals are exactly the ones a user cannot identify by name, so
-    silently dropping them made an empty --scan output misleading.
+    silently dropping them made an empty --scan output misleading. --json
+    reports one record per device, which is what a script wants: the names are
+    free text and can contain the tab the plain listing uses as a separator.
     """
     devices = await discover_devices(timeout)
     for dev in sorted(devices, key=device_sort_key):
         rssi = getattr(dev, "rssi", None)
+        if json_output:
+            print(json.dumps({
+                "type": "device",
+                "name": dev.name,
+                "address": dev.address,
+                "rssi": rssi,
+                "management": advertises_management(dev),
+            }, ensure_ascii=False), flush=True)
+            continue
         signal = f"{rssi} dBm" if isinstance(rssi, int) else "-"
         print(f"{dev.address}\t{printable_device_name(dev.name)}\t{signal}")
     return devices
@@ -585,6 +663,50 @@ def describe_devices(devices) -> str:
     if not rows:
         return "  (nothing nearby was heard)"
     return "\n".join(rows[:6])
+
+
+REPLY_FIELD = re.compile(r"([A-Za-z][A-Za-z0-9_-]*)=([^,\s]+)")
+
+
+def reply_fields(text: str) -> dict[str, str]:
+    """Every `key=value` pair a reply carries, for scripts that want names.
+
+    A value stops at a comma or a space, so an SSID with spaces is only complete
+    in the verbatim `text` field of the same record. `@i?` answers on several
+    lines; the pairs from all of them land in one map.
+    """
+    return dict(REPLY_FIELD.findall(text))
+
+
+def result_record(command: str, body: bytes) -> dict:
+    """One machine-readable answer: the command, the raw text, its pairs."""
+    text = body.decode(errors="replace").strip()
+    return {
+        "type": "result",
+        "command": command,
+        "ok": True,
+        "text": text,
+        "fields": reply_fields(text),
+    }
+
+
+async def send_reported(management, command: str, *, json_output: bool,
+                        print_body: bool = False,
+                        wait_final_timeout: float = 0.0) -> bytes:
+    """Send one management command and return its reply body.
+
+    `--json` prints a `result` record for every command either way. Human mode
+    stays quiet unless the caller wants the body on stdout (`--cmd`, where the
+    reply is the point): the transport already echoes it to stderr.
+    """
+    answer = await management.send(command.encode(),
+                                   wait_final_timeout=wait_final_timeout)
+    if json_output:
+        print(json.dumps(result_record(command, answer), ensure_ascii=False),
+              flush=True)
+    elif print_body:
+        print(answer.decode(errors="replace").rstrip("\r\n"), flush=True)
+    return answer
 
 
 def parse_ble_name(text: str, *, query: bool = False) -> str | None:
@@ -1296,6 +1418,123 @@ def completion_script(shell: str, parser: argparse.ArgumentParser) -> str:
     )
 
 
+async def run_commands(args: argparse.Namespace, management, *,
+                       wifi_command: bytes | None) -> None:
+    """Send every command the flags asked for, in --help order.
+
+    Kept out of run() so the wire commands can be asserted without a radio. The
+    control commands run first and last on purpose: every mutation below is
+    refused while another client owns the console, and a one-shot
+    `--claim … --release` has to bracket them.
+    """
+    if args.query_control:
+        await send_reported(management, "@c?", json_output=args.json)
+    if args.claim:
+        await send_reported(management, "@c claim", json_output=args.json)
+
+    if args.query_info:
+        await send_reported(management, "@i?", json_output=args.json)
+
+    if args.uart:
+        await send_reported(management, f"@u={args.uart}",
+                            json_output=args.json)
+
+    if args.query_uart:
+        await send_reported(management, "@u?", json_output=args.json)
+
+    if wifi_command is not None:
+        await send_reported(
+            management, wifi_command.decode(),
+            json_output=args.json,
+            wait_final_timeout=WIFI_OPERATION_TIMEOUT,
+        )
+
+    if args.wifi_off:
+        await send_reported(
+            management, "@w off", json_output=args.json,
+            wait_final_timeout=WIFI_OPERATION_TIMEOUT
+        )
+
+    if args.query_wifi:
+        await send_reported(management, "@w?", json_output=args.json)
+
+    if args.wifi_scan:
+        await send_reported(
+            management, "@w scan", json_output=args.json,
+            wait_final_timeout=WIFI_SCAN_TIMEOUT
+        )
+
+    if args.webdav:
+        await send_reported(management, f"@d={args.webdav}",
+                            json_output=args.json)
+
+    if args.webdav_off:
+        await send_reported(management, "@d off", json_output=args.json)
+
+    if args.query_webdav:
+        await send_reported(management, "@d?", json_output=args.json)
+
+    if args.rename_ble is not None:
+        # A write's reply echoes the requested name, not the state
+        # the board will advertise; read it back before saying it
+        # worked.
+        await send_reported(management, f"@n={args.rename_ble}",
+                            json_output=args.json)
+        await verify_ble_name(management, args.rename_ble)
+
+    if args.reset_ble_name:
+        await send_reported(management, "@n default", json_output=args.json)
+        await verify_ble_name(management, None)
+
+    if args.query_ble_name:
+        await send_reported(management, "@n?", json_output=args.json)
+
+    if args.bonds:
+        # A listing is the point here, so it goes to stdout like --scan.
+        await send_reported(management, "@linkr bonds?", json_output=args.json,
+                            print_body=True)
+
+    if args.bonds_names:
+        await send_reported(management, "@linkr bonds names?",
+                            json_output=args.json, print_body=True)
+
+    if args.bonds_remove is not None:
+        await send_reported(management,
+                            f"@linkr bonds remove {args.bonds_remove}",
+                            json_output=args.json)
+
+    if args.led is not None:
+        await send_reported(
+            management,
+            "@l off" if args.led == "off" else f"@l={args.led}",
+            json_output=args.json,
+        )
+
+    if args.query_led:
+        await send_reported(management, "@l?", json_output=args.json)
+
+    if args.opto is not None:
+        await send_reported(management, f"@o {args.opto}",
+                            json_output=args.json)
+
+    if args.opto_pulse is not None:
+        await send_reported(management, f"@o pulse {args.opto_pulse}",
+                            json_output=args.json)
+
+    if args.query_opto:
+        await send_reported(management, "@o?", json_output=args.json)
+
+    # Any command the CLI has no flag for. The reply is the point here,
+    # so it goes to stdout; --json wraps it in a result record instead.
+    for command in args.cmd or ():
+        await send_reported(management, command, json_output=args.json,
+                            print_body=True)
+
+    if args.release:
+        await send_reported(management, "@c release", json_output=args.json)
+
+
+
 async def run(args: argparse.Namespace) -> int:
     # Resolve WiFi credentials before anything radio related: a bad spec or a
     # missing password should fail fast, and the prompt must not fight the
@@ -1320,7 +1559,7 @@ async def run(args: argparse.Namespace) -> int:
 
     scanned = None
     if args.scan:
-        scanned = await scan_devices(args.timeout)
+        scanned = await scan_devices(args.timeout, json_output=args.json)
         if not args.address and not has_control_action(args):
             return EXIT_OK
 
@@ -1492,57 +1731,7 @@ async def run(args: argparse.Namespace) -> int:
                 # session does not depend on it.
                 await report_host_name(management, label_name)
 
-            if args.query_info:
-                await management.send(b"@i?")
-
-            if args.uart:
-                await management.send(f"@u={args.uart}".encode())
-
-            if args.query_uart:
-                await management.send(b"@u?")
-
-            if wifi_command is not None:
-                await management.send(
-                    wifi_command,
-                    wait_final_timeout=WIFI_OPERATION_TIMEOUT,
-                )
-
-            if args.wifi_off:
-                await management.send(
-                    b"@w off", wait_final_timeout=WIFI_OPERATION_TIMEOUT
-                )
-
-            if args.query_wifi:
-                await management.send(b"@w?")
-
-            if args.wifi_scan:
-                await management.send(
-                    b"@w scan", wait_final_timeout=WIFI_SCAN_TIMEOUT
-                )
-
-            if args.webdav:
-                await management.send(f"@d={args.webdav}".encode())
-
-            if args.webdav_off:
-                await management.send(b"@d off")
-
-            if args.query_webdav:
-                await management.send(b"@d?")
-
-            if args.rename_ble is not None:
-                # A write's reply echoes the requested name, not the state
-                # the board will advertise; read it back before saying it
-                # worked.
-                await management.send(f"@n={args.rename_ble}".encode())
-                await verify_ble_name(management, args.rename_ble)
-
-            if args.reset_ble_name:
-                await management.send(b"@n default")
-                await verify_ble_name(management, None)
-
-            if args.query_ble_name:
-                await management.send(b"@n?")
-
+            await run_commands(args, management, wifi_command=wifi_command)
             if args.loopback_test is not None:
                 payload = args.loopback_test.encode()
                 notify_queue = asyncio.Queue()
@@ -1554,6 +1743,15 @@ async def run(args: argparse.Namespace) -> int:
                     notify_queue = None
                 if not ok:
                     raise RuntimeError("loopback test failed")
+
+            if args.monitor:
+                # The notify callback already writes the UART to stdout; a
+                # monitor only has to stay alive and never touch stdin.
+                info("monitoring the target UART; Ctrl-C to stop")
+                await disconnected.wait()
+                stderr("")
+                error("BLE disconnected while monitoring")
+                return EXIT_DEVICE_DISCONNECTED
 
             if args.no_terminal:
                 await stop_channels(client)
@@ -1597,85 +1795,177 @@ async def stop_channels(client: BleakClient) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Terminal over BLE Nordic UART Service for Linkr Bee bridge"
+        description="Terminal over BLE Nordic UART Service for Linkr Bee bridge",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "examples:\n"
+            "  # interactive terminal\n"
+            "  %(prog)s\n"
+            "  # board facts, no terminal\n"
+            "  %(prog)s --query-info --query-wifi --no-terminal\n"
+            "  # pulse the isolated contact\n"
+            "  %(prog)s --opto-pulse 500 --no-terminal\n"
+            "  # every command the running firmware has\n"
+            "  %(prog)s --cmd '@help' --no-terminal\n"
+            "  # scripting: one JSON record per command\n"
+            "  %(prog)s --query-opto --json --no-terminal\n"
+            "  # long capture that survives a dropped link\n"
+            "  %(prog)s --monitor --reconnect 3 | tee board.log\n"
+            "\n"
+            "exit codes: 0 ok, 1 error, 2 bad arguments, 3 device disconnected\n"
+            "\n"
+            "The advertised name is a label its owner can change, so the default\n"
+            "lookup goes by the Linkr Management Service. The @-commands belong to\n"
+            "the running firmware -- --cmd '@help' is the authoritative list -- and\n"
+            "this client only needs flags for the ones it automates.\n"
+        ),
     )
+    # Grouped so 47 flags stay scannable. Inside a group the order is the
+    # order they are added, which is also the order --help and the
+    # generated completions use.
+    conn = parser.add_argument_group("finding and connecting")
+    board = parser.add_argument_group("board settings and I/O")
+    identity = parser.add_argument_group("name, pairing and console control")
+    extra = parser.add_argument_group("any other management command")
+    term = parser.add_argument_group("terminal session")
+    tune = parser.add_argument_group("output and transport tuning")
     parser.add_argument("--version", action="version",
                         version=f"%(prog)s {__version__}")
-    parser.add_argument(
+    conn.add_argument(
         "--name",
         default=None,
         help="explicit BLE name/prefix filter; by default the board is found "
              "by the Linkr Management Service, because the advertised name is "
              "a label the owner can change",
     )
-    parser.add_argument("--address", help="BLE address/UUID; skips name scan")
-    parser.add_argument("--scan", action="store_true",
-                        help="list nearby BLE devices (all of them, named or not)")
-    parser.add_argument("--timeout", type=positive_float, default=8.0,
-                        help="scan timeout seconds")
-    parser.add_argument("--query-info", action="store_true",
-                        help="send @i? device diagnostics before terminal")
-    parser.add_argument("--query-uart", action="store_true", help="send @u? before terminal")
-    parser.add_argument("--uart", type=normalize_uart_spec,
-                        help="set UART as baud,data,parity,stop,flow "
-                             "(baud 300-3000000, data 5-8, parity n/o/e, "
-                             "stop 1/2, flow n/rtscts)")
-    parser.add_argument("--wifi", metavar="SSID[,PASSWORD]",
-                        help="connect ESP32 to WiFi; prefer ssid alone with "
-                             "--wifi-key-file so the password stays out of argv")
-    parser.add_argument("--wifi-key-file", metavar="PATH",
-                        help="read the WiFi password from the first line of PATH")
-    parser.add_argument("--wifi-off", action="store_true", help="forget saved WiFi")
-    parser.add_argument("--query-wifi", action="store_true", help="send @w? before terminal")
-    parser.add_argument("--wifi-scan", action="store_true",
-                        help="scan nearby 2.4 GHz WiFi networks")
-    parser.add_argument("--webdav", help="set anonymous HTTP WebDAV upload URL")
-    parser.add_argument("--webdav-off", action="store_true", help="disable WebDAV upload")
-    parser.add_argument("--query-webdav", action="store_true", help="send @d? before terminal")
-    parser.add_argument("--query-ble-name", action="store_true",
-                        help="send @n? and print the advertised BLE name")
-    parser.add_argument("--rename-ble", type=normalize_ble_name, metavar="NAME",
-                        help="set a custom advertised BLE name (1-29 UTF-8 bytes)")
-    parser.add_argument("--reset-ble-name", action="store_true",
-                        help="restore the MAC-derived advertised BLE name")
-    parser.add_argument("--pair", action="store_true",
-                        help="request OS bonding (hold pairing GPIO low: GPIO1 C3/C5, "
-                             "GPIO4 WROOM); macOS pairs on encrypted reads")
-    parser.add_argument("--loopback-test", nargs="?", const="A",
-                        help="send payload and require the same bytes back")
-    parser.add_argument("--loopback-timeout", type=positive_float, default=3.0,
-                        help="seconds to wait for --loopback-test echo")
-    parser.add_argument("--no-terminal", action="store_true", help="connect, run commands, exit")
-    parser.add_argument("--json", action="store_true",
-                        help="write management responses/events to stdout as JSON "
-                             "lines (sensitive command text stays redacted)")
-    parser.add_argument("--quiet", action="store_true",
-                        help="suppress progress messages; errors and results still print")
+    conn.add_argument("--address", help="BLE address/UUID; skips name scan")
+    conn.add_argument("--scan", action="store_true",
+                          help="list nearby BLE devices (all of them, named or not)")
+    conn.add_argument("--timeout", type=positive_float, default=8.0,
+                          help="scan timeout seconds")
+    board.add_argument("--query-info", action="store_true",
+                          help="send @i? device diagnostics before terminal")
+    board.add_argument("--query-uart", action="store_true", help="send @u? before terminal")
+    board.add_argument("--uart", type=normalize_uart_spec,
+                          help="set UART as baud,data,parity,stop,flow "
+                               "(baud 300-3000000, data 5-8, parity n/o/e, "
+                               "stop 1/2, flow n/rtscts)")
+    board.add_argument("--wifi", metavar="SSID[,PASSWORD]",
+                          help="connect ESP32 to WiFi; prefer ssid alone with "
+                               "--wifi-key-file so the password stays out of argv")
+    board.add_argument("--wifi-key-file", metavar="PATH",
+                          help="read the WiFi password from the first line of PATH")
+    board.add_argument("--wifi-off", action="store_true", help="forget saved WiFi")
+    board.add_argument("--query-wifi", action="store_true", help="send @w? before terminal")
+    board.add_argument("--wifi-scan", action="store_true",
+                          help="scan nearby 2.4 GHz WiFi networks")
+    board.add_argument("--webdav", help="set anonymous HTTP WebDAV upload URL")
+    board.add_argument("--webdav-off", action="store_true", help="disable WebDAV upload")
+    board.add_argument("--query-webdav", action="store_true", help="send @d? before terminal")
+    board.add_argument("--query-led", action="store_true",
+                          help="send @l? and print the board's status LED colour")
+    board.add_argument("--led", type=led_colour, metavar="RRGGBB|off",
+                          help="set the board's status LED, or turn it off")
+    board.add_argument("--query-opto", action="store_true",
+                          help="send @o? and print the isolated contact state")
+    board.add_argument("--opto", choices=("on", "off"), metavar="on|off",
+                          help="close or open the isolated contact (J5)")
+    board.add_argument("--opto-pulse", type=pulse_ms, metavar="MS",
+                          help="pulse the isolated contact for 1-60000 ms")
+    identity.add_argument("--query-ble-name", action="store_true",
+                          help="send @n? and print the advertised BLE name")
+    identity.add_argument("--rename-ble", type=normalize_ble_name, metavar="NAME",
+                          help="set a custom advertised BLE name (1-29 UTF-8 bytes)")
+    identity.add_argument("--reset-ble-name", action="store_true",
+                          help="restore the MAC-derived advertised BLE name")
+    identity.add_argument("--pair", action="store_true",
+                          help="request OS bonding; boards built with "
+                               "CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH need the "
+                               "pairing key held to GND first (GPIO1 C3/C5, GPIO4 "
+                               "WROOM), the C5 devkit has the gate off")
+    extra.add_argument("--cmd", action="append", type=management_command,
+                          metavar="COMMAND",
+                          help="send one management command verbatim and print its "
+                               "reply (repeatable), e.g. --cmd '@linkr bonds?' "
+                               "--cmd '@r slots'")
+    term.add_argument("--loopback-test", nargs="?", const="A",
+                          help="send payload and require the same bytes back")
+    term.add_argument("--loopback-timeout", type=positive_float, default=3.0,
+                          help="seconds to wait for --loopback-test echo")
+    term.add_argument("--no-terminal", action="store_true", help="connect, run commands, exit")
+    term.add_argument("--monitor", action="store_true",
+                          help="print the target UART and never read the keyboard "
+                               "(long captures; Ctrl-C to stop)")
+    term.add_argument("--reconnect", type=reconnect_attempts, metavar="N",
+                          default=0,
+                          help="after a dropped link, reconnect up to N times "
+                               "before giving up (default 0: exit with code 3)")
+    tune.add_argument("--json", action="store_true",
+                          help="write JSON lines to stdout: every command's reply "
+                               "as a result record with its key=value pairs, plus "
+                               "the raw response/event mirror (sensitive command "
+                               "text stays redacted)")
+    tune.add_argument("--quiet", action="store_true",
+                          help="suppress progress messages; errors and results still print")
     # argparse renders the choices in --help on its own.
-    parser.add_argument("--print-completion", choices=COMPLETION_SHELLS,
-                        help="print a shell completion script and exit")
-    parser.add_argument("--host-name", metavar="NAME",
-                        help="name to record next to this host's pairing "
-                             "(default: this machine's hostname)")
-    parser.add_argument("--no-host-name", action="store_true",
-                        help="do not record a name for this host's pairing")
-    parser.add_argument("--ble-write-size", type=ble_write_size, default=0,
-                        help="terminal write size; default auto; management uses at least 20")
-    parser.add_argument("--write-response", action="store_true",
-                        help="use GATT write-with-response")
-    parser.add_argument("--write-delay-ms", type=nonnegative_float, default=5.0,
-                        help="delay between BLE write chunks")
-    parser.add_argument("--enter", choices=["raw", "cr", "lf", "crlf"], default="raw",
-                        help="translate Enter key bytes before BLE write")
-    parser.add_argument("--local-echo", action="store_true", help="echo typed bytes locally")
-    parser.add_argument("--line-mode", action="store_true",
-                        help="do not use raw terminal; send one visible line at a time")
-    parser.add_argument("--debug-io", action="store_true",
-                        help="print BLE TX/RX byte traces to stderr")
-    parser.add_argument("--log-file", help="append raw BLE RX bytes to a file")
-    parser.add_argument("--escape", type=parse_escape, default=parse_escape("^]"),
-                        help="terminal escape byte, default ^]")
+    tune.add_argument("--print-completion", choices=COMPLETION_SHELLS,
+                          help="print a shell completion script and exit")
+    identity.add_argument("--host-name", metavar="NAME",
+                          help="name to record next to this host's pairing "
+                               "(default: this machine's hostname)")
+    identity.add_argument("--no-host-name", action="store_true",
+                          help="do not record a name for this host's pairing")
+    identity.add_argument("--bonds", action="store_true",
+                          help="list the saved pairings on stdout "
+                               "(@linkr bonds?), self=1 marks this host")
+    identity.add_argument("--bonds-names", action="store_true",
+                          help="same list with each host's label on stdout "
+                               "(@linkr bonds names?)")
+    identity.add_argument("--bonds-remove", type=bond_address, metavar="TYPE/ADDRESS",
+                          help="forget one saved pairing, e.g. 0/AA:BB:CC:DD:EE:01 "
+                               "(@linkr bonds remove)")
+    identity.add_argument("--query-control", action="store_true",
+                          help="who owns the console now (@c?)")
+    identity.add_argument("--claim", action="store_true",
+                          help="take console control before the other commands run "
+                               "(@c claim); a mutation from a client that does not "
+                               "own the console is refused")
+    identity.add_argument("--release", action="store_true",
+                          help="give console control up after the other commands "
+                               "ran (@c release)")
+    tune.add_argument("--ble-write-size", type=ble_write_size, default=0,
+                          help="terminal write size; default auto; management uses at least 20")
+    tune.add_argument("--write-response", action="store_true",
+                          help="use GATT write-with-response")
+    tune.add_argument("--write-delay-ms", type=nonnegative_float, default=5.0,
+                          help="delay between BLE write chunks")
+    term.add_argument("--enter", choices=["raw", "cr", "lf", "crlf"], default="raw",
+                          help="translate Enter key bytes before BLE write")
+    term.add_argument("--local-echo", action="store_true", help="echo typed bytes locally")
+    term.add_argument("--line-mode", action="store_true",
+                          help="do not use raw terminal; send one visible line at a time")
+    term.add_argument("--debug-io", action="store_true",
+                          help="print BLE TX/RX byte traces to stderr")
+    term.add_argument("--log-file", help="append raw BLE RX bytes to a file")
+    term.add_argument("--escape", type=parse_escape, default=parse_escape("^]"),
+                          help="terminal escape byte, default ^]")
     return parser
+
+
+def session_loop(run_once, attempts: int, *, sleep=time.sleep) -> int:
+    """Run sessions until one ends for a reason other than a dropped link.
+
+    `attempts` comes from --reconnect; the default of 0 keeps exit code 3
+    meaning "the device went away", which is what a script wants to see.
+    """
+    remaining = attempts
+    while True:
+        code = run_once()
+        if code != EXIT_DEVICE_DISCONNECTED or remaining <= 0:
+            return code
+        remaining -= 1
+        info(f"reconnecting ({attempts - remaining}/{attempts})")
+        sleep(RECONNECT_DELAY)
 
 
 def main() -> int:
@@ -1687,18 +1977,29 @@ def main() -> int:
     # order. Reject the pair before any radio work; argparse exits 2.
     if args.rename_ble is not None and args.reset_ble_name:
         parser.error("--rename-ble and --reset-ble-name are mutually exclusive")
+    if args.monitor and args.no_terminal:
+        parser.error("--monitor and --no-terminal are mutually exclusive")
+    if args.opto is not None and args.opto_pulse is not None:
+        parser.error("--opto and --opto-pulse are mutually exclusive")
     _QUIET = args.quiet
     if args.print_completion:
         # Before any radio work: this must run on a host without bleak.
         print(completion_script(args.print_completion, parser))
         return EXIT_OK
+
+    def run_once() -> int:
+        try:
+            return asyncio.run(run(args))
+        except KeyboardInterrupt:
+            return 130
+        except Exception as exc:
+            error(str(exc))
+            return EXIT_ERROR
+
     try:
-        return asyncio.run(run(args))
+        return session_loop(run_once, args.reconnect)
     except KeyboardInterrupt:
         return 130
-    except Exception as exc:
-        error(str(exc))
-        return EXIT_ERROR
 
 
 if __name__ == "__main__":

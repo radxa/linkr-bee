@@ -173,7 +173,8 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
         ok, _, _ = await run(b"unrelated output")
         self.assertFalse(ok)
 
-    async def exercise_terminal(self, loopback=False, fail_loopback=False):
+    async def exercise_terminal(self, loopback=False, fail_loopback=False,
+                                extra_args=(), drop_link=False):
         terminal = self.load_terminal()
 
         queued = []
@@ -189,6 +190,8 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self, *args, **kwargs):
                 self.sequence = 1
                 self.callback = None
+                # run() hands the monitor its only wake-up here.
+                self.disconnected = kwargs.get("disconnected_callback")
 
             async def __aenter__(self):
                 return self
@@ -229,6 +232,7 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
             return True
 
         async def fake_terminal(client, cfg, reliable=None, geometry=None):
+            started.append(True)
             # Signature tracks terminal_loop(); geometry stays None here because
             # these tests do not run on a tty.
             self.assertIsNone(geometry)
@@ -237,13 +241,24 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
 
         client = Client()
         args = terminal.build_parser().parse_args(
-            ["--loopback-test", "echo"] if loopback else [])
+            (["--loopback-test", "echo"] if loopback else []) + list(extra_args))
         output = io.BytesIO()
+        started = []
+
+        async def drop_later() -> None:
+            await asyncio.sleep(0.02)
+            client.disconnected(client)
         # terminal_loop() reads the process stdin, which needs a pty to drive, so
         # it is stubbed here; these tests are about run()'s notify-queue
         # lifecycle. loopback_test() is covered for real by
         # test_real_loopback_test_verifies_the_echoed_payload.
-        with patch.object(terminal, "BleakClient", return_value=client), \
+        def make_client(*_args, **kwargs):
+            # BleakClient(target, disconnected_callback=...) — a plain
+            # return_value= patch would swallow the callback the monitor waits on.
+            client.disconnected = kwargs.get("disconnected_callback")
+            return client
+
+        with patch.object(terminal, "BleakClient", side_effect=make_client), \
              patch.object(terminal, "find_device", AsyncMock(return_value="device")), \
              patch.object(terminal, "configure_ble_write_size"), \
              patch.object(terminal, "loopback_test", fake_loopback), \
@@ -257,7 +272,12 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
                 # Callback still exists: even error cleanup must stop queuing.
                 client.notify(b"after failure")
             else:
-                await terminal.run(args)
+                if drop_link:
+                    asyncio.create_task(drop_later())
+                    code = await asyncio.wait_for(terminal.run(args), timeout=10)
+                else:
+                    code = await terminal.run(args)
+                return code, bool(started)
 
         self.assertEqual(queued, [b"echo", b"leftover"] if loopback else [])
         if not fail_loopback:
@@ -271,6 +291,12 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_loopback_queue_is_disabled_on_failure(self):
         await self.exercise_terminal(loopback=True, fail_loopback=True)
+
+    async def test_monitor_waits_for_a_drop_and_never_takes_the_keyboard(self):
+        code, started = await self.exercise_terminal(extra_args=["--monitor"],
+                                                     drop_link=True)
+        self.assertEqual(code, 3)          # EXIT_DEVICE_DISCONNECTED
+        self.assertFalse(started, "monitor must not start the terminal loop")
 
 
 if __name__ == "__main__":

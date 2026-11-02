@@ -7,6 +7,7 @@ installed: --help/--version, the argument validators and the pure protocol
 helpers never touch the radio.
 """
 
+import argparse
 import asyncio
 import contextlib
 import importlib.util
@@ -221,6 +222,44 @@ class BleNameVerifyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, [b"@n?"])
 
 
+class HelpCompletenessTests(unittest.TestCase):
+    """--help is the reference: every flag, and the parts a reader needs."""
+
+    def help_text(self):
+        return terminal.build_parser().format_help()
+
+    def test_every_option_appears_with_a_description(self):
+        parser = terminal.build_parser()
+        text = self.help_text()
+        for action in parser._actions:
+            if not action.option_strings:
+                continue
+            for flag in action.option_strings:
+                self.assertIn(flag, text, flag)
+            self.assertTrue(action.help, f"{action.option_strings} has no help")
+
+    def test_the_usage_line_fits_an_eighty_column_terminal(self):
+        for line in self.help_text().splitlines():
+            self.assertLessEqual(len(line), 80, line)
+
+    def test_exit_codes_and_examples_are_documented(self):
+        text = self.help_text()
+        self.assertIn("exit codes: 0 ok, 1 error, 2 bad arguments, 3 device",
+                      text)
+        # The firmware, not this CLI, owns the @-command list.
+        self.assertIn("--cmd '@help'", text)
+        self.assertIn("examples:", text)
+
+    def test_flags_are_grouped_instead_of_one_flat_list(self):
+        parser = terminal.build_parser()
+        titles = [group.title for group in parser._action_groups]
+        for expected in ("finding and connecting", "board settings and I/O",
+                         "name, pairing and console control",
+                         "any other management command", "terminal session",
+                         "output and transport tuning"):
+            self.assertIn(expected, titles)
+
+
 class CompletionTests(unittest.TestCase):
     """--print-completion must stay in step with the parser it describes."""
 
@@ -409,7 +448,8 @@ class CompletionTests(unittest.TestCase):
         # A prefix that several options share returns all of them.
         self.assertEqual(self.bash_complete("linkr_ble_terminal.py", "--json", "--q"),
                          ["--query-info", "--query-uart", "--query-wifi",
-                          "--query-webdav", "--query-ble-name", "--quiet"])
+                          "--query-webdav", "--query-led", "--query-opto",
+                          "--query-ble-name", "--quiet", "--query-control"])
         self.assertEqual(self.bash_complete("linkr_ble_terminal.py", "--quiet", "--j"),
                          ["--json"])
         # --flag=value is accepted by the parser, so the value completes too.
@@ -441,6 +481,293 @@ class CompletionTests(unittest.TestCase):
         self.assertIn("invalid choice", result.stderr)
         for shell in terminal.COMPLETION_SHELLS:
             self.assertIn(shell, result.stderr)
+
+
+class BondAddressTests(unittest.TestCase):
+    """`--bonds-remove` takes the pair the board prints, nothing looser."""
+
+    def test_a_pair_is_normalised_to_upper_case(self):
+        self.assertEqual(terminal.bond_address("0/aa:bb:cc:dd:ee:01"),
+                         "0/AA:BB:CC:DD:EE:01")
+        self.assertEqual(terminal.bond_address(" 1/AA:BB:CC:DD:EE:02 "),
+                         "1/AA:BB:CC:DD:EE:02")
+
+    def test_the_wrong_shape_is_refused_before_any_radio_work(self):
+        for value in ("AA:BB:CC:DD:EE:01", "0/AA:BB", "9/AA:BB:CC:DD:EE:01",
+                      "0/AA:BB:CC:DD:EE:0", "0/ZZ:BB:CC:DD:EE:01", ""):
+            with self.assertRaises(argparse.ArgumentTypeError, msg=value):
+                terminal.bond_address(value)
+
+
+class ScanJsonTests(unittest.IsolatedAsyncioTestCase):
+    """--scan --json is what a script parses; names can hold the tab."""
+
+    def devices(self):
+        return [
+            terminal.DiscoveredDevice("Linkr Bee 1A2B", "AA:BB:CC:DD:EE:01", -52,
+                                      (terminal.MGMT_SERVICE_UUID,)),
+            terminal.DiscoveredDevice("tab\tinside", "AA:BB:CC:DD:EE:02", None, ()),
+        ]
+
+    async def scan(self, json_output):
+        async def fake_discover(_timeout):
+            return self.devices()
+        stdout = io.StringIO()
+        with patch.object(terminal, "discover_devices", fake_discover), \
+                contextlib.redirect_stdout(stdout):
+            await terminal.scan_devices(1.0, json_output=json_output)
+        return stdout.getvalue()
+
+    async def test_each_device_becomes_one_json_record(self):
+        output = await self.scan(True)
+        lines = [json.loads(line) for line in output.splitlines()]
+        self.assertEqual(len(lines), 2)
+        first = lines[0]
+        self.assertEqual(first["type"], "device")
+        self.assertEqual(first["address"], "AA:BB:CC:DD:EE:01")
+        self.assertEqual(first["rssi"], -52)
+        self.assertTrue(first["management"])
+        self.assertFalse(lines[1]["management"])
+        self.assertEqual(lines[1]["name"], "tab\tinside")
+
+    async def test_the_plain_listing_is_unchanged(self):
+        rows = (await self.scan(False)).splitlines()
+        self.assertEqual(rows[0], "AA:BB:CC:DD:EE:01\tLinkr Bee 1A2B\t-52 dBm")
+        # A name with a tab in it splits the plain listing -- which is exactly
+        # why --json exists; the column count is the honest assertion here.
+        self.assertEqual(len(rows[1].split("\t")), 3)
+
+
+class RunCommandsTests(unittest.IsolatedAsyncioTestCase):
+    """Every flag turns into the documented wire command, in --help order."""
+
+    class Recorder:
+        def __init__(self):
+            self.sent = []
+            self.written_name = None
+
+        async def send(self, command, wait_final_timeout=0.0):
+            self.sent.append((command, wait_final_timeout))
+            if command.startswith(b"@n="):
+                self.written_name = command[3:].decode()
+            if command == b"@n?":
+                name = self.written_name or "Linkr-Bee-1234"
+                return f"OK name={name} custom=yes\r\n".encode()
+            return b"OK\r\n"
+
+    async def run_flags(self, *argv, wifi_command=None):
+        args = terminal.build_parser().parse_args(list(argv))
+        management = self.Recorder()
+        with contextlib.redirect_stdout(io.StringIO()):
+            await terminal.run_commands(args, management,
+                                        wifi_command=wifi_command)
+        return [command for command, _ in management.sent], management.sent
+
+    async def test_board_io_flags_become_the_documented_commands(self):
+        sent, _ = await self.run_flags("--led", "#1A2B3C", "--opto-pulse", "500",
+                                       "--query-opto")
+        self.assertEqual(sent, [b"@l=1a2b3c", b"@o pulse 500", b"@o?"])
+
+    async def test_off_forms_are_spelled_out(self):
+        sent, _ = await self.run_flags("--led", "off", "--opto", "on")
+        self.assertEqual(sent, [b"@l off", b"@o on"])
+
+    async def test_a_cmd_runs_after_the_flags_in_the_order_given(self):
+        sent, _ = await self.run_flags("--query-info", "--cmd", "@r slots",
+                                       "--cmd", " @linkr bonds? ")
+        self.assertEqual(sent, [b"@i?", b"@r slots", b"@linkr bonds?"])
+
+    async def test_the_wifi_pair_keeps_its_long_timeouts(self):
+        sent, timed = await self.run_flags("--wifi-scan", "--query-wifi",
+                                           wifi_command=b"@w=Lab,secret")
+        self.assertEqual(sent, [b"@w=Lab,secret", b"@w?", b"@w scan"])
+        self.assertEqual(timed[0][1], terminal.WIFI_OPERATION_TIMEOUT)
+        self.assertEqual(timed[1][1], 0.0)
+        self.assertEqual(timed[2][1], terminal.WIFI_SCAN_TIMEOUT)
+
+    async def test_a_rename_is_read_back(self):
+        sent, _ = await self.run_flags("--rename-ble", "测试😀")
+        self.assertEqual(sent, ["@n=测试😀".encode(), b"@n?"])
+
+    async def test_nothing_is_sent_when_no_command_flag_is_given(self):
+        sent, _ = await self.run_flags()
+        self.assertEqual(sent, [])
+
+    async def test_control_is_claimed_first_and_released_last(self):
+        sent, _ = await self.run_flags("--query-info", "--claim", "--led",
+                                       "1a2b3c", "--query-control", "--release")
+        self.assertEqual(sent[:2], [b"@c?", b"@c claim"])
+        self.assertEqual(sent[-1], b"@c release")
+        self.assertIn(b"@l=1a2b3c", sent)
+
+    async def test_pairing_commands_use_the_long_form(self):
+        sent, _ = await self.run_flags("--bonds", "--bonds-names",
+                                       "--bonds-remove", "0/aa:bb:cc:dd:ee:01")
+        self.assertEqual(sent, [b"@linkr bonds?", b"@linkr bonds names?",
+                                b"@linkr bonds remove 0/AA:BB:CC:DD:EE:01"])
+
+
+class SessionLoopTests(unittest.TestCase):
+    """--reconnect retries a dropped link, and nothing else."""
+
+    def run_loop(self, codes, attempts):
+        calls = []
+        sleeps = []
+        code = terminal.session_loop(
+            lambda: calls.append(1) or codes[len(calls) - 1],
+            attempts,
+            sleep=sleeps.append)
+        return code, len(calls), sleeps
+
+    def test_a_clean_session_runs_once(self):
+        self.assertEqual(self.run_loop([terminal.EXIT_OK], 3), (terminal.EXIT_OK, 1, []))
+
+    def test_a_dropped_link_is_retried_until_the_attempts_run_out(self):
+        code, runs, sleeps = self.run_loop(
+            [terminal.EXIT_DEVICE_DISCONNECTED] * 3, 2)
+        self.assertEqual(code, terminal.EXIT_DEVICE_DISCONNECTED)
+        self.assertEqual(runs, 3)
+        self.assertEqual(sleeps, [terminal.RECONNECT_DELAY] * 2)
+
+    def test_zero_attempts_keeps_exit_code_three(self):
+        code, runs, sleeps = self.run_loop([terminal.EXIT_DEVICE_DISCONNECTED], 0)
+        self.assertEqual((code, runs, sleeps),
+                         (terminal.EXIT_DEVICE_DISCONNECTED, 1, []))
+
+    def test_a_reconnected_session_returns_its_own_result(self):
+        code, runs, _ = self.run_loop(
+            [terminal.EXIT_DEVICE_DISCONNECTED, terminal.EXIT_OK], 5)
+        self.assertEqual((code, runs), (terminal.EXIT_OK, 2))
+
+    def test_other_failures_are_not_retried(self):
+        code, runs, _ = self.run_loop([terminal.EXIT_ERROR], 5)
+        self.assertEqual((code, runs), (terminal.EXIT_ERROR, 1))
+
+
+class BoardIoFlagTests(unittest.TestCase):
+    """--led / --opto / --cmd / --monitor / --reconnect reject bad input early."""
+
+    def args(self, *argv):
+        return terminal.build_parser().parse_args(list(argv))
+
+    def test_led_colour_accepts_hex_with_or_without_hash(self):
+        for value in ("1a2b3c", "#1A2B3C", " 1A2B3C "):
+            self.assertEqual(terminal.led_colour(value), "1a2b3c")
+        self.assertEqual(terminal.led_colour("off"), "off")
+        self.assertEqual(terminal.led_colour("OFF"), "off")
+
+    def test_led_colour_rejects_anything_else(self):
+        for value in ("", "offf", "1a2b3", "1a2b3c4", "gggggg", "0x1a2b3c"):
+            with self.assertRaises(argparse.ArgumentTypeError, msg=value):
+                terminal.led_colour(value)
+
+    def test_pulse_length_is_bounded_by_the_firmware_range(self):
+        self.assertEqual(terminal.pulse_ms("1"), 1)
+        self.assertEqual(terminal.pulse_ms("60000"), 60000)
+        for value in ("0", "60001", "-5", "1.5", "abc"):
+            with self.assertRaises(argparse.ArgumentTypeError, msg=value):
+                terminal.pulse_ms(value)
+
+    def test_reconnect_attempts_are_bounded(self):
+        self.assertEqual(terminal.reconnect_attempts("0"), 0)
+        self.assertEqual(terminal.reconnect_attempts("50"), 50)
+        for value in ("-1", "51", "abc"):
+            with self.assertRaises(argparse.ArgumentTypeError, msg=value):
+                terminal.reconnect_attempts(value)
+
+    def test_a_command_must_be_the_on_wire_form(self):
+        self.assertEqual(terminal.management_command("  @l?  "), "@l?")
+        self.assertEqual(terminal.management_command("@linkr bonds?"),
+                         "@linkr bonds?")
+        for value in ("l?", "@", "bonds"):
+            with self.assertRaises(argparse.ArgumentTypeError, msg=value):
+                terminal.management_command(value)
+
+    def test_cmd_keeps_every_command_in_order(self):
+        self.assertEqual(self.args("--cmd", "@l?", "--cmd", "@o?").cmd,
+                         ["@l?", "@o?"])
+        self.assertIsNone(self.args().cmd)
+
+    def test_monitor_and_no_terminal_cannot_combine(self):
+        result = subprocess.run(
+            [sys.executable, str(TERMINAL_PATH), "--monitor", "--no-terminal"],
+            capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("mutually exclusive", result.stderr)
+
+    def test_opto_and_opto_pulse_cannot_combine(self):
+        result = subprocess.run(
+            [sys.executable, str(TERMINAL_PATH), "--opto", "on",
+             "--opto-pulse", "500"],
+            capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("mutually exclusive", result.stderr)
+
+
+class ReplyFieldTests(unittest.TestCase):
+    """What --json reports for a reply, without a radio."""
+
+    def test_pairs_are_split_out_of_a_single_line(self):
+        self.assertEqual(terminal.reply_fields("OK name=Linkr-Bee custom=yes"),
+                         {"name": "Linkr-Bee", "custom": "yes"})
+        self.assertEqual(
+            terminal.reply_fields("OK wifi=connected,ssid=Lab,ip=10.0.0.5"),
+            {"wifi": "connected", "ssid": "Lab", "ip": "10.0.0.5"})
+
+    def test_multi_line_replies_are_merged(self):
+        text = "OK led rgb=1a2b3c\nuptime=42"
+        self.assertEqual(terminal.reply_fields(text),
+                         {"rgb": "1a2b3c", "uptime": "42"})
+
+    def test_a_reply_without_pairs_still_reports_its_text(self):
+        record = terminal.result_record("@o?", b"OK opto=closed\r\n")
+        self.assertEqual(record["type"], "result")
+        self.assertEqual(record["command"], "@o?")
+        self.assertTrue(record["ok"])
+        self.assertEqual(record["text"], "OK opto=closed")
+        self.assertEqual(record["fields"], {"opto": "closed"})
+
+
+class SendReportedTests(unittest.IsolatedAsyncioTestCase):
+    class FakeManagement:
+        def __init__(self, reply=b"OK led rgb=00ff00\r\n"):
+            self.sent = []
+            self.reply = reply
+            self.timeout = None
+
+        async def send(self, command, wait_final_timeout=0.0):
+            self.sent.append(command)
+            self.timeout = wait_final_timeout
+            return self.reply
+
+    async def test_human_mode_stays_quiet_unless_the_body_is_wanted(self):
+        management = self.FakeManagement()
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            await terminal.send_reported(management, "@l?", json_output=False)
+            self.assertEqual(stdout.getvalue(), "")
+            await terminal.send_reported(management, "@l?", json_output=False,
+                                         print_body=True)
+        self.assertEqual(stdout.getvalue(), "OK led rgb=00ff00\n")
+        self.assertEqual(management.sent, [b"@l?", b"@l?"])
+
+    async def test_json_mode_prints_one_result_record(self):
+        management = self.FakeManagement()
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            await terminal.send_reported(
+                management, "@o?", json_output=True, print_body=True)
+        record = json.loads(stdout.getvalue())
+        self.assertEqual(record["type"], "result")
+        self.assertEqual(record["fields"], {"rgb": "00ff00"})
+
+    async def test_a_final_timeout_is_forwarded(self):
+        management = self.FakeManagement()
+        with contextlib.redirect_stdout(io.StringIO()):
+            await terminal.send_reported(management, "@w scan",
+                                         json_output=False,
+                                         wait_final_timeout=35.0)
+        self.assertEqual(management.timeout, 35.0)
 
 
 class HostNameTests(unittest.TestCase):
