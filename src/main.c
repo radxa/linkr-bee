@@ -2631,7 +2631,7 @@ int main(void)
 	 * Verify that the PSRAM shared heap really starts past .ext_ram.bss.
 	 * Link-time checks cannot see this -- the pool is registered at the
 	 * mapped region start, which only clears the section when the
-	 * SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY patch is applied. Report and keep
+	 * SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY option is enabled. Report and keep
 	 * going: a firmware that logs it is more useful than one that refuses to
 	 * boot, and the buffers are still intact until something allocates.
 	 */

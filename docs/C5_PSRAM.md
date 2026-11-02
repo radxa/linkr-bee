@@ -48,7 +48,7 @@ C5 上已搬进去的对象集中在五处：`main.c` 的 BLE→UART 队列与�
 > GCC 不允许对结构体成员加 `section` 属性，所以原本作为成员的 payload 必须提成顶层数组
 > （`peer_storage`、`ws_tx_bufs`），结构体里只留指针/索引。
 
-## 3. 共享堆与外部 BSS：为什么需要给模块打一个补丁
+## 3. 共享堆与外部 BSS：应用 Kconfig 补齐默认值
 
 这是本页最容易踩错的一处，放在默认配置之前说。
 
@@ -73,16 +73,20 @@ config SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY
 于是 `sys_heap_init()` 会在启动时把它的头部写到 `.ext_ram.bss` 的第一个对象上，而且是
 双向的：堆初始化覆盖我们的缓冲，我们的缓冲清零也破坏堆元数据。
 
-本仓库通过 `patches/zephyr/0001-esp32c5-allow-bss-seg-external-memory.patch` 给这个
-Kconfig 补一行 `default y if SOC_SERIES_ESP32C5`，由 `CMakeLists.txt` 在
-`find_package(Zephyr)` 之后幂等应用（`west update` 冲掉也会自动打回来）。补丁只影响
-C5：其它 SoC 的 `SOC_SERIES_*` 条件不成立，`CONFIG_ESP_SPIRAM=n` 时该符号也不生效。
+本仓库在应用 `Kconfig` 中扩展同一个符号的默认值：
+
+```kconfig
+config SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY
+	default y if SOC_SERIES_ESP32C5 && ESP_SPIRAM
+```
+
+它随当前构建选中的 HAL 一起解析，首次配置即生效，不修改外部源码树。
+`ZEPHYR_MODULES` 自定义路径以及不带 `.git` 的源码包都无需特殊处理。
+CMake、CI 和 `tools/verify.sh` 检查 C5 PSRAM 构建中的最终配置，缺失则停止构建。
+其它 SoC 不满足新增默认值的条件，继续使用 HAL 原有默认值。
 
 补齐后运行时堆起点正好落在 `_ext_ram_bss_end`，零重叠。
 
-> **这个选择是有代价的**：它是本仓库唯一修改外部树的补丁。选它的理由是「这属于 Zephyr
-> 的 C5 支持缺口，不是本项目的设计选择」，一行配置即可根治。
->
 > **曾试过的替代方案**：在 `.ext_ram.bss` 最前面放一个 256 B 的 padding 数组吸收
 > `sys_heap_init()` 的头部（`src/a_ext_ram_guard.c`）。它能工作，实测三条收尾路径无异常，
 > 但只是规避而非修复：

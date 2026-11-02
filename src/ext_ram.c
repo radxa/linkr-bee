@@ -50,8 +50,7 @@ int linkr_ext_ram_verify_heap(void)
 	if ((uintptr_t)vaddr < (uintptr_t)&_ext_ram_bss_end) {
 		LOG_ERR("PSRAM shared heap starts at 0x%08lx, inside .ext_ram.bss "
 			"(0x%08lx-0x%08lx): sys_heap_init() overwrites migrated "
-			"buffers. Apply "
-			"patches/zephyr/0001-esp32c5-allow-bss-seg-external-memory.patch.",
+			"buffers. Check CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY.",
 			(unsigned long)(uintptr_t)vaddr,
 			(unsigned long)(uintptr_t)&_ext_ram_bss_start,
 			(unsigned long)(uintptr_t)&_ext_ram_bss_end);

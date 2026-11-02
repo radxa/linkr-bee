@@ -114,6 +114,7 @@ jobs:
           # and must keep the WiFi heap, the WiFi packet buffers and the ROM
           # region above DRAM_SHARED_BUFFERS_END out of it. docs/C5_PSRAM.md.
           if grep -qx 'CONFIG_SOC_SERIES_ESP32C5=y' "${config}"; then
+            grep -qx 'CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y' "${config}"
             grep -qx 'CONFIG_ESP_SPIRAM=y' "${config}"
             grep -qx 'CONFIG_ESP_SPIRAM_SIZE=8388608' "${config}"
             grep -qx 'CONFIG_SPIRAM_TYPE_ESPPSRAM64=y' "${config}"

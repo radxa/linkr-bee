@@ -68,6 +68,7 @@ for board in $boards; do
     # layout, never the byte counts: sizes move with every feature, but an
     # image that silently loses PSRAM, or starts serving the WiFi adapter heap
     # from it, is a regression either way. docs/C5_PSRAM.md records why.
+    grep -qx 'CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y' "${config}"
     grep -qx 'CONFIG_ESP_SPIRAM=y' "$config"
     grep -qx 'CONFIG_ESP_SPIRAM_SIZE=8388608' "$config"
     grep -qx 'CONFIG_SPIRAM_TYPE_ESPPSRAM64=y' "$config"
