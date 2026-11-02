@@ -770,9 +770,183 @@ pub fn parse_lan_status(text: &str) -> Option<LanStatus> {
     })
 }
 
+/// `@linkr bonds?` — every host bonded to the bridge, one `BOND` line each.
+pub const BONDS_QUERY_COMMAND: &str = "@linkr bonds?";
+
+/// The firmware's default paired-device label cap, in UTF-8 bytes.
+pub const BOND_LABEL_MAX_BYTES: usize = 48;
+
+/// Whether `id` is the firmware's exact `<type>/<address>` identity shape.
+pub fn bond_id_valid(id: &str) -> bool {
+    let bytes = id.as_bytes();
+    bytes.len() == 19
+        && matches!(bytes[0], b'0' | b'1')
+        && bytes[1] == b'/'
+        && bytes[2..].iter().enumerate().all(|(index, byte)| {
+            if index % 3 == 2 {
+                *byte == b':'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
+}
+
+/// One line of `bonds?`: the identity address and whether it is this
+/// connection. The label is a second command, so it is not on this line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BondEntry {
+    pub id: String,
+    pub is_self: bool,
+}
+
+/// A whole `bonds?` answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BondList {
+    pub pending: bool,
+    pub result: i64,
+    pub peers: Vec<BondEntry>,
+}
+
+/// Read `OK bonds pending=<0|1> result=<n>` plus one
+/// `BOND <type>/<addr> self=<0|1>` line per host. Any other shape is not this
+/// answer.
+pub fn parse_bonds(text: &str) -> Option<BondList> {
+    let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
+    let header = lines.next()?.strip_prefix("OK bonds ")?;
+    let mut pending = false;
+    let mut result = 0i64;
+    for part in header.split_whitespace() {
+        if let Some(value) = part.strip_prefix("pending=") {
+            pending = value == "1";
+        } else if let Some(value) = part.strip_prefix("result=") {
+            result = value.parse().unwrap_or(0);
+        }
+    }
+    let mut peers = Vec::new();
+    for line in lines {
+        let body = line.strip_prefix("BOND ")?;
+        let (id, flag) = body.split_once(" self=")?;
+        if !bond_id_valid(id) {
+            return None;
+        }
+        peers.push(BondEntry {
+            id: id.to_string(),
+            is_self: flag.trim() == "1",
+        });
+    }
+    Some(BondList {
+        pending,
+        result,
+        peers,
+    })
+}
+
+/// A label read for one address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BondLabel {
+    pub id: String,
+    /// `None` when the board stores no label for this address.
+    pub label: Option<String>,
+}
+
+/// `@linkr bonds label <type>/<addr>` — read one host's label.
+pub fn bond_label_query_command(id: &str) -> String {
+    format!("@linkr bonds label {id}")
+}
+
+/// `@linkr bonds label <type>/<addr> <hex>`, or `... clear` for an empty
+/// label. The text travels hex-encoded so spaces and non-ASCII bytes need no
+/// quoting, exactly as saved IR names do.
+pub fn bond_label_set_command(id: &str, label: &str) -> String {
+    let text = sanitize_bond_label(label);
+    if text.is_empty() {
+        format!("@linkr bonds label {id} clear")
+    } else {
+        format!("@linkr bonds label {id} {}", utf8_to_hex(&text))
+    }
+}
+
+/// Read `OK bonds label=<type>/<addr> hex=<hex>` or `... none`.
+pub fn parse_bond_label(text: &str) -> Option<BondLabel> {
+    let line = text.lines().map(str::trim).find(|line| {
+        line.get(..15)
+            .is_some_and(|head| head.eq_ignore_ascii_case("OK bonds label="))
+    })?;
+    let (id, value) = line.get(15..)?.split_once(' ')?;
+    let id = id.to_ascii_uppercase();
+    if value.eq_ignore_ascii_case("none") {
+        return Some(BondLabel { id, label: None });
+    }
+    let label = hex_to_utf8(value.strip_prefix("hex=")?)?;
+    Some(BondLabel {
+        id,
+        label: (!label.is_empty()).then_some(label),
+    })
+}
+
+/// Collapse whitespace, strip control bytes (a label reaches the terminal),
+/// and cap the result at [`BOND_LABEL_MAX_BYTES`] without splitting a
+/// character.
+pub fn sanitize_bond_label(value: &str) -> String {
+    let mut text = String::new();
+    let mut gap = false;
+    for ch in value.chars() {
+        if ch.is_control() {
+            continue;
+        }
+        if ch.is_whitespace() {
+            gap = !text.is_empty();
+            continue;
+        }
+        if gap {
+            text.push(' ');
+            gap = false;
+        }
+        text.push(ch);
+    }
+    let trimmed = text.trim();
+    let mut used = 0;
+    let mut end = 0;
+    for (index, ch) in trimmed.char_indices() {
+        let width = ch.len_utf8();
+        if used + width > BOND_LABEL_MAX_BYTES {
+            break;
+        }
+        used += width;
+        end = index + width;
+    }
+    trimmed[..end].trim().to_string()
+}
+
+fn utf8_to_hex(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() * 2);
+    for byte in text.as_bytes() {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
+fn hex_to_utf8(hex: &str) -> Option<String> {
+    if !hex.len().is_multiple_of(2) || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(hex.len() / 2);
+    for i in (0..hex.len()).step_by(2) {
+        bytes.push(u8::from_str_radix(&hex[i..i + 2], 16).ok()?);
+    }
+    String::from_utf8(bytes).ok()
+}
+
 /// One-line summary for the approval card, worded in the interface language.
 pub fn accessory_change_summary(command: &str, zh: bool) -> String {
     let text = command;
+    if let Some(rest) = text.strip_prefix("@linkr bonds remove ") {
+        return if zh {
+            format!("删除 {rest} 的配对记录（该主机将断开，需要重新配对）")
+        } else {
+            format!("Remove the pairing for {rest} (that host disconnects and must pair again)")
+        };
+    }
     if let Some(name) = text.strip_prefix("@n=") {
         return if zh {
             format!("把 BLE 广播名改为「{name}」")
@@ -836,6 +1010,61 @@ pub fn accessory_change_summary(command: &str, zh: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bond_list_parses_addresses_and_self() {
+        let list = parse_bonds(
+            "OK bonds pending=0 result=-2\nBOND 0/AA:BB:CC:DD:EE:01 self=1\nBOND 1/AA:BB:CC:DD:EE:02 self=0",
+        )
+        .unwrap();
+        assert!(!list.pending);
+        assert_eq!(list.result, -2);
+        assert_eq!(list.peers.len(), 2);
+        assert!(list.peers[0].is_self);
+        assert_eq!(list.peers[1].id, "1/AA:BB:CC:DD:EE:02");
+        assert!(parse_bonds("ERR unknown command").is_none());
+        assert!(parse_bonds("OK bonds pending=0 result=0").is_some());
+    }
+
+    #[test]
+    fn bond_labels_round_trip_as_hex() {
+        assert_eq!(
+            bond_label_query_command("1/AA:BB:CC:DD:EE:01"),
+            "@linkr bonds label 1/AA:BB:CC:DD:EE:01"
+        );
+        assert_eq!(
+            bond_label_set_command("1/AA:BB:CC:DD:EE:01", "客厅"),
+            "@linkr bonds label 1/AA:BB:CC:DD:EE:01 e5aea2e58e85"
+        );
+        assert_eq!(
+            bond_label_set_command("1/AA:BB:CC:DD:EE:01", "   "),
+            "@linkr bonds label 1/AA:BB:CC:DD:EE:01 clear"
+        );
+        let parsed =
+            parse_bond_label("OK bonds label=1/aa:bb:cc:dd:ee:01 hex=e5aea2e58e85").unwrap();
+        assert_eq!(parsed.id, "1/AA:BB:CC:DD:EE:01");
+        assert_eq!(parsed.label.as_deref(), Some("客厅"));
+        assert!(parse_bond_label("OK bonds label=0/AA:BB:CC:DD:EE:02 none")
+            .unwrap()
+            .label
+            .is_none());
+        assert!(parse_bond_label("OK bonds queued").is_none());
+    }
+
+    #[test]
+    fn bond_label_sanitizing_strips_control_and_caps_bytes() {
+        assert_eq!(sanitize_bond_label("a\u{1b}[2Jb"), "a[2Jb");
+        assert_eq!(sanitize_bond_label("  a   b  "), "a b");
+        assert_eq!(sanitize_bond_label(&"客".repeat(20)), "客".repeat(16));
+    }
+
+    #[test]
+    fn removing_a_pairing_is_summarized_for_the_card() {
+        let zh = accessory_change_summary("@linkr bonds remove 0/AA:BB:CC:DD:EE:01", true);
+        assert!(zh.contains("0/AA:BB:CC:DD:EE:01"), "{zh}");
+        let en = accessory_change_summary("@linkr bonds remove 0/AA:BB:CC:DD:EE:01", false);
+        assert!(en.contains("Remove"), "{en}");
+    }
 
     #[test]
     fn uart_settings_round_trip() {

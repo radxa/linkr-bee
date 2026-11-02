@@ -4,13 +4,18 @@ import {
   BOARD_LIMITS,
   BOARD_SLOT_NAME_MAX_BYTES,
   BOARD_SWATCHES,
+  BOND_LABEL_MAX_BYTES,
   LED_OFF_COMMAND,
   LED_QUERY_COMMAND,
   OPTO_QUERY_COMMAND,
   IR_QUERY_COMMAND,
   IR_SLOTS_COMMAND,
   boardReply,
+  bondLabelQueryCommand,
+  bondLabelSetCommand,
   hexToUtf8,
+  parseBondLabel,
+  sanitizeBondLabel,
   irDeleteCommand,
   irLearnCommand,
   irNameQueryCommand,
@@ -223,4 +228,29 @@ test("slot names travel as UTF-8 hex and are parsed back", () => {
   assert.deepEqual(parseIrName("OK ir name=2 hex=e5aea2e58e85"), { slot: 2, name: "客厅", empty: false });
   assert.equal(parseIrName("ERR ir name=too-long"), null);
   assert.equal(parseIrName("OK ir slots=0:1"), null);
+});
+
+test("bond labels build, parse, and sanitize", () => {
+  assert.equal(BOND_LABEL_MAX_BYTES, 48);
+  const id = "1/AA:BB:CC:DD:EE:01";
+  assert.equal(bondLabelQueryCommand({ id }), "@linkr bonds label 1/AA:BB:CC:DD:EE:01");
+  assert.equal(bondLabelSetCommand({ id, label: "客厅" }), "@linkr bonds label 1/AA:BB:CC:DD:EE:01 e5aea2e58e85");
+  assert.equal(bondLabelSetCommand({ id, label: "  " }), "@linkr bonds label 1/AA:BB:CC:DD:EE:01 clear");
+  assert.throws(() => bondLabelQueryCommand({ id: "2/AA:BB:CC:DD:EE:01" }), /bond address/);
+  assert.throws(() => bondLabelSetCommand({ id: "aa:bb" }), /bond address/);
+
+  assert.deepEqual(parseBondLabel("OK bonds label=1/AA:BB:CC:DD:EE:01 none\r\n"),
+    { id: "1/AA:BB:CC:DD:EE:01", label: "", empty: true });
+  assert.deepEqual(parseBondLabel("OK bonds label=0/aa:bb:cc:dd:ee:02 hex=4c6976696e67"),
+    { id: "0/AA:BB:CC:DD:EE:02", label: "Living", empty: false });
+  assert.deepEqual(parseBondLabel("OK bonds label=0/AA:BB:CC:DD:EE:02 hex=e5aea2e58e85"),
+    { id: "0/AA:BB:CC:DD:EE:02", label: "客厅", empty: false });
+  assert.equal(parseBondLabel("ERR bonds label hex"), null);
+  assert.equal(parseBondLabel("OK"), null);
+
+  /* Control bytes are stripped (labels reach the terminal), whitespace is
+   * collapsed, and truncation never splits a code point. */
+  assert.equal(sanitizeBondLabel("a\u001b[2Jb"), "a[2Jb");
+  assert.equal(sanitizeBondLabel("  a   b  "), "a b");
+  assert.equal(sanitizeBondLabel("客".repeat(20), 4), "客");
 });

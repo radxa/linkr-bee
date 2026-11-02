@@ -706,6 +706,30 @@ fn parse_args(prog: &str, argv: &[String]) -> Args {
             "--query-webdav" => args.requests.queries.push(device::Query::Webdav),
             "--query-ble-name" => args.requests.queries.push(device::Query::BleName),
             "--query-lan" => args.requests.queries.push(device::Query::Lan),
+            "--query-bonds" => args.requests.queries.push(device::Query::Bonds),
+            "--rename-bond" => {
+                let raw = value("--rename-bond");
+                let (address, label) = raw.split_once('=').unwrap_or_else(|| {
+                    fail(prog, "'--rename-bond' wants <type>/<address>=<label>")
+                });
+                if !linkr_tui::accessory::bond_id_valid(address) {
+                    fail(
+                        prog,
+                        &format!("'{address}' is not a paired-device identity address"),
+                    );
+                }
+                args.requests.bond_label = Some((address.to_string(), label.to_string()));
+            }
+            "--remove-bond" => {
+                let address = value("--remove-bond");
+                if !linkr_tui::accessory::bond_id_valid(&address) {
+                    fail(
+                        prog,
+                        &format!("'{address}' is not a paired-device identity address"),
+                    );
+                }
+                args.requests.bond_remove = Some(address);
+            }
             "--uart" => args.requests.uart = Some(value("--uart")),
             "--wifi" => {
                 let raw = value("--wifi");
@@ -1015,8 +1039,9 @@ fn capabilities(prog: &str, json: bool) -> String {
             concat!(
                 "{{\"version\":\"{}\",\"protocol\":{},",
                 "\"operations\":[\"scan\",\"query-info\",\"query-uart\",\"query-wifi\",",
-                "\"query-webdav\",\"query-ble-name\",\"query-lan\",\"wifi-scan\",\"uart\",\"wifi\",\"wifi-off\",",
+                "\"query-webdav\",\"query-ble-name\",\"query-lan\",\"query-bonds\",\"wifi-scan\",\"uart\",\"wifi\",\"wifi-off\",",
                 "\"webdav\",\"webdav-off\",\"rename-ble\",\"reset-ble-name\",",
+                "\"rename-bond\",\"remove-bond\",",
                 "\"exec\",\"send\",\"doctor\",\"loopback-test\",\"link-state\"{}],",
                 // The subcommands are the same runs written as words, and a
                 // caller that reads them here can write either form: the list
@@ -1057,11 +1082,12 @@ fn capabilities(prog: &str, json: bool) -> String {
                 "scan        --scan                     list Linkr Bee boards on the air\n",
                 "read        --query-info --query-uart  ask the bridge what it is doing\n",
                 "            --query-wifi --query-webdav --query-ble-name --wifi-scan\n",
-                "            --query-lan\n",
+                "            --query-lan --query-bonds\n",
                 "state       --link-state               this link: live, counters, transport\n",
                 "configure   --uart --wifi --wifi-off   change that, then read it back\n",
                 "            --webdav --webdav-off\n",
                 "            --rename-ble NAME --reset-ble-name\n",
+                "            --rename-bond <id>=<label> --remove-bond <id>\n",
                 "execute     --exec COMMAND             run a shell command on the target\n",
                 "            --idle WINDOW              end it when the output goes quiet\n",
                 "            --retry N                  resend it after a timeout\n",
@@ -3483,6 +3509,9 @@ mod tests {
         assert!(json.contains("batch"), "{json}");
         // And the two local readings a one-shot caller can now ask for.
         assert!(json.contains("\"query-lan\""), "{json}");
+        assert!(json.contains("\"query-bonds\""), "{json}");
+        assert!(json.contains("\"rename-bond\""), "{json}");
+        assert!(json.contains("\"remove-bond\""), "{json}");
         assert!(json.contains("\"link-state\""), "{json}");
         // The checkup and the send-only mode are operations too, and the
         // subcommand names are the same runs written as words: a caller that

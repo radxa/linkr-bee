@@ -35,6 +35,7 @@ pub mod trace;
 pub mod traffic;
 pub mod transport;
 pub mod ui;
+pub mod user;
 pub mod views;
 pub mod vt;
 pub mod watch;

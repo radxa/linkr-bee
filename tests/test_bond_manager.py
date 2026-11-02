@@ -36,11 +36,9 @@ class BondManagerTests(unittest.TestCase):
         self.assertIn('"bonds name "', own)
         self.assertNotIn('bonds remove', own)
 
-    def test_label_slots_match_the_pairing_limit(self):
-        config = dict(line.split('=', 1) for line in
-                      (ROOT / 'prj.conf').read_text().splitlines()
-                      if line.startswith('CONFIG_'))
-        slots = re.search(r'#define LABEL_SLOTS (\d+)U',
-                          (ROOT / 'src/bond_manager.c').read_text())
-        self.assertIsNotNone(slots, 'LABEL_SLOTS is missing from the bond manager')
-        self.assertEqual(int(slots.group(1)), int(config['CONFIG_BT_MAX_PAIRED']))
+    def test_labels_are_per_bond_not_a_fixed_ram_blob(self):
+        manager = (ROOT / 'src/bond_manager.c').read_text()
+        labels = (ROOT / 'src/bond_label.c').read_text()
+        self.assertNotIn('label_blob', manager)
+        self.assertIn('linkr/bond/', labels)
+        self.assertIn('CONFIG_LINKR_BLE_BRIDGE_BOND_LABEL_MAX', labels)

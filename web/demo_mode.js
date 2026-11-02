@@ -178,6 +178,28 @@ export function installDemoMode({
         .map(id => `NAME ${id} "${demo.bondNames[id]}"`)
         .join("\n");
     }
+    if (command.startsWith("@linkr bonds label ")) {
+      const rest = command.slice("@linkr bonds label ".length);
+      const space = rest.indexOf(" ");
+      const id = space < 0 ? rest : rest.slice(0, space);
+      const value = space < 0 ? null : rest.slice(space + 1);
+      if (!demo.bonds.includes(id)) return "ERR bonds not found";
+      if (value === null) {
+        const label = demo.bondNames[id] || "";
+        return label ? `OK bonds label=${id} hex=${utf8ToHex(label)}` : `OK bonds label=${id} none`;
+      }
+      if (value === "clear") {
+        delete demo.bondNames[id];
+        return `OK bonds label=${id} none`;
+      }
+      try {
+        const label = hexToUtf8(value);
+        demo.bondNames[id] = label;
+        return `OK bonds label=${id} hex=${utf8ToHex(label)}`;
+      } catch {
+        return "ERR bonds label hex";
+      }
+    }
     if (command.startsWith("@linkr bonds name ")) {
       const label = command.slice(18).trim();
       const self = demo.bonds.find(id => id.endsWith("01"));

@@ -21,5 +21,5 @@ export function parseSerialControl(text) {
 export function isReadonlyManagementCommand(command) {
   if (/^@linkr bonds name(?: [^\r\n]+)?$/.test(command)) return true;
   return /^@(?:c\?|c (?:claim|claim idle|release|yield [1-9]\d*)|h|i\?|u\?|n\?|a\?|w\?|l\?|o\?|r\?|r slots|p\?|p get(?: \d+(?: \d+)?)?|p active|y\?|y get \d+)$/.test(command) ||
-    /^@linkr (?:control\?|control (?:claim|claim idle|release|yield [1-9]\d*)|help|info\?|uart\?|name\?|autobaud\?|wifi\?|bonds\?|bonds names\?|target\?|led\?|opto\?|ir\?|ir slots|prompt\?|prompt get(?: \d+(?: \d+)?)?|prompt active|aiconf\?|aiconf get \d+)$/.test(command);
+    /^@linkr (?:control\?|control (?:claim|claim idle|release|yield [1-9]\d*)|help|info\?|uart\?|name\?|autobaud\?|wifi\?|bonds\?|bonds names\?|bonds label [01]\/[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}|target\?|led\?|opto\?|ir\?|ir slots|prompt\?|prompt get(?: \d+(?: \d+)?)?|prompt active|aiconf\?|aiconf get \d+)$/.test(command);
 }
