@@ -11,6 +11,7 @@
 #include "ble_peers.h"
 #include "ble_uart_reliable.h"
 #include "serial_session.h"
+#include "ext_ram.h"
 #include "watchdog.h"
 
 LOG_MODULE_REGISTER(linkr_ble_peers, LOG_LEVEL_INF);
@@ -18,12 +19,19 @@ LOG_MODULE_REGISTER(linkr_ble_peers, LOG_LEVEL_INF);
 #define QUEUE_DEPTH CONFIG_LINKR_BLE_BRIDGE_PEER_TX_QUEUE_DEPTH
 #define PAYLOAD_SIZE LINKR_UART_RELIABLE_MAX_PAYLOAD
 struct peer_packet { uint32_t generation; uint16_t len; uint8_t data[PAYLOAD_SIZE]; };
+#define PEER_STORAGE_SIZE (QUEUE_DEPTH * sizeof(struct peer_packet))
+/* Only the queue payload moves to PSRAM: the k_msgq and k_thread objects in
+ * the array below are kernel objects and stay in DRAM, and the producers (the
+ * UART-to-BLE thread) and the consumer (each peer's tx thread) are all thread
+ * context. Kept as a separate array because GCC refuses a section attribute
+ * on a struct member. */
+static char peer_storage[CONFIG_BT_MAX_CONN][PEER_STORAGE_SIZE]
+	__aligned(4) LINKR_EXT_RAM_BSS;
 static struct {
 	struct bt_conn *conn;
 	bool closing;
 	uint32_t generation;
 	struct k_msgq queue;
-	char storage[QUEUE_DEPTH * sizeof(struct peer_packet)] __aligned(4);
 	struct k_thread thread;
 } peers[CONFIG_BT_MAX_CONN];
 K_MUTEX_DEFINE(peers_lock);
@@ -93,7 +101,7 @@ static void peer_tx(void *arg, void *unused1, void *unused2)
 void linkr_ble_peers_init(void)
 {
 	for (size_t i = 0; i < ARRAY_SIZE(peers); i++) {
-		k_msgq_init(&peers[i].queue, peers[i].storage, sizeof(struct peer_packet), QUEUE_DEPTH);
+		k_msgq_init(&peers[i].queue, peer_storage[i], sizeof(struct peer_packet), QUEUE_DEPTH);
 		k_thread_create(&peers[i].thread, peer_stacks[i], K_THREAD_STACK_SIZEOF(peer_stacks[i]),
 				peer_tx, (void *)i, NULL, NULL, 7, 0, K_NO_WAIT);
 		k_thread_name_set(&peers[i].thread, "ble_peer_tx");
