@@ -720,6 +720,12 @@ python3 tools/linkr_ble_terminal.py --monitor | tee board.log
 python3 tools/linkr_ble_terminal.py --reconnect 2
 ```
 
+Reconnects keep the first selected BLE address and verify the same hardware
+Device ID. Dial/setup failures use the remaining retry budget. Startup commands
+(including pulses and `--cmd`) run once; reconnecting only restores the transport.
+A refused or interrupted startup command fails the invocation and is not replayed.
+`--scan` also connects and runs when combined with a command or `--monitor`.
+
 Console control and the saved pairings belong to the board, not to this client:
 
 ```sh

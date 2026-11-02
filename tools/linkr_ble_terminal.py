@@ -99,6 +99,26 @@ class TerminalConfig:
     write_delay: float
 
 
+@dataclass
+class SessionState:
+    """Identity and one-shot progress shared by successive BLE connections."""
+    target: str | None = None
+    device_id: bytes | None = None
+    commands_started: bool = False
+
+
+class ConnectionUnavailable(RuntimeError):
+    """The BLE connection/setup failed, rather than a command being refused."""
+
+
+async def connection_step(awaitable):
+    """Keep transport setup errors separate from protocol/command failures."""
+    try:
+        return await awaitable
+    except Exception as exc:
+        raise ConnectionUnavailable(str(exc)) from exc
+
+
 class RawTerminal:
     """Put the local tty in raw mode for the terminal session.
 
@@ -678,12 +698,18 @@ def reply_fields(text: str) -> dict[str, str]:
     return dict(REPLY_FIELD.findall(text))
 
 
+def redact_command(command: str) -> str:
+    if command.startswith(("@w=", "@d=")):
+        return f"{command[:2]}=<redacted>"
+    return command
+
+
 def result_record(command: str, body: bytes) -> dict:
     """One machine-readable answer: the command, the raw text, its pairs."""
     text = body.decode(errors="replace").strip()
     return {
         "type": "result",
-        "command": command,
+        "command": redact_command(command),
         "ok": True,
         "text": text,
         "fields": reply_fields(text),
@@ -907,8 +933,7 @@ class ManagementChannel:
         if not command or len(command) > self.max_payload:
             raise ValueError("management command is outside the advertised limit")
         sensitive = command.startswith((b"@w=", b"@d="))
-        display = (f"{command[:2].decode()}=<redacted>" if sensitive
-                   else command.decode(errors="replace"))
+        display = redact_command(command.decode(errors="replace"))
         info(f"control -> {display}")
 
         request_id = self.next_request_id
@@ -1204,6 +1229,10 @@ def has_control_action(args: argparse.Namespace) -> bool:
         args.webdav_off, args.query_webdav, args.rename_ble,
         args.reset_ble_name, args.query_ble_name,
         args.loopback_test is not None, args.pair,
+        args.query_control, args.claim, args.release, args.bonds, args.bonds_names,
+        args.bonds_remove is not None, args.led is not None, args.query_led,
+        args.opto is not None, args.opto_pulse is not None, args.query_opto,
+        args.cmd, args.monitor,
     ))
 
 
@@ -1535,12 +1564,14 @@ async def run_commands(args: argparse.Namespace, management, *,
 
 
 
-async def run(args: argparse.Namespace) -> int:
+async def run(args: argparse.Namespace, state: SessionState | None = None) -> int:
+    if state is None:
+        state = SessionState()
     # Resolve WiFi credentials before anything radio related: a bad spec or a
     # missing password should fail fast, and the prompt must not fight the
     # terminal for the tty. Keeping the password out of argv is the point here.
     wifi_command: bytes | None = None
-    if args.wifi:
+    if args.wifi and not state.commands_started:
         prompt = getpass.getpass if sys.stdin.isatty() else None
         try:
             ssid, password = resolve_wifi_credentials(
@@ -1557,14 +1588,15 @@ async def run(args: argparse.Namespace) -> int:
 
     import_bleak()
 
-    scanned = None
-    if args.scan:
-        scanned = await scan_devices(args.timeout, json_output=args.json)
-        if not args.address and not has_control_action(args):
-            return EXIT_OK
-
-    target = await find_device(args.name, args.address, args.timeout,
-                               devices=scanned)
+    if state.target is None:
+        scanned = None
+        if args.scan:
+            scanned = await scan_devices(args.timeout, json_output=args.json)
+            if not args.address and not has_control_action(args):
+                return EXIT_OK
+        state.target = await find_device(args.name, args.address, args.timeout,
+                                        devices=scanned)
+    target = state.target
     cfg = TerminalConfig(
         escape=args.escape,
         enter=args.enter,
@@ -1626,12 +1658,14 @@ async def run(args: argparse.Namespace) -> int:
          "(GPIO1 C3/C5, GPIO4 WROOM). Bonded hosts reconnect without it.")
     log_file = open(args.log_file, "ab", buffering=0) if args.log_file else None
 
+    entered = False
     try:
         async with BleakClient(target, disconnected_callback=on_disconnect,
                                timeout=args.timeout) as client:
+            entered = True
             info(f"connected: {client.address}")
 
-            if args.pair:
+            if args.pair and state.device_id is None:
                 if sys.platform == "darwin":
                     info("macOS requests pairing when the encrypted service is "
                          "read; accept the system dialog.")
@@ -1652,7 +1686,8 @@ async def run(args: argparse.Namespace) -> int:
                 sys.stdout.buffer.flush()
 
             configure_ble_write_size(client, cfg, args.ble_write_size)
-            protocol = bytes(await client.read_gatt_char(MGMT_PROTOCOL_UUID))
+            protocol = bytes(await connection_step(
+                client.read_gatt_char(MGMT_PROTOCOL_UUID)))
             if len(protocol) < 10 or protocol[0] != MGMT_API_MAJOR:
                 raise RuntimeError("unsupported Linkr Management API version")
             capabilities = int.from_bytes(protocol[4:8], "little")
@@ -1676,9 +1711,13 @@ async def run(args: argparse.Namespace) -> int:
             ))
             if webdav_actions and not capabilities & MGMT_CAP_WEBDAV:
                 raise RuntimeError("device does not advertise WebDAV support")
-            device_id = bytes(await client.read_gatt_char(MGMT_DEVICE_ID_UUID))
+            device_id = bytes(await connection_step(
+                client.read_gatt_char(MGMT_DEVICE_ID_UUID)))
             if not is_linkr_device_id(device_id):
                 raise RuntimeError("invalid Linkr Device ID")
+            if state.device_id is not None and device_id != state.device_id:
+                raise RuntimeError("Bee device ID changed; refusing to resume this session")
+            state.device_id = device_id
             info(
                 f"management API v{protocol[0]}.{protocol[1]}, "
                 f"device ID {device_id.hex()}"
@@ -1686,11 +1725,11 @@ async def run(args: argparse.Namespace) -> int:
             management = ManagementChannel(
                 client, cfg, management_max_payload, json_output=args.json
             )
-            await client.start_notify(
+            await connection_step(client.start_notify(
                 MGMT_RESPONSE_UUID, management.on_indication
-            )
+            ))
             reliable_state = bytes(
-                await client.read_gatt_char(RELIABLE_UART_STATE_UUID)
+                await connection_step(client.read_gatt_char(RELIABLE_UART_STATE_UUID))
             )
             if len(reliable_state) != 16 or reliable_state[0] != 1:
                 raise RuntimeError("unsupported Reliable UART version")
@@ -1708,9 +1747,9 @@ async def run(args: argparse.Namespace) -> int:
                 reliable_rx_sequence,
                 on_notify,
             )
-            await client.start_notify(
+            await connection_step(client.start_notify(
                 RELIABLE_UART_TX_UUID, reliable.on_indication
-            )
+            ))
 
             # The board's own name, not the label the air carried: the owner
             # can change that label at any time, and a session that reported
@@ -1726,23 +1765,27 @@ async def run(args: argparse.Namespace) -> int:
                 if name:
                     info(f"board name: {name}")
 
-            if label_name:
-                # Best effort: the bond list reads better with a name, but the
-                # session does not depend on it.
-                await report_host_name(management, label_name)
+            if not state.commands_started:
+                # Mark before sending: even a lost acknowledgement must never
+                # cause a pulse, pairing deletion or arbitrary command replay.
+                state.commands_started = True
+                if label_name:
+                    # Best effort: the label is cosmetic; a refusal must not
+                    # prevent the terminal session from starting.
+                    await report_host_name(management, label_name)
 
-            await run_commands(args, management, wifi_command=wifi_command)
-            if args.loopback_test is not None:
-                payload = args.loopback_test.encode()
-                notify_queue = asyncio.Queue()
-                try:
-                    ok = await loopback_test(client, payload, cfg, notify_queue,
-                                             args.loopback_timeout, reliable)
-                finally:
-                    # Ordinary terminal output has no queue consumer.
-                    notify_queue = None
-                if not ok:
-                    raise RuntimeError("loopback test failed")
+                await run_commands(args, management, wifi_command=wifi_command)
+                if args.loopback_test is not None:
+                    payload = args.loopback_test.encode()
+                    notify_queue = asyncio.Queue()
+                    try:
+                        ok = await loopback_test(client, payload, cfg, notify_queue,
+                                                 args.loopback_timeout, reliable)
+                    finally:
+                        # Ordinary terminal output has no queue consumer.
+                        notify_queue = None
+                    if not ok:
+                        raise RuntimeError("loopback test failed")
 
             if args.monitor:
                 # The notify callback already writes the UART to stdout; a
@@ -1776,6 +1819,10 @@ async def run(args: argparse.Namespace) -> int:
             terminal.result()
             await stop_channels(client)
             return EXIT_OK
+    except Exception as exc:
+        if not entered:
+            raise ConnectionUnavailable(str(exc)) from exc
+        raise
     finally:
         for task in list(geometry_tasks):
             task.cancel()
@@ -1987,11 +2034,19 @@ def main() -> int:
         print(completion_script(args.print_completion, parser))
         return EXIT_OK
 
+    state = SessionState()
+
     def run_once() -> int:
         try:
-            return asyncio.run(run(args))
+            return asyncio.run(run(args, state))
         except KeyboardInterrupt:
             return 130
+        except ConnectionUnavailable as exc:
+            error(str(exc))
+            # An initial failure is still an error. Once the board has been
+            # identified, failed redials spend the remaining reconnect budget.
+            return (EXIT_DEVICE_DISCONNECTED if state.device_id is not None
+                    else EXIT_ERROR)
         except Exception as exc:
             error(str(exc))
             return EXIT_ERROR

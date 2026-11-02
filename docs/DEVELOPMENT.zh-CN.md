@@ -566,6 +566,11 @@ python3 tools/linkr_ble_terminal.py --monitor | tee board.log
 python3 tools/linkr_ble_terminal.py --reconnect 2
 ```
 
+重连会固定首次选中的 BLE 地址，并核对同一硬件 Device ID；连接和通道初始化失败
+会继续使用剩余重试次数。启动命令（包括脉冲和 `--cmd`）只执行一次，重连仅恢复通信。
+启动命令被拒绝或执行中断时会报错退出，不自动重放。
+`--scan` 与命令或 `--monitor` 组合时，扫描后会继续连接并执行。
+
 控制权与已保存的配对属于板子，不属于这个客户端：
 
 ```sh
