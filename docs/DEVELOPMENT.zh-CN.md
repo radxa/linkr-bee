@@ -131,19 +131,6 @@ west build -b linkr_bee_x1_0 linkr-bee
 组装固件 ZIP、Web 包、APK 与桌面压缩包。也可以在 tag 上手动词发一次
 dry-run，只执行组装、不修改 GitHub release。
 
-桌面矩阵始终构建 Linux 与 Windows 目标。两个 macOS 目标可选：只有仓库变量
-`ENABLE_MACOS` 为 `true` 时才构建，因为托管的 macOS runner 不一定分配得到，
-而排队后被取消的目标会让整个 run 失败，并拖住其他平台的压缩包。
-`tools/assemble_release.py` 接受带或不带 macOS 产物的发布，但缺少任一
-Linux 或 Windows 目标时会拒绝组装。
-
-发布之后组件还会继续前进：APK 打包的是同一提交构建的 Web 终端，固件也会跟随
-固件源码。手动触发 “Refresh release assets”
-（`.github/workflows/release-refresh.yml`，填 tag 并勾选 `apk` / `firmware`）
-会用当前 ref 重新构建选中的产物并替换到该发布上，由
-`tools/refresh_release.py` 同步改写 `release-manifest.json` 与 `SHA256SUMS`。
-没有勾选的资产不会被改动。
-
 从完成的 Actions run 下载与目标板匹配的 artifact，解压后在 macOS 或 Linux 安装
 [`esptool`](https://docs.espressif.com/projects/esptool/en/latest/)，
 连接设备并执行：
@@ -965,7 +952,10 @@ http://127.0.0.1:8765/
 - 用 `@u?` 和 `@u=...` 查询或设置 UART 模式
 - 调整换行和 BLE 写入块大小
 - 在系统等宽字体与常见本地 Nerd Font 之间切换，并预览 Powerline/Nerd
-  字形；所选字体会按当前浏览器来源持久化，但网页不内置字体文件
+  字形；所选字体会按当前浏览器来源持久化。Nerd 字体本身不内置；唯一内置的是
+  BabelStone Pseudographica 子集（`web/fonts/`），覆盖 Unicode 13/16 的
+  legacy computing 区块，因为桌面等宽字体栈会把这些 ANSI art 字形渲染成
+  `.notdef`
 - 通过 xterm.js 渲染终端控制序列，包括光标移动、行擦除、readline 重绘、16 色、256 色和真彩色 SGR
 - 全屏显示终端，并在 viewport 或控制面板宽度变化时自动重新计算行列
 - 识别常见 Bash/BusyBox 的 `$ ` 和 `# ` 提示符，登录后通过

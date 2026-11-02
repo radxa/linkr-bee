@@ -149,22 +149,6 @@ assembles the firmware ZIPs, Web package, APK and desktop archives. A manual
 release dispatch can run the same assembly as a dry run from a tag without
 touching the GitHub release.
 
-The desktop matrix always builds the Linux and Windows legs. Its two macOS legs
-are optional: they run only when the repository variable `ENABLE_MACOS` is
-`true`, because hosted macOS runners are not always assigned, and a leg that
-queues and is then cancelled fails the run and holds back every other
-platform's archive. `tools/assemble_release.py` accepts a release with or
-without them and refuses one that is missing a Linux or Windows leg.
-
-Components can move on after a release is published: the APK wraps the Web
-terminal built from the same commit, and the firmware follows the firmware
-source. "Refresh release assets" (`.github/workflows/release-refresh.yml`,
-manual dispatch with the tag and the `apk` / `firmware` switches) rebuilds the
-chosen assets from the selected ref and replaces them on that release, using
-`tools/refresh_release.py` to rewrite `release-manifest.json` and
-`SHA256SUMS` for the new bytes. It replaces nothing it was not asked to
-replace.
-
 Download the artifact matching the target from the completed GitHub Actions
 run. The flashable images are:
 
@@ -1210,7 +1194,10 @@ The page can:
 - adjust line ending and BLE write chunk size
 - switch between the system monospace stack and common locally installed Nerd
   Fonts, with a Powerline/Nerd glyph preview; the selection is persisted for
-  the current browser origin, but the font files themselves are not bundled
+  the current browser origin, but the Nerd font files themselves are not
+  bundled. The only bundled face is a BabelStone Pseudographica subset for the
+  Unicode 13/16 legacy-computing blocks (`web/fonts/`), because desktop
+  monospace stacks render those ANSI-art glyphs as .notdef
 - render terminal control sequences through xterm.js, including cursor movement,
   line erasing, readline redraws, 16-color, 256-color, and truecolor SGR
 - expand the terminal to fullscreen and automatically refit its rows and columns
