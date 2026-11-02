@@ -692,12 +692,67 @@ fails without touching the radio. The change is persisted in the board's
 settings and survives a reboot; `--reset-ble-name` restores the
 MAC-derived `Linkr Bee XXXX`.
 
+Board I/O and one-shot commands:
+
+```sh
+python3 tools/linkr_ble_terminal.py --led 1a2b3c --no-terminal    # status LED
+python3 tools/linkr_ble_terminal.py --led off --no-terminal
+python3 tools/linkr_ble_terminal.py --opto on --no-terminal      # isolated contact
+python3 tools/linkr_ble_terminal.py --opto-pulse 500 --no-terminal
+python3 tools/linkr_ble_terminal.py --query-led --query-opto --no-terminal
+```
+
+`--cmd` sends any management command verbatim and prints the reply on stdout, so a
+script captures the answer rather than the transport's own echo. It is repeatable
+and the commands run in the order given, which is how a firmware command without a
+dedicated flag is reachable:
+
+```sh
+python3 tools/linkr_ble_terminal.py --cmd '@linkr bonds?' --no-terminal
+python3 tools/linkr_ble_terminal.py --cmd '@r slots' --cmd '@l?' --no-terminal
+```
+
+`--monitor` prints the target UART and never reads the keyboard; `--reconnect N`
+retries a dropped link N times before giving up:
+
+```sh
+python3 tools/linkr_ble_terminal.py --monitor | tee board.log
+python3 tools/linkr_ble_terminal.py --reconnect 2
+```
+
+Console control and the saved pairings belong to the board, not to this client:
+
+```sh
+python3 tools/linkr_ble_terminal.py --query-control --no-terminal
+python3 tools/linkr_ble_terminal.py --claim --bonds --no-terminal
+python3 tools/linkr_ble_terminal.py --claim --opto-pulse 500 --release --no-terminal
+python3 tools/linkr_ble_terminal.py --bonds-names --no-terminal
+python3 tools/linkr_ble_terminal.py --bonds-remove 0/AA:BB:CC:DD:EE:01 --no-terminal
+```
+
+`--claim` runs before every other command and `--release` runs after them, so one
+invocation can take the console, change something and hand it back. A mutation
+from a client that does not own the console is refused by the board
+(`ERR control=readonly`), which is the same state the web terminal shows.
+
+`--scan --json` reports one record per device instead of the tab-separated
+listing, because a name may itself contain a tab:
+
+```json
+{"type": "device", "name": "Linkr Bee 1A2B", "address": "AA:BB:CC:DD:EE:01", "rssi": -52, "management": true}
+```
+
 Scripting and safety notes:
 
 - `--json` writes management responses and events to stdout as one JSON object
   per line, e.g.
   `{"type":"response","requestId":1,"ok":true,"lines":["OK fw version=0.1.2"],"command":"@i?"}`.
   `@w=`/`@d=` commands are always reported as `<redacted>` in that field.
+- Every command sent from a flag also emits one `result` record that splits the
+  reply into its `key=value` pairs, e.g.
+  `{"type":"result","command":"@o?","ok":true,"text":"OK opto=closed","fields":{"opto":"closed"}}`.
+  A value that contains a comma or a space -- an SSID, a URL with a query string
+  -- is only complete in `text`.
 - `--quiet` suppresses progress messages (`linkr: …`); errors and
   `loopback PASS/FAIL` still print.
 - `--help` and `--version` do not need bleak installed; it is imported only
@@ -710,7 +765,7 @@ Scripting and safety notes:
 - `--rename-ble` is validated locally too: 1–29 UTF-8 bytes, no control
   characters, and the two name flags cannot both be given.
 - Exit codes: `0` ok, `1` error, `2` bad arguments, `3` device disconnected
-  during the terminal session.
+  during the terminal session, or after `--reconnect` runs out of attempts.
 
 Configuration commands use Management Service v1 binary frames with an API
 version, request ID, logical payload length, response ID, and confirmed
@@ -893,11 +948,10 @@ cd tools && make
 ./linkr_ble_terminal_c
 ```
 
-Its command line now matches the Python client, so scripts can treat both alike:
-
-- Exit codes `0` ok, `1` error, `2` bad arguments, `3` device disconnected
-  mid-session. Argument errors used to exit `1`, indistinguishable from a
-  device that would not connect.
+Its exit codes match the Python client -- `0` ok, `1` error, `2` bad arguments,
+`3` device disconnected mid-session -- so a script can tell the two apart without
+reading their output; the *flags* do not match, and the table above is the whole
+Management v1 surface it exposes.
 - `--version`; `--quiet` suppresses progress only, errors always print.
 - Long options also accept `--option=value`; a missing value reports
   `--opt requires a value` instead of the misleading `unknown option`.
