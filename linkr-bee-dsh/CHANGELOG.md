@@ -10,6 +10,11 @@
 - Diagnostics: the terminal reports, once per mount, the element chain that
   receives a pointerdown when it is not the xterm screen — evidence for a
   pane overlay that swallows drag selection in some environments.
+- Selection highlight: `selectionBackground` was bound to a token that is the
+  same colour as the terminal background (pure white in light mode), so a drag
+  selection was real but invisible. It now uses a translucent brand-coloured
+  wash with a readable selected-text colour, a quieter unfocused variant and a
+  thin brand-coloured edge, in both light and dark themes.
 
 ## 1.1.4
 

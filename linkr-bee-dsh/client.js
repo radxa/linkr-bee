@@ -13266,11 +13266,19 @@ window.__ModuleLoader__.load({
         return value === '' ? fallback : value;
       };
       const dark = harrenessIsDark();
+      // A selected run must be unmistakable. The layer-2 token is often the
+      // same colour as the terminal background (pure white in light mode,
+      // near-black in dark mode), which painted an invisible selection. Use a
+      // translucent brand-coloured wash instead, and keep the selected text
+      // itself readable; an unfocused pane gets a quieter but still visible
+      // wash so a selection is never a complete mystery.
       const base = {
         background: token('--dsw-alias-bg-base', dark ? '#111317' : '#ffffff'),
         foreground: token('--dsw-alias-label-primary', dark ? '#e6e8eb' : '#1b1d22'),
         cursor: token('--dsw-alias-brand-primary', '#7ab0ff'),
-        selectionBackground: token('--dsw-alias-bg-layer-2', 'rgba(122,176,255,0.3)'),
+        selectionBackground: dark ? 'rgba(96, 160, 255, 0.42)' : 'rgba(74, 128, 232, 0.28)',
+        selectionInactiveBackground: dark ? 'rgba(96, 160, 255, 0.24)' : 'rgba(74, 128, 232, 0.16)',
+        selectionForeground: dark ? '#ffffff' : '#101828',
       };
       const theme = dark ? { ...base, ...DARK_PALETTE } : base;
       const signature = JSON.stringify(theme);
@@ -14676,6 +14684,9 @@ window.__ModuleLoader__.load({
 .lb-console-xterm { position: relative; overflow: hidden; padding: 0; }
 .lb-term { position: absolute; inset: 0; padding: 6px 4px 4px; }
 .lb-console-xterm .lb-term { display: block; }
+/* The selection layer is a canvas-parented overlay: keep a visible edge and a
+   readable text colour even where xterm's theme keys are not applied. */
+.lb-term .xterm-selection div { box-shadow: inset 0 0 0 1px var(--dsw-alias-brand-primary); }
 .lb-term .xterm .xterm-viewport { background: transparent !important; }
 .lb-empty { position: absolute; left: 12px; right: 12px; top: 30px; color: var(--dsw-alias-label-secondary); font-size: 12px; font-style: italic; pointer-events: none; }
 .lb-line { white-space: pre-wrap; word-break: break-all; min-height: 1.55em; }
