@@ -20,22 +20,34 @@ async function main() {
     process.exit(1)
   }
   const child = spawn(binary, process.argv.slice(2), { stdio: 'inherit' })
+  // Keep the listeners so they can be removed again: a re-raised signal that
+  // this process still handles would be forwarded to a dead child and ignored.
+  const relays = new Map()
   for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT']) {
-    process.on(signal, () => {
+    const relay = () => {
       try {
         child.kill(signal)
       } catch {
         /* the child is already gone */
       }
-    })
+    }
+    relays.set(signal, relay)
+    process.on(signal, relay)
   }
   child.on('error', (error) => {
     process.stderr.write(`bee-cli: cannot run ${binary}: ${error.message}\n`)
     process.exit(1)
   })
   child.on('exit', (code, signal) => {
-    if (signal) process.kill(process.pid, signal)
-    else process.exit(code === null ? 1 : code)
+    if (!signal) {
+      process.exit(code === null ? 1 : code)
+      return
+    }
+    // Die the way the child died — but stop listening first, or this process
+    // catches its own re-raised signal, forwards it to a dead child and lives
+    // on, which is how a Ctrl-C in a terminal left the launcher running.
+    for (const [name, relay] of relays) process.removeListener(name, relay)
+    process.kill(process.pid, signal)
   })
 }
 
