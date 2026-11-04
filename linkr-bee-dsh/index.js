@@ -519,7 +519,10 @@ function makeSession(child, ready, config) {
     const run = () =>
       new Promise((resolve, reject) => {
         if (closed) {
-          reject(new Error('bee-cli serve is not running'));
+          const code = child.exitCode;
+          const signal = child.signalCode;
+          const detail = code !== null || signal !== null ? ` (exit ${code ?? '-'}${signal ? '/' + signal : ''})` : '';
+          reject(new Error(`bee-cli serve is not running${detail}`));
           return;
         }
         const id = nextId++;
@@ -589,7 +592,13 @@ function makeSession(child, ready, config) {
 
 /** Start the resident session, or return the one already up. */
 async function ensureSession(config) {
-  if (session !== null && !session.closed) return session;
+  if (session !== null) {
+    const alive = !session.closed && session.child.exitCode === null && session.child.signalCode === null;
+    if (alive) return session;
+    // A session the caller would only be able to fail on: drop it, and let the
+    // start below make a new one.
+    stopSession();
+  }
   if (sessionStarting !== null) return sessionStarting;
   sessionStarting = (async () => {
     const dial = await dialArgs(config, undefined);
@@ -1062,8 +1071,16 @@ export function apply(ctx, rawConfig) {
                 sendJson(res, 400, { ok: false, error: 'nothing to type' });
                 return;
               }
-              const active = await ensureSession(config);
-              await active.request('send', { data });
+              let active = await ensureSession(config);
+              try {
+                await active.request('send', { data });
+              } catch (error) {
+                // One retry: the session can die between the start and the
+                // write, and a keystroke is not worth that race.
+                stopSession();
+                active = await ensureSession(config);
+                await active.request('send', { data });
+              }
               // Typing wants its echo back quickly. Push mode gets it for free;
               // only the poll fallback needs to be told to look harder.
               monitorHotUntil = Date.now() + 1500;

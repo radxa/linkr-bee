@@ -13841,6 +13841,40 @@ window.__ModuleLoader__.load({
       };
 
       /** One keystroke (or paste) from the terminal, sent as typed. */
+      /** The last input failure, so a burst of keystrokes is not a wall of red. */
+      const inputFailure = useRef({ text: '', at: 0, count: 0 });
+      const rearmStream = useRef(0);
+
+      const reportInputFailure = (text) => {
+        const now = Date.now();
+        const last = inputFailure.current;
+        if (text === last.text && now - last.at < 4000) {
+          last.count += 1;
+          last.at = now;
+          if (last.count === 3 && termApi.current !== null) {
+            termApi.current.write(
+              '\u001b[33m（终端会话反复失败：点 ⚙ 确认 bee-cli 路径，或重新打开面板）\u001b[0m\r\n',
+            );
+          }
+        } else {
+          inputFailure.current = { text, at: now, count: 1 };
+          if (termApi.current !== null) {
+            termApi.current.write(`\u001b[31m${text}\u001b[0m\r\n`);
+          }
+        }
+        // Ask the Host to restart the resident session, at most every two
+        // seconds: the next keystroke then lands on a live one.
+        if (now - rearmStream.current > 2000) {
+          rearmStream.current = now;
+          fetch(WATCH_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ on: true }),
+            keepalive: true,
+          }).catch(() => {});
+        }
+      };
+
       const postInput = useCallback((data) => {
         if (!data) return;
         fetch(INPUT_URL, {
@@ -13850,14 +13884,10 @@ window.__ModuleLoader__.load({
         })
           .then((response) => response.json().catch(() => ({})))
           .then((payload) => {
-            if (payload && payload.ok === false && termApi.current !== null) {
-              termApi.current.write(`\u001b[31m${payload.error || 'input failed'}\u001b[0m\r\n`);
-            }
+            if (payload && payload.ok === false) reportInputFailure(payload.error || 'input failed');
           })
           .catch((error) => {
-            if (termApi.current !== null) {
-              termApi.current.write(`\u001b[31m${String((error && error.message) || error)}\u001b[0m\r\n`);
-            }
+            reportInputFailure(String((error && error.message) || error));
           });
       }, []);
 

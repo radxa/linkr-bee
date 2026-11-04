@@ -1,10 +1,16 @@
 # Changelog
 
-## Unreleased
+## 1.1.1
 
-- Docs: the CLI is published as `linkr-bee-cli` (an npm organization is not in
-  use yet), so the install line reads `npm install -g linkr-bee-cli`.
-
+- Robustness: a resident session that dies (the CLI killed, a dropped radio) is
+  no longer handed to the next request. Keystrokes sent across that moment are
+  retried once on a fresh session, a dead session is dropped before a caller
+  can use it, and the error a caller sees now carries the exit code and signal
+  instead of a bare "not running". The panel also stops printing the same input
+  failure for every keystroke and asks the Host to re-arm the stream.
+- Docs only: the command-line client is published as `linkr-bee-cli` (no npm
+  organization is in use yet), so the install line reads
+  `npm install -g linkr-bee-cli` / `npx linkr-bee-cli`.
 
 ## 1.1.0
 
