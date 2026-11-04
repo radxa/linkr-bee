@@ -27,7 +27,7 @@ except ModuleNotFoundError:  # pragma: no cover - Windows hosts
     termios = None
     tty = None
 
-__version__ = "1.1.3"
+__version__ = "1.1.4"
 DEFAULT_NAME = None  # Discover by service; --name is an explicit override.
 MGMT_SERVICE_UUID = "4c4b0001-9a7e-4f4e-8b8a-3d6f12a0c001"
 NUS_RX_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"

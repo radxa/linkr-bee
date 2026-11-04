@@ -19,19 +19,19 @@ BOARDS = ("esp32c3-supermini", "esp32c3-devkitm", "esp32c3-devkitc",
           "esp32c5-devkitc", "esp32-wroom-32", "linkr-bee-x1-0")
 
 
-def write_fixture(root: Path, *, firmware_version: str = "1.1.3",
-                  web_version: str = "1.1.3", apk_version: str = "1.1.3") -> None:
+def write_fixture(root: Path, *, firmware_version: str = "1.1.4",
+                  web_version: str = "1.1.4", apk_version: str = "1.1.4") -> None:
     """Write one artifact of each kind, carrying the versions asked for."""
     for directory in ("desktop", "firmware", "web", "apk"):
         (root / directory).mkdir()
     for target in TARGETS:
         for prefix in ("linkr-bee", "linkr-bee-cli"):
             suffix = "zip" if "windows" in target else "tar.gz"
-            (root / "desktop" / f"{prefix}-1.1.3-{target}.{suffix}").write_bytes(b"fixture")
+            (root / "desktop" / f"{prefix}-1.1.4-{target}.{suffix}").write_bytes(b"fixture")
             if "apple" in target:
-                (root / "desktop" / f"{prefix}-1.1.3-{target}.dmg").write_bytes(b"fixture")
+                (root / "desktop" / f"{prefix}-1.1.4-{target}.dmg").write_bytes(b"fixture")
     for arch in ("amd64", "arm64", "armhf", "i386"):
-        (root / "desktop" / f"linkr-bee_1.1.3_{arch}.deb").write_bytes(b"fixture")
+        (root / "desktop" / f"linkr-bee_1.1.4_{arch}.deb").write_bytes(b"fixture")
     # The bare CLI binaries the `linkr-bee-cli` npm package downloads: no
     # version in the name, and executable, because the launcher execs them.
     for target in TARGETS:
@@ -55,7 +55,7 @@ def write_fixture(root: Path, *, firmware_version: str = "1.1.3",
 
 
 def command_for(root: Path, repo: str | None = None,
-                tag: str = "v1.1.3") -> list[str]:
+                tag: str = "v1.1.4") -> list[str]:
     command = [sys.executable, str(ROOT / "tools/assemble_release.py"),
                "--tag", tag, "--commit", "a" * 40, "--run-id", "123",
                "--desktop-dir", str(root / "desktop"),
@@ -64,8 +64,8 @@ def command_for(root: Path, repo: str | None = None,
                "--out-dir", str(root / "out"),
                "--notes-template", str(ROOT / f"docs/releases/{tag}.md"),
                "--notes-out", str(root / "notes.md"),
-               "--web-version", "1.1.3", "--firmware-version", "1.1.3",
-               "--apk-version", "1.1.3"]
+               "--web-version", "1.1.4", "--firmware-version", "1.1.4",
+               "--apk-version", "1.1.4"]
     if repo:
         command.extend(["--repo", repo])
     return command
@@ -116,12 +116,12 @@ class ReleaseAssemblyTests(unittest.TestCase):
                 expected = repo or "https://github.com/radxa/linkr-bee"
                 notes = (root / "notes.md").read_text()
                 self.assertIn(f"{expected}/actions/runs/123", notes)
-                self.assertIn(f"{expected}/blob/v1.1.3/docs/DEVELOPMENT.zh-CN.md", notes)
+                self.assertIn(f"{expected}/blob/v1.1.4/docs/DEVELOPMENT.zh-CN.md", notes)
                 self.assertNotIn("{{", notes)
                 self.assertNotIn("Novice-PG/linkr-bee", notes)
-                with zipfile.ZipFile(root / "out/linkr-bee-v1.1.3-web.zip") as archive:
-                    readme = archive.read("linkr-bee-v1.1.3-web/README.txt").decode()
-                self.assertIn(f"Source: {expected}/tree/v1.1.3", readme)
+                with zipfile.ZipFile(root / "out/linkr-bee-v1.1.4-web.zip") as archive:
+                    readme = archive.read("linkr-bee-v1.1.4-web/README.txt").decode()
+                self.assertIn(f"Source: {expected}/tree/v1.1.4", readme)
                 self.assertEqual(len(list((root / "out").iterdir())), 48)
                 manifest = json.loads((root / "out/release-manifest.json").read_text())
                 self.assertEqual(len(manifest["assets"]), 46)
@@ -174,8 +174,8 @@ class ReleaseAssemblyTests(unittest.TestCase):
         cases.append((unexpected_desktop, "unexpected desktop artifact"))
 
         def unknown_deb_arch(root):
-            (root / "desktop/linkr-bee_1.1.3_amd64.deb").rename(
-                root / "desktop/linkr-bee_1.1.3_riscv64.deb")
+            (root / "desktop/linkr-bee_1.1.4_amd64.deb").rename(
+                root / "desktop/linkr-bee_1.1.4_riscv64.deb")
 
         cases.append((unknown_deb_arch, "unknown Debian architecture"))
 
@@ -205,7 +205,7 @@ class ReleaseAssemblyTests(unittest.TestCase):
             root = Path(tmp)
             write_fixture(root)
             for path in (root / "desktop").iterdir():
-                path.rename(path.with_name(path.name.replace("1.1.3", "1.1.2")))
+                path.rename(path.with_name(path.name.replace("1.1.4", "1.1.2")))
             result = subprocess.run(command_for(root),
                                     capture_output=True, text=True, timeout=10)
             self.assertNotEqual(result.returncode, 0)
