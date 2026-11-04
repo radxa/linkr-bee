@@ -14657,7 +14657,13 @@ window.__ModuleLoader__.load({
 
     const CSS = `
 .lb-col { width: 100%; height: 100%; display: flex; flex-direction: column; min-height: 0; background: var(--dsw-alias-bg-base); font-size: 13px; color: var(--dsw-alias-label-primary); }
-.lb-head { display: flex; align-items: center; gap: 8px; padding: 4px 8px 4px 12px; border-bottom: 1px solid var(--dsw-alias-border-l1); flex: 0 0 auto; min-height: 40px; box-sizing: border-box; }
+/* The shell clips the pane body (overflow:hidden), so a bottom border here
+   can only start at the right column's left edge: on the other side of the
+   vertical divider the same horizontal rule is missing, and the two halves sit
+   a few pixels apart with different colours. Our header therefore draws no
+   rule of its own and shares the column's background — the shell's own tab
+   strip is the only horizontal divider, continuous across both sides. */
+.lb-head { display: flex; align-items: center; gap: 8px; padding: 4px 8px 4px 12px; flex: 0 0 auto; min-height: 40px; box-sizing: border-box; background: var(--dsw-alias-bg-base); }
 .lb-title { font-weight: 600; font-size: 13px; white-space: nowrap; flex: 0 0 auto; }
 .lb-sub { font-size: 11.5px; color: var(--dsw-alias-label-secondary); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lb-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dsw-alias-state-idle-primary); display: inline-block; flex: 0 0 auto; }

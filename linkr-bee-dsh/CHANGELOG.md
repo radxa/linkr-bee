@@ -10,6 +10,11 @@
 - Diagnostics: the terminal reports, once per mount, the element chain that
   receives a pointerdown when it is not the xterm screen — evidence for a
   pane overlay that swallows drag selection in some environments.
+- Divider alignment: the panel header drew its own bottom border, but the
+  shell clips the pane body, so that rule began at the right column's left edge
+  while the left side had none (and at a slightly different height/colour).
+  The header now draws no rule and shares the column's background, leaving the
+  shell's tab strip as the single, continuous horizontal divider.
 - Selection highlight: `selectionBackground` was bound to a token that is the
   same colour as the terminal background (pure white in light mode), so a drag
   selection was real but invisible. It now uses a translucent brand-coloured
