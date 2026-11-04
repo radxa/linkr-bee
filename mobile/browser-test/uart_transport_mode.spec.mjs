@@ -114,12 +114,25 @@ test('failed NUS subscription can use a supported reliable channel', async ({ pa
   await expect(page.locator('#uartTransportStatus')).toContainText(/unavailable|不可用/);
 });
 
-for(const caps of [72,104])test(`board capabilities override reliable preference without exposing unsupported controls (${caps})`,async({page})=>{
-  await open(page,'reliable');await board(page,{caps});await connect(page);
-  await expect(page.locator('#uartModeField')).toBeHidden();
-  await expect(page.locator('#uartTransportStatus')).toContainText(/only|仅支持/);
-  expect(await page.evaluate(()=>window.uartReads.some(x=>x.startsWith('4c4b0013')))).toBe(false);
+test('unknown capability bits cannot grant a UART transport',async({page})=>{
+  // Bit 6 was never assigned by the firmware. A Management-capable board
+  // must advertise Device ID and Reliable UART; an unknown bit cannot stand
+  // in for either. Legacy NUS without Management is tested separately below.
+  await open(page,'reliable');await board(page,{caps:8|64});
+  await page.evaluate(()=>window.__uartMode.connect());
+  expect(await page.evaluate(()=>window.__uartMode.state.connected)).toBe(false);
+  await expect(page.locator('#uartTransportStatus')).toBeHidden();
+  expect(await page.evaluate(()=>window.uartSubscriptions.some(x=>x.startsWith('6e400003')))).toBe(false);
   expect(await page.evaluate(()=>localStorage.getItem('linkr-uart-mode'))).toBe('reliable');
+});
+
+test('unknown capability bits do not override the supported reliable preference',async({page})=>{
+  await open(page,'reliable');await board(page,{caps:8|32|64});await connect(page);
+  await expect(page.locator('#uartModeField')).toBeVisible();
+  await expect(page.locator('#uartModeSelect')).toHaveValue('reliable');
+  await expect(page.locator('#uartTransportStatus')).toContainText('Reliable UART');
+  expect(await page.evaluate(()=>window.uartReads.some(x=>x.startsWith('4c4b0013')))).toBe(true);
+  expect(await page.evaluate(()=>window.uartSubscriptions.some(x=>x.startsWith('6e400003')))).toBe(false);
 });
 
 test('mode changes during handshake are deferred to the next session',async({page})=>{

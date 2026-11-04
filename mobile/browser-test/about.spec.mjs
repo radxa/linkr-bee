@@ -22,7 +22,7 @@ async function openAbout(page) {
 test("the About page lists components, licences and contributors", async ({ page }) => {
   await openAbout(page);
   await expect(page.locator("#controlsPanel")).toHaveAttribute("data-settings-active", "about");
-  await expect(page.locator("#aboutMeta")).toContainText("0.1.2");
+  await expect(page.locator("#aboutMeta")).toContainText(ABOUT_DATA.app.version);
   await expect(page.locator("#aboutMeta")).toContainText("Apache-2.0");
 
   // Dependency upgrades can add or remove transitive components.

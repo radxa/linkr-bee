@@ -43,7 +43,7 @@ jobs:
       # tag, when a release tag is what triggered the build) before anything is
       # compiled — the cheapest place to catch a half-done version bump.
       - name: Version consistency
-        run: python3 tools/check_versions.py "${{ github.ref_name }}"
+        run: python3 tools/check_versions.py --ref "$GITHUB_REF"
       - run: python3 -m unittest discover -s tests -v
       - name: Build the C reference terminal
         run: make -C tools clean all
@@ -84,6 +84,9 @@ jobs:
 
       - name: Run bridge tests
         run: npm test
+
+      - name: Run CLI launcher and Harness plugin regressions
+        run: node --test ../tools/linkr-tui/npm/test/*.test.mjs ../linkr-bee-dsh/test/*.test.mjs
 
       - name: Install browser test runtime
         run: npx playwright install --with-deps chromium

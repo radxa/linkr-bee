@@ -51,10 +51,18 @@ async function enable(page){
   await expect(page.locator('.agent-activity').last()).toHaveAttribute('data-state','done');
 }
 async function run(page,text='uname -r'){
-  const id=await page.evaluate(async text=>{
+  // Full Auto still asks for opaque shell syntax. Start without awaiting so
+  // the test can inspect and explicitly approve that same pending request.
+  await page.evaluate(text=>{
     const d=window.__shellTest.getDevice();d.setMode('full-auto');
-    return(await d.execute({text,appendEnter:true,trackExit:true})).id;
+    window.shellExecution=d.execute({text,appendEnter:true,trackExit:true});
   },text);
+  const pending=await page.evaluate(()=>window.__shellTest.getDevice().getRecords().at(-1));
+  if (pending.state==='awaiting-approval') {
+    expect(pending.command).toBe(text);
+    expect(await page.evaluate(id=>window.__shellTest.getDevice().approve(id),pending.id)).toBe(true);
+  }
+  const id=await page.evaluate(async()=>(await window.shellExecution).id);
   await expect.poll(()=>page.evaluate(id=>window.__shellTest.getDevice().inspectExecution(id).executionStatus,id)).toBe('completed');
   return page.evaluate(id=>window.__shellTest.getDevice().inspectExecution(id),id);
 }
