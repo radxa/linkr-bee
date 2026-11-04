@@ -1,8 +1,9 @@
 # Changelog
 
-## 1.2.0
+## 1.1.2
 
-The console is now something an agent can operate, not just watch.
+The console is now something an agent can operate, not just watch. Versions
+follow the Linkr Bee main line from here on, so this cut stays in 1.1.
 
 - **`linkr_bee_console` tool**: `open`, `focus`, `clear`, `type`, `key` (enter,
   tab, arrows, ctrl-c/d/z/l, …), `read`, `state`, `resize`. The agent opens the
@@ -20,19 +21,11 @@ The console is now something an agent can operate, not just watch.
   reconnect banner with a *Reconnect* action that reports why it failed; an
   empty state instead of a blank screen; the last screen comes back after a tab
   remount or a page reload, and a *Clear* stays cleared.
-- Fixes carried in this cut: a dead `bee-cli --serve` session is dropped and a
-  keystroke across that moment is retried (1.1.1); the terminal refits on any
-  layout change, including a right-column drag (1.1.2).
-
-## 1.1.2
-
-- Layout: the terminal follows its box whatever moved it. Beside the pane's
-  ResizeObserver it now watches the parent, the right column and the window,
-  and polls the measured box slowly — so a sidebar drag, an animated grid track
-  or any other reflow the pane observer misses still refits the terminal and
-  sends the new size to the target.
-- Diagnostics: a pane laid out wider than its column (clipped, not resized) is
-  reported once to the Host log instead of failing silently.
+- **Layout**: the terminal follows its box whatever moved it — beside the pane's
+  ResizeObserver it watches the parent, the right column and the window, and
+  polls the measured box slowly, so a right-column drag still refits the
+  terminal and sends the new size to the target. A pane laid out wider than its
+  column (clipped, not resized) is reported once to the Host log.
 
 ## 1.1.1
 
