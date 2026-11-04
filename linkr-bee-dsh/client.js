@@ -13755,7 +13755,7 @@ window.__ModuleLoader__.load({
       const select = (value, onChange, options, disabled) =>
         h(
           'select',
-          { className: 'lb-mode', value, onChange: (e) => onChange(e.target.value), disabled },
+          { className: 'lb-mode lb-uart-select', value, onChange: (e) => onChange(e.target.value), disabled },
           options.map((option) =>
             h('option', { key: String(option.value), value: String(option.value) }, option.label),
           ),
@@ -13779,7 +13779,7 @@ window.__ModuleLoader__.load({
           { className: 'lb-uart-grid' },
           h('label', { className: 'lb-field' }, h('span', { className: 'lb-field-label' }, t('uartBaud')),
             customBaud
-              ? h('input', { className: 'lb-cmd', inputMode: 'numeric', value: baud, onChange: (e) => setBaud(e.target.value), disabled: busy })
+              ? h('input', { className: 'lb-cmd lb-uart-select', inputMode: 'numeric', value: baud, onChange: (e) => setBaud(e.target.value), disabled: busy })
               : select(baud, (value) => {
                   if (value === 'custom') {
                     setCustomBaud(true);
@@ -14917,10 +14917,13 @@ window.__ModuleLoader__.load({
 .lb-btn-ghost { background: transparent; border: 1px solid var(--dsw-alias-border-l2); color: var(--dsw-alias-label-primary); border-radius: 7px; padding: 6px 10px; font-size: 12.5px; cursor: pointer; flex: 0 0 auto; }
 .lb-btn-ghost:hover { border-color: var(--dsw-alias-brand-primary); }
 .lb-btn-ghost:disabled { opacity: 0.55; cursor: default; }
-.lb-uart { border-top: 1px solid var(--dsw-alias-border-l1); padding: 10px 0 4px; display: flex; flex-direction: column; gap: 8px; }
+.lb-uart { padding: 2px 0 4px; display: flex; flex-direction: column; gap: 8px; }
 .lb-uart-title { font-size: 12px; font-weight: 600; color: var(--dsw-alias-label-secondary); }
-.lb-uart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: 8px; }
+.lb-uart-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.lb-uart-grid .lb-field { min-width: 0; }
+.lb-uart-select { flex: 0 0 auto; width: 100%; min-height: 36px; height: 36px; box-sizing: border-box; padding: 6px 9px; font-size: 12.5px; }
 .lb-uart-foot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.lb-uart-foot button { min-height: 28px; }
 .lb-uart-foot .lb-note { flex: 1 1 auto; min-width: 0; }
 .lb-settings-foot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .lb-settings-foot .lb-note { flex: 1 1 140px; }

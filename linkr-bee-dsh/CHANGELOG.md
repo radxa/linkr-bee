@@ -10,6 +10,11 @@
 - Diagnostics: the terminal reports, once per mount, the element chain that
   receives a pointerdown when it is not the xterm screen — evidence for a
   pane overlay that swallows drag selection in some environments.
+- UART panel alignment: the five UART selects inherited `.lb-mode`'s
+  `flex: 0 0 84px`, which stretched them to 84px (much taller than the other
+  settings controls). They now use a 2-column grid with the same 36px height,
+  padding and font as the transport/timeout fields, and the card no longer
+  draws its own top border — it reads as part of the settings group.
 - UART settings: the ⚙ panel now reads and changes the bridge's UART format
   (baud, data bits, parity, stop bits, flow) over the BLE management channel,
   with `GET`/`POST /linkr-bee/uart` behind it. LAN/loopback links show why the
