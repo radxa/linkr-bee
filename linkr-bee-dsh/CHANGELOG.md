@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased (not published; version stays 1.1.4 until confirmed)
+
+- Selection/copy: xterm paints its selection on a canvas layer, not a DOM
+  text selection, so a pane that cannot drag-select used to offer nothing.
+  The header now has a **Copy** button (disabled until something is selected,
+  briefly reads "Copied" after a successful write), and a right-click over a
+  selection copies it. Both also work with Cmd/Ctrl+C, which xterm handles.
+- Diagnostics: the terminal reports, once per mount, the element chain that
+  receives a pointerdown when it is not the xterm screen — evidence for a
+  pane overlay that swallows drag selection in some environments.
+
 ## 1.1.4
 
 The published cut. Versions now follow the Linkr Bee main line: crate, tag,

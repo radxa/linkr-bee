@@ -13106,6 +13106,17 @@ window.__ModuleLoader__.load({
           /* a failing sender must not break the terminal */
         }
       });
+      // Canvas text is not a DOM selection: dragging paints xterm's own
+      // selection layer, and Cmd/Ctrl+C is handled by xterm's copy event. The
+      // panel still needs to know whether anything is selected so it can offer
+      // a visible Copy affordance (and a right-click that works like a terminal).
+      const selected = terminal.onSelectionChange(() => {
+        try {
+          options.onSelectionChange?.(terminal.getSelection());
+        } catch {
+          /* a failing observer must not break the terminal */
+        }
+      });
       // The target's own tty wants the size this terminal has, not 80x24.
       const sized = terminal.onResize(({ cols, rows }) => {
         try {
@@ -13124,6 +13135,34 @@ window.__ModuleLoader__.load({
         }
       };
       container.addEventListener('pointerdown', focus);
+      // Diagnosing a pane that will not let the terminal select: report what
+      // actually received the press when it was NOT the xterm screen itself.
+      // One line per mount, so a blocked drag leaves evidence in the Host log
+      // without flooding it. (Untrusted DOM names; informational only.)
+      let diagnosedPointer = false;
+      const reportPointerOverlays = (event) => {
+        if (diagnosedPointer) return;
+        const target = event.target;
+        if (target instanceof Element && target.closest('.xterm-screen')) return;
+        diagnosedPointer = true;
+        const chain = [];
+        for (let el = target; el && chain.length < 6; el = el.parentElement) {
+          chain.push(el.tagName.toLowerCase() + '.' + String(el.className || '').slice(0, 40));
+        }
+        try {
+          options.onPointerDiagnostics?.(chain);
+        } catch {
+          /* diagnostics must never break a keystroke */
+        }
+      };
+      container.addEventListener('pointerdown', reportPointerOverlays, true);
+      // A terminal's right-click offers Copy when text is selected; the browser
+      // menu on a canvas selection is no help at all.
+      const onContextMenu = (event) => {
+        if (!options.onContextMenu?.(event)) return;
+        event.preventDefault();
+      };
+      container.addEventListener('contextmenu', onContextMenu);
       focus();
       return {
         write(text) {
@@ -13149,10 +13188,29 @@ window.__ModuleLoader__.load({
         },
         focus,
         fit: doFit,
+        /** The text currently painted as a selection, or ''. */
+        getSelection() {
+          try {
+            return terminal.getSelection();
+          } catch {
+            return '';
+          }
+        },
+        /** Clear the painted selection (e.g. after copying). */
+        clearSelection() {
+          try {
+            terminal.clearSelection();
+          } catch {
+            /* already gone */
+          }
+        },
         dispose() {
           typed.dispose();
           sized.dispose();
+          selected.dispose();
           container.removeEventListener('pointerdown', focus);
+          container.removeEventListener('pointerdown', reportPointerOverlays, true);
+          container.removeEventListener('contextmenu', onContextMenu);
           if (observer !== undefined) observer.disconnect();
           try {
             terminal.dispose();
@@ -13305,6 +13363,9 @@ window.__ModuleLoader__.load({
       title: '串口终端',
       subtitle: 'Linkr Bee',
       clear: '清屏',
+      copy: '复制',
+      copied: '已复制',
+      copyNone: '未选中内容',
       statusLive: '实时',
       statusOffline: '离线',
       ttySize: '终端尺寸',
@@ -13343,6 +13404,9 @@ window.__ModuleLoader__.load({
       title: 'Serial monitor',
       subtitle: 'Linkr Bee',
       clear: 'Clear',
+      copy: 'Copy',
+      copied: 'Copied',
+      copyNone: 'Nothing selected',
       statusLive: 'Live',
       statusOffline: 'Offline',
       ttySize: 'Terminal size',
@@ -13841,10 +13905,51 @@ window.__ModuleLoader__.load({
       const termStateRef = useRef('loading');
       const themeSignature = useRef('');
       const [termError, setTermError] = useState('');
+      // Canvas text cannot be selected through window.getSelection(); xterm
+      // paints its own selection layer, so the panel keeps the selected text
+      // itself and offers a visible Copy affordance.
+      const [selectionText, setSelectionText] = useState('');
+      const [copied, setCopied] = useState(false);
+      const copiedTimer = useRef(null);
       const [settled, setSettled] = useState(false);
       const [known, setKnown] = useState(false);
       const lastSize = useRef('');
       const resizeTimer = useRef(null);
+
+      /** Put the painted selection on the system clipboard. */
+      const copySelection = useCallback(() => {
+        const text = (termApi.current?.getSelection?.() || selectionText || '').trim();
+        if (!text) return;
+        const done = () => {
+          setCopied(true);
+          if (copiedTimer.current !== null) clearTimeout(copiedTimer.current);
+          copiedTimer.current = setTimeout(() => setCopied(false), 1500);
+        };
+        const fallback = () => {
+          // Clipboard API needs a secure context; a hidden textarea still works
+          // on the local Harness web server.
+          const area = document.createElement('textarea');
+          area.value = text;
+          area.setAttribute('readonly', '');
+          area.style.position = 'fixed';
+          area.style.opacity = '0';
+          document.body.appendChild(area);
+          area.select();
+          let ok = false;
+          try {
+            ok = document.execCommand('copy');
+          } catch {
+            /* no clipboard permission */
+          }
+          area.remove();
+          if (ok) done();
+        };
+        if (navigator.clipboard?.writeText) {
+          navigator.clipboard.writeText(text).then(done, fallback);
+        } else {
+          fallback();
+        }
+      }, [selectionText]);
 
       /** Empty the screen: the panel's clear button and the agent's "clear". */
       const clearScreen = useCallback(() => {
@@ -13895,6 +14000,16 @@ window.__ModuleLoader__.load({
               fontSize: 12.5,
               onData: (data) => postInput(data),
               onResize: postResize,
+              onSelectionChange: (text) => {
+                setSelectionText(text || '');
+                setCopied(false);
+              },
+              onPointerDiagnostics: (chain) => reportDiag({ where: 'pointer-overlay', chain }),
+              onContextMenu: () => {
+                if (!(termApi.current?.getSelection?.() || '').trim()) return false;
+                copySelection();
+                return true;
+              },
               theme,
             });
             themeSignature.current = JSON.stringify(theme);
@@ -14455,6 +14570,17 @@ window.__ModuleLoader__.load({
           h('span', { className: 'lb-sub', title: where }, where),
           h('span', { className: 'lb-spacer' }),
           tty !== null && h('span', { className: 'lb-tty', title: t('ttySize') }, `${tty.cols}\u00d7${tty.rows}`),
+          h(
+            'button',
+            {
+              className: 'lb-ghost',
+              onClick: copySelection,
+              disabled: !selectionText.trim(),
+              title: selectionText.trim() ? t('copy') : t('copyNone'),
+              'aria-label': t('copy'),
+            },
+            copied ? t('copied') : t('copy'),
+          ),
           h('button', { className: 'lb-ghost', onClick: clearAll }, t('clear')),
           h(
             'button',
@@ -14538,6 +14664,8 @@ window.__ModuleLoader__.load({
 .lb-ghost-icon { min-width: 28px; padding: 0; font-size: 13px; }
 .lb-ghost:hover { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); }
 .lb-ghost:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px; }
+.lb-ghost:disabled { color: var(--dsw-alias-label-tertiary); opacity: 0.55; cursor: default; }
+.lb-ghost:disabled:hover { background: transparent; color: var(--dsw-alias-label-tertiary); }
 .lb-ghost.on { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); }
 .lb-banner { display: flex; align-items: center; gap: 8px; padding: 4px 8px 4px 12px; border-bottom: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1); flex: 0 0 auto; font-size: 12px; color: var(--dsw-alias-label-secondary); }
 .lb-banner-error { color: var(--dsw-alias-state-error-primary); }
