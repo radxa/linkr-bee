@@ -6,10 +6,11 @@ or against a loopback simulator. It is the program the
 [`dsh-linkr-bee`](https://github.com/radxa/linkr-bee/tree/main/linkr-bee-dsh)
 DeepSeek Harness plugin shells out to — and it is useful on its own.
 
-This npm package carries no binary. On first use it downloads the release asset
-built for your platform by the project's Rust release workflow, verifies it
-against the release's `SHA256SUMS`, and caches it, so `npx` and a global install
-both end up running the same compiled program.
+This npm package carries no binary and runs no install script. On first use it
+downloads the release asset built for your platform by the project's Rust
+release workflow, verifies it against the release's `SHA256SUMS`, and caches it,
+so `npx`, a global install and a package manager that refuses build scripts all
+end up running the same compiled program.
 
 ## Use
 
@@ -52,7 +53,6 @@ a guess: nothing is executed that the release did not sign for.
 | `BEE_CLI_REPO` | GitHub `owner/name` to download from (default `radxa/linkr-bee`) |
 | `BEE_CLI_CACHE_DIR` | Cache root (default `$XDG_CACHE_HOME/bee-cli`) |
 | `BEE_CLI_SHA256` | Pin the expected checksum instead of reading `SHA256SUMS` |
-| `BEE_CLI_SKIP_DOWNLOAD=1` | Do not warm the cache during `npm install` |
 
 ### Platforms
 

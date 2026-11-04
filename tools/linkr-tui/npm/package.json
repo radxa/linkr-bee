@@ -1,6 +1,6 @@
 {
   "name": "linkr-bee-cli",
-  "version": "1.1.2",
+  "version": "1.1.3",
   "description": "Linkr Bee wireless serial bridge: the command-line client (bee-cli) for talking to a board's UART console over Bluetooth LE, LAN or loopback.",
   "keywords": [
     "bee-cli",
@@ -36,10 +36,6 @@
   ],
   "engines": {
     "node": ">=18"
-  },
-  "scripts": {
-    "postinstall": "node ./lib/install.js",
-    "test": "node --test ./test/*.test.mjs"
   },
   "publishConfig": {
     "access": "public"

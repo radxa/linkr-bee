@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.1.3
+
+- **One-step install.** The plugin now depends on `linkr-bee-cli`, so
+  `dsh plugin add dsh-linkr-bee` also brings the client: the panel and the tools
+  resolve `cliPath` → `$LINKR_BEE_CLI` → the launcher installed beside the
+  plugin → `bee-cli` on `PATH`, and the launcher downloads and verifies the
+  platform binary on first use. A `cliPath` you set yourself still wins. The
+  TUI (`linkr-tui`) stays a separate download — the plugin only needs the CLI.
+- `linkr-bee-cli` 1.1.3 runs **no install script** (nothing for a package
+  manager that refuses build scripts to block); the first call fetches the
+  binary instead.
+
 ## 1.1.2
 
 The console is now something an agent can operate, not just watch. Versions

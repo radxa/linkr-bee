@@ -24,10 +24,9 @@ export const name = 'linkr-bee';
 export const inject = ['tools', 'webServer'];
 
 const BUILD_HINT =
-  'bee-cli was not found. This plugin drives the board through the Linkr Bee command-line client: ' +
-  'build it from https://github.com/radxa/linkr-bee (cd cliproxy-import/tools/linkr-tui && ' +
-  'cargo build --release --no-default-features --features cli && cp target/release/bee target/release/bee-cli), ' +
-  'then set this plugin\'s cliPath to that binary — or put bee-cli on PATH, or set LINKR_BEE_CLI.';
+  'bee-cli was not found. Install the Linkr Bee client — `npm install -g linkr-bee-cli`, which fetches ' +
+  'the binary for this platform and verifies it — or point this plugin\'s cliPath at a bee-cli you built ' +
+  'yourself, or set LINKR_BEE_CLI, or put bee-cli on PATH.';
 
 /** What a bee-cli too old for the streaming session needs to hear. */
 const OLD_CLI_HINT =
@@ -64,15 +63,29 @@ function killStrayChildren() {
   liveChildren.clear();
 }
 
-/** First existing candidate wins; a bare name is handed to spawn's PATH lookup. */
+/**
+ * What to run, and how, to talk to the board. First win:
+ *
+ * 1. `cliPath` — the binary the person picked in ⚙;
+ * 2. `$LINKR_BEE_CLI` — a shell's own choice;
+ * 3. the `linkr-bee-cli` npm launcher this plugin depends on: it downloads the
+ *    platform binary on first use, checks it against the release's SHA256SUMS
+ *    and caches it, so installing the plugin is the whole install;
+ * 4. `bee-cli` on `PATH` — where a binary someone built themselves ends up.
+ */
 function resolveCli(config) {
-  const candidates = [];
-  if (config?.cliPath) candidates.push(config.cliPath);
-  if (process.env.LINKR_BEE_CLI) candidates.push(process.env.LINKR_BEE_CLI);
-  for (const candidate of candidates) {
-    if (candidate && existsSync(candidate)) return candidate;
+  for (const candidate of [config?.cliPath, process.env.LINKR_BEE_CLI]) {
+    if (candidate && existsSync(candidate)) return { command: candidate, args: [] };
   }
-  return 'bee-cli';
+  // A launcher is JavaScript: it forwards its arguments and stdio to the real
+  // binary, so the session speaks to the same pipes either way.
+  try {
+    const launcher = require.resolve('linkr-bee-cli/bin/bee-cli.js');
+    return { command: process.execPath, args: [launcher] };
+  } catch {
+    /* not installed beside the plugin: fall through to the PATH lookup */
+  }
+  return { command: 'bee-cli', args: [] };
 }
 
 function connectionArgs(config) {
@@ -121,7 +134,7 @@ function runBee(config, args, { stdinText, keepStdinOpenMs, signal, onEvent } = 
     const cli = resolveCli(config);
     const env = { ...process.env };
     if (config?.lanToken) env.LINKR_LAN_TOKEN = config.lanToken;
-    const child = trackChild(spawn(cli, args, { stdio: ['pipe', 'pipe', 'pipe'], env }));
+    const child = trackChild(spawn(cli.command, [...cli.args, ...args], { stdio: ['pipe', 'pipe', 'pipe'], env }));
 
     let stdout = '';
     let stderr = '';
@@ -721,7 +734,9 @@ async function ensureSession(config) {
     const cli = resolveCli(config);
     const env = { ...process.env };
     if (config?.lanToken) env.LINKR_LAN_TOKEN = config.lanToken;
-    const child = trackChild(spawn(cli, [...dial, '--json', '--serve'], { stdio: ['pipe', 'pipe', 'pipe'], env }));
+    const child = trackChild(
+      spawn(cli.command, [...cli.args, ...dial, '--json', '--serve'], { stdio: ['pipe', 'pipe', 'pipe'], env }),
+    );
     let timer;
     const ready = await new Promise((resolve, reject) => {
       // Every failure below leaves no process behind: a session that could not
