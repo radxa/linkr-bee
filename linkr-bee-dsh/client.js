@@ -13776,7 +13776,14 @@ window.__ModuleLoader__.load({
       return h(
         'div',
         { className: 'lb-uart' },
-        h('div', { className: 'lb-uart-title' }, t('uartTitle')),
+        h(
+          'div',
+          { className: 'lb-uart-head' },
+          h('span', { className: 'lb-uart-title' }, t('uartTitle')),
+          h('span', { className: 'lb-uart-state' }, notice || (known ? spec : t('uartUnknown'))),
+          h('button', { className: 'lb-btn-ghost lb-uart-btn', onClick: read, disabled: busy }, t('uartRead')),
+          h('button', { className: 'lb-btn lb-uart-btn', onClick: apply, disabled: busy }, busy ? t('uartApplying') : t('uartApply')),
+        ),
         h(
           'div',
           { className: 'lb-uart-grid' },
@@ -13805,13 +13812,6 @@ window.__ModuleLoader__.load({
             select(stopBits, setStopBits, [{ value: '1', label: '1' }, { value: '2', label: '2' }], busy)),
           h('label', { className: 'lb-field' }, h('span', { className: 'lb-field-label' }, t('uartFlow')),
             select(flow, setFlow, [{ value: 'none', label: 'None' }, { value: 'rtscts', label: 'RTS/CTS' }], busy)),
-        ),
-        h(
-          'div',
-          { className: 'lb-uart-foot' },
-          h('span', { className: 'lb-note' }, notice || (known ? spec : t('uartUnknown'))),
-          h('button', { className: 'lb-btn-ghost', onClick: read, disabled: busy }, t('uartRead')),
-          h('button', { className: 'lb-btn', onClick: apply, disabled: busy }, busy ? t('uartApplying') : t('uartApply')),
         ),
         customBaud &&
           h('button', { className: 'lb-ghost', onClick: () => { setCustomBaud(false); setBaud('115200'); } }, t('uartCustom') + ' ↩'),
@@ -14925,14 +14925,15 @@ window.__ModuleLoader__.load({
 .lb-btn-ghost { background: transparent; border: 1px solid var(--dsw-alias-border-l2); color: var(--dsw-alias-label-primary); border-radius: 7px; padding: 6px 10px; font-size: 12.5px; cursor: pointer; flex: 0 0 auto; }
 .lb-btn-ghost:hover { border-color: var(--dsw-alias-brand-primary); }
 .lb-btn-ghost:disabled { opacity: 0.55; cursor: default; }
-.lb-uart { padding: 2px 0 4px; display: flex; flex-direction: column; gap: 8px; }
-.lb-uart-title { font-size: 12px; font-weight: 600; color: var(--dsw-alias-label-secondary); }
-.lb-uart-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-.lb-uart-grid .lb-field { min-width: 0; }
-.lb-uart-select { flex: 0 0 auto; width: 100%; min-height: 36px; height: 36px; box-sizing: border-box; padding: 6px 9px; font-size: 12.5px; }
-.lb-uart-foot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.lb-uart-foot button { min-height: 28px; }
-.lb-uart-foot .lb-note { flex: 1 1 auto; min-width: 0; }
+.lb-uart { padding: 2px 0 2px; display: flex; flex-direction: column; gap: 6px; }
+.lb-uart-head { display: flex; align-items: center; gap: 6px; min-height: 28px; }
+.lb-uart-title { font-size: 12px; font-weight: 600; color: var(--dsw-alias-label-secondary); flex: 0 0 auto; }
+.lb-uart-state { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--dsw-alias-label-secondary); }
+.lb-uart-btn { flex: 0 0 auto; min-height: 28px; }
+.lb-uart-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; }
+.lb-uart-grid .lb-field { min-width: 0; gap: 2px; }
+.lb-uart-grid .lb-field-label { font-size: 10.5px; line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lb-uart-select { flex: 0 0 auto; width: 100%; min-height: 36px; height: 36px; box-sizing: border-box; padding: 4px 8px; font-size: 12.5px; }
 .lb-settings-foot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .lb-settings-foot .lb-note { flex: 1 1 140px; }
 `;

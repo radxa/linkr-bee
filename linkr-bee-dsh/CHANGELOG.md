@@ -21,6 +21,11 @@
 - Diagnostics: the terminal reports, once per mount, the element chain that
   receives a pointerdown when it is not the xterm screen — evidence for a
   pane overlay that swallows drag selection in some environments.
+- UART card compacted: the settings card was ~241px tall (a 2-column grid of
+  tall controls plus a separate button row). The five fields now sit in one
+  row, with the Read/Apply buttons and the current spec sharing the title row,
+  smaller labels and tighter spacing. Measured 90px tall, with every control
+  still at the 36px touch-target floor and no text overflow.
 - UART panel alignment: the five UART selects inherited `.lb-mode`'s
   `flex: 0 0 84px`, which stretched them to 84px (much taller than the other
   settings controls). They now use a 2-column grid with the same 36px height,
