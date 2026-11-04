@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.2.0
+
+The console is now something an agent can operate, not just watch.
+
+- **`linkr_bee_console` tool**: `open`, `focus`, `clear`, `type`, `key` (enter,
+  tab, arrows, ctrl-c/d/z/l, …), `read`, `state`, `resize`. The agent opens the
+  pane in the right column, types into the shell the person is looking at, and
+  reads back what the board said — one link, one console.
+- **`POST /linkr-bee/exec` + `GET /linkr-bee/console/read`**: the tool, the route
+  and the panel's own command line share one code path and one console, so an
+  agent's command is visible in the pane and its output is readable afterwards.
+  The Host keeps the last 64 KiB of console text, readable from a byte cursor.
+- **`GET /linkr-bee/panel/stream` + `POST /linkr-bee/panel`**: a control channel
+  separate from the terminal's byte stream, so a plugin-lifetime listener can
+  open the pane while it is closed.
+- **Panel polish**: header shows the link (`ble · board` / `lan` / `loopback` /
+  `offline`, neutral while it settles) and the live tty size; a one-line
+  reconnect banner with a *Reconnect* action that reports why it failed; an
+  empty state instead of a blank screen; the last screen comes back after a tab
+  remount or a page reload, and a *Clear* stays cleared.
+- Fixes carried in this cut: a dead `bee-cli --serve` session is dropped and a
+  keystroke across that moment is retried (1.1.1); the terminal refits on any
+  layout change, including a right-column drag (1.1.2).
+
 ## 1.1.2
 
 - Layout: the terminal follows its box whatever moved it. Beside the pane's

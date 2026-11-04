@@ -13288,7 +13288,18 @@ window.__ModuleLoader__.load({
     const SCAN_URL = '/linkr-bee/scan';
     const WATCH_URL = '/linkr-bee/watch';
     const RESIZE_URL = '/linkr-bee/resize';
+    // The Host's own record of what the target said (a 64 KiB ring). Unlike
+    // the event journal, this is emptied when the panel is cleared, so it is
+    // the only honest source for putting a screen back.
+    const READ_URL = '/linkr-bee/console/read';
+    // The other direction of the panel channel: a clear this page asks for.
+    const PANEL_ACTION_URL = '/linkr-bee/panel';
+    // Control, not content: the agent's open/focus/clear ride a channel of
+    // their own so they can never be drawn into the terminal as board bytes.
+    const PANEL_URL = '/linkr-bee/panel/stream';
     const MAX_LINES = 2000;
+    /** How much of the screen a remount may put back (bytes of terminal text). */
+    const SCREEN_KEEP = 96 * 1024;
 
     const zh = {
       title: '串口终端',
@@ -13296,7 +13307,15 @@ window.__ModuleLoader__.load({
       clear: '清屏',
       statusLive: '实时',
       statusOffline: '离线',
-      hint: 'Agent 的工具调用与这里的输入走同一条串口链路。',
+      ttySize: '终端尺寸',
+      empty: '等待串口输出…',
+      connecting: '连接中…',
+      linkLost: '与开发板的连接已断开',
+      reconnecting: '正在重连…',
+      reconnect: '重连',
+      reconnectFailed: '重连失败：',
+      terminalFailed: '终端组件未启动',
+      inputHint: '终端会话反复失败：点 ⚙ 确认 bee-cli 路径，或重新打开面板',
       guide: '通过 Linkr Bee 桥接器直连目标板的串口控制台',
       settings: '连接设置',
       transport: '传输方式',
@@ -13326,7 +13345,15 @@ window.__ModuleLoader__.load({
       clear: 'Clear',
       statusLive: 'Live',
       statusOffline: 'Offline',
-      hint: 'Agent tool calls and this input share one serial link.',
+      ttySize: 'Terminal size',
+      empty: 'Waiting for serial output…',
+      connecting: 'Connecting…',
+      linkLost: 'The board link dropped',
+      reconnecting: 'Reconnecting…',
+      reconnect: 'Reconnect',
+      reconnectFailed: 'Reconnect failed: ',
+      terminalFailed: 'Terminal did not start',
+      inputHint: 'The console keeps failing: check the bee-cli path in ⚙, or reopen the panel',
       guide: 'Serial console for the board behind the Linkr Bee bridge',
       settings: 'Connection',
       transport: 'Transport',
@@ -13702,28 +13729,156 @@ window.__ModuleLoader__.load({
       );
     }
 
-    function linkLabel(link, t) {
-      if (!link || (!link.target && !link.connected)) return t('subtitle');
-      return link.transport + (link.target ? ' \u00b7 ' + link.target : '');
+    /**
+     * The header's link line: what the console is attached to, or the one word
+     * that says it is not attached at all. `session` is the resident session the
+     * panel asked for, which is live while the one-shot `link` snapshot is not.
+     */
+    function linkLabel(link, session, t, known) {
+      // Before the panel has asked the Host for the console, "offline" would be
+      // a guess — and a healthy panel must never flash it at mount.
+      if (!known) return t('connecting');
+      const attached = Boolean(link && link.connected) || Boolean(session && (session.active || session.streaming));
+      if (!attached) return t('statusOffline');
+      const transport = (link && link.transport) || 'ble';
+      const target = (link && link.target) || '';
+      // "loopback · loopback" says nothing; a named board is worth both halves.
+      return target === '' || target === transport ? transport : transport + ' \u00b7 ' + target;
     }
+
+    /* ---------------- what the panel remembers between mounts ---------------- */
+
+    /*
+     * A right-column tab is unmounted when the user switches to another one, so
+     * the xterm instance — and with it the screen — is gone when the tab comes
+     * back. The Host replays its 400-record console journal on every stream, but
+     * that is a journal of *events*: replaying it after the user cleared the
+     * screen would put the cleared output back. So the panel keeps its own
+     * memory of what it drew and how far into the console that was: a remount
+     * re-seeds the screen from it, and records at or before that moment are
+     * already on screen and are not drawn twice.
+     */
+    const screen = { text: '', at: 0, conn: '', drew: false };
+
+    /** Keep the tail of the text drawn so far, and the time of its last record. */
+    function rememberScreen(text, at) {
+      if (!text) return;
+      screen.drew = true;
+      screen.text += text;
+      if (screen.text.length > SCREEN_KEEP) {
+        // Cut on a line boundary: half an escape sequence would garble the
+        // restored screen, and the oldest line is the one worth losing.
+        const cut = screen.text.indexOf('\n', screen.text.length - SCREEN_KEEP);
+        screen.text = screen.text.slice(cut < 0 ? screen.text.length - SCREEN_KEEP : cut + 1);
+      }
+      if (at > screen.at) screen.at = at;
+    }
+
+    /** Forget the screen, but not the console position: a clear is not a replay. */
+    function forgetScreen(at) {
+      screen.text = '';
+      if (at > screen.at) screen.at = at;
+    }
+
+    /** The tail of `text` that fits a fresh terminal, cut on a line break. */
+    function seedText(text) {
+      if (text.length <= SCREEN_KEEP) return text;
+      const cut = text.indexOf('\n', text.length - SCREEN_KEEP);
+      return text.slice(cut < 0 ? text.length - SCREEN_KEEP : cut + 1);
+    }
+
+    /** One console record as the bytes the terminal draws, live or replayed. */
+    function consoleText(event) {
+      if (event.type === 'cmd' || event.type === 'user') return `\u001b[36m$ ${event.text}\u001b[0m\r\n`;
+      if (event.type === 'meta') return `\u001b[33m${String(event.text)}\u001b[0m\r\n`;
+      if (event.type === 'stream' || event.type === 'output') return String(event.text || '');
+      return '';
+    }
+
+    /**
+     * The Host's own notices about the link ("（与开发板的连接已断开，正在重连…）").
+     * They are a state, not console output: the panel turns them into the one
+     * compact banner above the terminal instead of printing the sentence too.
+     */
+    function linkNotice(text) {
+      const line = String(text);
+      if (/正在重连/.test(line)) return 'reconnecting';
+      if (/连接已断开|自动重连已放弃/.test(line)) return 'lost';
+      return '';
+    }
+
+    /**
+     * The mounted panel's own controls, published for the plugin-level control
+     * channel: "focus" and "clear" can only act on a panel that is on screen.
+     */
+    const panelActions = { focus: null, clear: null };
 
     function Terminal({ t }) {
       const [live, setLive] = useState(false);
+      const [everLive, setEverLive] = useState(false);
       const [lines, setLines] = useState([]);
       const [settingsOpen, setSettingsOpen] = useState(false);
       const [link, setLink] = useState(null);
+      const [session, setSession] = useState(null);
+      const [tty, setTty] = useState(null);
+      const [conn, setConn] = useState(screen.conn);
+      const [drew, setDrew] = useState(screen.drew);
+      const [reconnectBusy, setReconnectBusy] = useState(false);
+      const [reconnectError, setReconnectError] = useState('');
       const scrollRef = useRef(null);
       const atBottomRef = useRef(true);
       const linesRef = useRef([]);
       const dirtyRef = useRef(false);
       const streamBuf = useRef('');
       const streamAt = useRef(0);
+      const lastTs = useRef(screen.at);
       const termHost = useRef(null);
       const termApi = useRef(null);
       const termQueue = useRef([]);
       const [termState, setTermState] = useState('loading');
+      // The same value in a ref: a callback created on the first render must
+      // still know whether the terminal came up, not what it was then.
+      const termStateRef = useRef('loading');
       const themeSignature = useRef('');
       const [termError, setTermError] = useState('');
+      const [settled, setSettled] = useState(false);
+      const [known, setKnown] = useState(false);
+      const lastSize = useRef('');
+      const resizeTimer = useRef(null);
+
+      /** Empty the screen: the panel's clear button and the agent's "clear". */
+      const clearScreen = useCallback(() => {
+        try {
+          termApi.current?.clear();
+        } catch {
+          /* a terminal that never started has nothing to clear */
+        }
+        linesRef.current = [];
+        streamBuf.current = '';
+        dirtyRef.current = true;
+        // Everything drawn so far is gone on purpose: a remount must not put it
+        // back, so the console position moves past what is already known.
+        forgetScreen(lastTs.current);
+      }, []);
+
+      /**
+       * The clear button: the pane and the Host's ring go together. A clear
+       * that only the page knew about would come back with the next reload,
+       * because the ring is what a fresh panel starts from.
+       */
+      const clearAll = useCallback(() => {
+        clearScreen();
+        try {
+          fetch(PANEL_ACTION_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'clear' }),
+            keepalive: true,
+          }).catch(() => {});
+        } catch {
+          /* the panel can outlive the route during a plugin restart */
+        }
+      }, [clearScreen]);
 
       // A real terminal for the console: xterm.js is inlined in this bundle
       // because the shell's shared module table has no terminal library. The
@@ -13746,6 +13901,7 @@ window.__ModuleLoader__.load({
             termApi.current = api;
             for (const text of termQueue.current) api.write(text);
             termQueue.current = [];
+            termStateRef.current = 'ready';
             setTermState('ready');
             stopWatching = watchSize(host, api);
             reportDiag({ where: 'terminal', state: 'ready' });
@@ -13755,6 +13911,7 @@ window.__ModuleLoader__.load({
           console.error('[linkr-bee] terminal failed to start', error);
           if (alive) {
             setTermError(String((error && error.message) || error));
+            termStateRef.current = 'failed';
             setTermState('failed');
             reportDiag({ where: 'terminal', state: 'failed', error: String((error && error.stack) || error).slice(0, 800) });
           }
@@ -13762,10 +13919,32 @@ window.__ModuleLoader__.load({
         return () => {
           alive = false;
           if (stopWatching !== null) stopWatching();
+          if (resizeTimer.current !== null) clearTimeout(resizeTimer.current);
+          resizeTimer.current = null;
           if (termApi.current !== null) termApi.current.dispose();
           termApi.current = null;
         };
       }, []);
+
+      // While this panel is on screen the plugin-level control channel can
+      // reach it: "focus" puts the caret in the console, "clear" empties it.
+      // Unmounting withdraws both, so a closed panel can never be driven.
+      useEffect(() => {
+        const focus = () => {
+          try {
+            termApi.current?.focus();
+          } catch {
+            /* a disposed terminal has nothing to focus */
+          }
+        };
+        const clear = () => clearScreen();
+        panelActions.focus = focus;
+        panelActions.clear = clear;
+        return () => {
+          if (panelActions.focus === focus) panelActions.focus = null;
+          if (panelActions.clear === clear) panelActions.clear = null;
+        };
+      }, [clearScreen]);
 
       // Light/dark follows the Harness: the shell stamps the theme on <html>
       // and swaps the tokens, so watch both that stamp and the OS preference
@@ -13801,42 +13980,101 @@ window.__ModuleLoader__.load({
         };
       }, [termState]);
 
-      const refreshLink = useCallback(() => {
-        fetch(CONFIG_URL)
-          .then((response) => response.json())
-          .then((payload) => setLink((payload && payload.link) || null))
-          .catch(() => {});
-      }, []);
+      /**
+       * The header's facts: which link the console is on and whether the
+       * resident session is up. Both live on the Host, so they are read rather
+       * than guessed (the link snapshot is refreshed by every one-shot dial,
+       * including the agent's own tool calls).
+       */
+      const refreshLink = useCallback(
+        () =>
+          fetch(CONFIG_URL)
+            .then((response) => response.json())
+            .then((payload) => {
+              const next = (payload && payload.session) || null;
+              setLink((payload && payload.link) || null);
+              setSession(next);
+              // A session that is up and watching means the link is back: the
+              // banner's reason is gone even if the board prints nothing.
+              if (next !== null && next.active && next.watching && screen.conn !== '') {
+                screen.conn = '';
+                setConn('');
+              }
+            })
+            .catch(() => {}),
+        [],
+      );
 
       useEffect(() => {
         refreshLink();
         reportDiag({ where: 'panel', state: 'mounted' });
+        // The resident session comes up a beat after the panel asks for it, so
+        // the header is also refreshed just after that, then slowly: the agent
+        // can dial, the watchdog can redial, and neither tells the page.
+        const early = setTimeout(refreshLink, 2500);
+        const settle = setTimeout(() => setSettled(true), 5000);
+        const poll = setInterval(refreshLink, 15000);
+        return () => {
+          clearTimeout(early);
+          clearTimeout(settle);
+          clearInterval(poll);
+        };
       }, [refreshLink]);
+
+      /**
+       * Ask the Host to hold the console open (or to let it go). Resolves when
+       * it answered and rejects with the Host's own reason when it refused —
+       * the panel shows that reason rather than retrying blind.
+       */
+      const askWatch = useCallback(async (on) => {
+        const response = await fetch(WATCH_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ on }),
+          keepalive: true,
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok || payload.ok === false) {
+          throw new Error((payload && payload.error) || `HTTP ${response.status}`);
+        }
+        return payload;
+      }, []);
 
       // While this panel is on screen it asks the Host for the live console:
       // the resident session holds the link and streams the target's own bytes,
       // so output appears without anyone typing a command.
       useEffect(() => {
-        const ask = (on) => {
-          try {
-            fetch(WATCH_URL, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ on }),
-              keepalive: true,
-            }).catch(() => {});
-          } catch {
-            /* the panel can outlive the route during a plugin restart */
-          }
+        let alive = true;
+        askWatch(true)
+          .catch((error) => {
+            if (!alive) return;
+            const why = String((error && error.message) || error);
+            setReconnectError(why);
+            reportDiag({ where: 'watch', ok: false, error: why.slice(0, 200) });
+          })
+          .finally(() => {
+            if (!alive) return;
+            // Only now is "offline" a fact rather than a guess.
+            refreshLink().then(() => setKnown(true));
+          });
+        return () => {
+          alive = false;
+          askWatch(false).catch(() => {});
         };
-        ask(true);
-        return () => ask(false);
-      }, []);
+      }, [askWatch, refreshLink]);
 
       const commit = useCallback((next) => {
         linesRef.current = next.slice(-MAX_LINES);
         dirtyRef.current = true;
       }, []);
+
+      // A reconnect the Host heals by itself prints nothing, so the drop notice
+      // is followed up once instead of leaving the banner up until the poll.
+      useEffect(() => {
+        if (conn === '') return undefined;
+        const timer = setTimeout(refreshLink, 4000);
+        return () => clearTimeout(timer);
+      }, [conn, refreshLink]);
 
       useEffect(() => {
         const timer = setInterval(() => {
@@ -13864,19 +14102,19 @@ window.__ModuleLoader__.load({
         if (el && atBottomRef.current) el.scrollTop = el.scrollHeight;
       }, [lines]);
 
-      /** Hand text to the terminal; false means the line renderer must draw it. */
       /** Tell the target its console size; coalesced, and only when it changes. */
-      const lastSize = { current: '' };
-      let resizeTimer = null;
-      const postResize = (cols, rows) => {
+      const postResize = useCallback((cols, rows) => {
         if (!Number.isSafeInteger(cols) || !Number.isSafeInteger(rows)) return;
         if (cols < 2 || rows < 1) return;
         const key = `${cols}x${rows}`;
         if (lastSize.current === key) return;
         lastSize.current = key;
-        if (resizeTimer !== null) clearTimeout(resizeTimer);
-        resizeTimer = setTimeout(() => {
-          resizeTimer = null;
+        // The header shows the geometry the terminal actually took, not the one
+        // it asked for, so the two are updated from the same place.
+        setTty({ cols, rows });
+        if (resizeTimer.current !== null) clearTimeout(resizeTimer.current);
+        resizeTimer.current = setTimeout(() => {
+          resizeTimer.current = null;
           reportDiag({ where: 'resize', cols, rows });
           fetch(RESIZE_URL, {
             method: 'POST',
@@ -13884,14 +14122,15 @@ window.__ModuleLoader__.load({
             body: JSON.stringify({ cols, rows }),
           }).catch(() => {});
         }, 250);
-      };
+      }, []);
 
+      /** Hand text to the terminal; false means the line renderer must draw it. */
       const feedTerminal = (text) => {
         if (termApi.current !== null) {
           termApi.current.write(text);
           return true;
         }
-        if (termState === 'loading') {
+        if (termStateRef.current === 'loading') {
           termQueue.current.push(text);
           return true;
         }
@@ -13903,22 +14142,24 @@ window.__ModuleLoader__.load({
       const inputFailure = useRef({ text: '', at: 0, count: 0 });
       const rearmStream = useRef(0);
 
+      /** Write one notice: through the terminal, or as a line when it is absent. */
+      const writeNotice = (text, warn) => {
+        if (feedTerminal(`\u001b[${warn ? '33' : '31'}m${text}\u001b[0m\r\n`)) return;
+        const next = linesRef.current;
+        next.push({ kind: 'meta', segs: [{ t: text, k: warn ? 'c-warn' : 'c-err' }] });
+        commit(next);
+      };
+
       const reportInputFailure = (text) => {
         const now = Date.now();
         const last = inputFailure.current;
         if (text === last.text && now - last.at < 4000) {
           last.count += 1;
           last.at = now;
-          if (last.count === 3 && termApi.current !== null) {
-            termApi.current.write(
-              '\u001b[33m（终端会话反复失败：点 ⚙ 确认 bee-cli 路径，或重新打开面板）\u001b[0m\r\n',
-            );
-          }
+          if (last.count === 3) writeNotice(t('inputHint'), true);
         } else {
           inputFailure.current = { text, at: now, count: 1 };
-          if (termApi.current !== null) {
-            termApi.current.write(`\u001b[31m${text}\u001b[0m\r\n`);
-          }
+          writeNotice(text, false);
         }
         // Ask the Host to restart the resident session, at most every two
         // seconds: the next keystroke then lands on a live one.
@@ -13950,20 +14191,48 @@ window.__ModuleLoader__.load({
       }, []);
 
 
+      /**
+       * Draw one console record, live or replayed. The same bytes go to the
+       * xterm canvas and to the panel's memory of the screen, so a remount can
+       * put the screen back without depending on the Host's journal.
+       */
       const appendEvent = useCallback(
         (event) => {
+          // "（与开发板的连接已断开，正在重连…）" is a state, not output: the
+          // banner above the terminal says it once, and the sentence itself
+          // would be a second wall of text in the middle of the console.
+          if (event.type === 'meta') {
+            const notice = linkNotice(event.text);
+            if (notice) {
+              screen.conn = notice;
+              setConn(notice);
+              return;
+            }
+          }
+          const text = consoleText(event);
+          const at = Number(event.ts) || Date.now();
+          if (text !== '') {
+            rememberScreen(text, at);
+            if (event.type === 'stream' || event.type === 'output') {
+              // The target spoke: whatever the link said about itself is stale.
+              if (screen.conn !== '') {
+                screen.conn = '';
+                setConn('');
+              }
+            }
+            if (feedTerminal(text)) {
+              lastTs.current = at;
+              setDrew(true);
+              return;
+            }
+          }
+          // No terminal to draw into: the panel's own line renderer takes over.
           const next = linesRef.current;
-          if (event.type === 'cmd') {
-            if (feedTerminal(`\u001b[36m$ ${event.text}\u001b[0m\r\n`)) return;
-            next.push({ kind: 'cmd', segs: [{ t: `$ ${event.text}`, k: 'c-brand b' }] });
-          } else if (event.type === 'user') {
-            if (feedTerminal(`\u001b[36m$ ${event.text}\u001b[0m\r\n`)) return;
-            next.push({ kind: 'user', segs: [{ t: `$ ${event.text}`, k: 'c-pri b' }] });
+          if (event.type === 'cmd' || event.type === 'user') {
+            next.push({ kind: event.type, segs: [{ t: `$ ${event.text}`, k: 'c-brand b' }] });
           } else if (event.type === 'meta') {
-            if (feedTerminal(`\u001b[33m${String(event.text)}\u001b[0m\r\n`)) return;
             next.push({ kind: 'meta', segs: [{ t: String(event.text), k: 'c-warn' }] });
           } else if (event.type === 'stream') {
-            if (feedTerminal(String(event.text || ''))) return;
             streamAt.current = Date.now();
             const buffer = streamBuf.current + String(event.text || '');
             const cut = buffer.lastIndexOf('\n');
@@ -13978,40 +14247,201 @@ window.__ModuleLoader__.load({
             }
           } else if (event.type === 'output') {
             const raw = String(event.text || '');
-            if (feedTerminal(raw)) {
-              commit(next);
-              return;
-            }
-            const text = cleanExecText(raw);
+            const kept = cleanExecText(raw);
             const rcMatch = /LINKR_RC_[0-9a-f]{8,}:(-?\d+)/.exec(raw);
-            if (!text) {
-              if (rcMatch) {
-                next.push({ kind: 'meta', segs: [{ t: `(无输出，rc=${rcMatch[1]})`, k: 'c-sec' }] });
-              }
-              commit(next);
-              return;
+            if (!kept) {
+              if (rcMatch) next.push({ kind: 'meta', segs: [{ t: `(无输出，rc=${rcMatch[1]})`, k: 'c-sec' }] });
+            } else {
+              for (const segs of parseChunk(kept)) next.push({ kind: 'out', segs });
             }
-            for (const segs of parseChunk(text)) next.push({ kind: 'out', segs });
           }
+          lastTs.current = at;
           commit(next);
         },
         [commit],
       );
 
+      // The console stream, and with it the panel's memory of the screen. A
+      // remount seeds from that memory; a page that never drew anything seeds
+      // from the Host's console ring, and either way records the screen already
+      // holds are not drawn twice.
       useEffect(() => {
-        const source = new EventSource(STREAM_URL);
-        source.onopen = () => setLive(true);
-        source.onerror = () => setLive(false);
-        source.onmessage = (event) => {
-          try {
-            appendEvent(JSON.parse(event.data));
-          } catch {
-            /* ignore malformed frame */
-          }
+        let source = null;
+        let retry = null;
+        let closed = false;
+        let delay = 1000;
+        let since = screen.at;
+        let seeding = screen.text === '';
+        const buffered = [];
+
+        // 0 means "no timestamp": such a record is never treated as old.
+        const stamp = (record) => {
+          const ts = Number(record && record.ts);
+          return Number.isFinite(ts) && ts > 0 ? ts : 0;
         };
-        return () => source.close();
+
+        const draw = (record) => {
+          // The Host replays its journal on every stream; anything at or before
+          // the last record on screen is already there.
+          const at = stamp(record);
+          if (since > 0 && at > 0 && at <= since) return;
+          appendEvent(record);
+        };
+
+        const seedScreen = () => {
+          const text = seedText(screen.text);
+          if (text === '') return;
+          if (termApi.current !== null) {
+            termApi.current.write(text);
+          } else {
+            for (const segs of parseChunk(cleanStreamText(text))) linesRef.current.push({ kind: 'out', segs });
+          }
+          dirtyRef.current = true;
+          setDrew(true);
+        };
+
+        const detach = () => {
+          if (source === null) return;
+          source.onopen = null;
+          source.onmessage = null;
+          source.onerror = null;
+          try {
+            source.close();
+          } catch {
+            /* already gone */
+          }
+          source = null;
+        };
+
+        const schedule = () => {
+          if (closed || retry !== null) return;
+          retry = setTimeout(connect, delay);
+          delay = Math.min(delay * 2, 15000);
+        };
+
+        function connect() {
+          retry = null;
+          if (closed) return;
+          try {
+            source = new EventSource(STREAM_URL);
+          } catch {
+            schedule();
+            return;
+          }
+          source.onopen = () => {
+            delay = 1000;
+            setLive(true);
+            setEverLive(true);
+          };
+          source.onerror = () => {
+            setLive(false);
+            detach();
+            schedule();
+          };
+          source.onmessage = (message) => {
+            let record;
+            try {
+              record = JSON.parse(message.data);
+            } catch {
+              return;
+            }
+            if (record === null || typeof record !== 'object') return;
+            if (seeding) buffered.push(record);
+            else draw(record);
+          };
+        }
+
+        /**
+         * Ask the Host what the target said before this page existed. The ring,
+         * not the event journal: the journal still holds the text a panel clear
+         * removed, so replaying it would put back exactly what the agent asked
+         * to stop showing. The ring answers with the console itself.
+         */
+        const replayRing = () => {
+          if (!seeding) return Promise.resolve();
+          return fetch(READ_URL)
+            .then((response) => response.json())
+            .then((payload) => {
+              const text = typeof payload.text === 'string' ? payload.text : '';
+              // What the ring holds is what the console has; everything the
+              // stream still replays from before this moment is either that
+              // same text or something a clear removed.
+              const at = Date.now();
+              if (text !== '') {
+                rememberScreen(text, at);
+                lastTs.current = at;
+                seedScreen();
+              }
+              if (at > since) since = at;
+              if (payload.link) setLink(payload.link);
+              if (payload.session) setSession(payload.session);
+            })
+            .catch(() => {});
+        };
+
+        const finishSeeding = () => {
+          if (!seeding) return;
+          seeding = false;
+          for (const record of buffered.splice(0)) draw(record);
+        };
+
+        seedScreen();
+        connect();
+        if (seeding) {
+          // A read that never answers must not hold the live stream hostage.
+          const fallback = setTimeout(finishSeeding, 1500);
+          replayRing().then(() => {
+            clearTimeout(fallback);
+            finishSeeding();
+          });
+        }
+        return () => {
+          closed = true;
+          if (retry !== null) clearTimeout(retry);
+          detach();
+        };
       }, [appendEvent]);
 
+
+      /**
+       * Ask the Host for the console again. A failed watch is the one failure
+       * the panel can name precisely, so it says why instead of retrying blind.
+       */
+      const reconnect = useCallback(() => {
+        if (reconnectBusy) return;
+        setReconnectBusy(true);
+        setReconnectError('');
+        askWatch(true)
+          .then((payload) => {
+            screen.conn = '';
+            setConn('');
+            setKnown(true);
+            reportDiag({ where: 'reconnect', ok: true, mode: payload.mode });
+            return refreshLink();
+          })
+          .catch((error) => {
+            const why = String((error && error.message) || error);
+            setReconnectError(why);
+            reportDiag({ where: 'reconnect', ok: false, error: why.slice(0, 200) });
+          })
+          .finally(() => setReconnectBusy(false));
+      }, [askWatch, reconnectBusy, refreshLink]);
+
+      // What the header and the banner say. The dot is the one status glyph:
+      // green while the console is attached, amber while it is not, grey when
+      // even the panel's own stream is down. The banner appears only when
+      // something is wrong, and carries the way out.
+      const attached = Boolean(link && link.connected) || Boolean(session && (session.active || session.streaming));
+      const dot = !known ? '' : !live ? '' : conn !== '' || !attached ? ' warn' : ' on';
+      const dotState = !known ? t('connecting') : !live ? t('reconnecting') : attached ? t('statusLive') : t('statusOffline');
+      const where = linkLabel(link, session, t, known);
+      const banner = reconnectError
+        ? { text: t('reconnectFailed') + reconnectError, error: true }
+        : (!live && everLive) || conn === 'reconnecting'
+          ? { text: t('reconnecting') }
+          : conn === 'lost' || (settled && known && live && !attached && session !== null && session.streaming === false)
+            ? { text: t('linkLost') }
+            : null;
 
       return h(
         'div',
@@ -14020,26 +14450,16 @@ window.__ModuleLoader__.load({
         h(
           'div',
           { className: 'lb-head' },
-          h('span', { className: 'lb-dot' + (live ? ' on' : '') }),
+          h('span', { className: 'lb-dot' + dot, title: dotState, role: 'img', 'aria-label': dotState }),
           h('span', { className: 'lb-title' }, t('title')),
-          h('span', { className: 'lb-sub' }, linkLabel(link, t)),
+          h('span', { className: 'lb-sub', title: where }, where),
           h('span', { className: 'lb-spacer' }),
-          h('span', { className: 'lb-state' }, live ? t('statusLive') : t('statusOffline')),
+          tty !== null && h('span', { className: 'lb-tty', title: t('ttySize') }, `${tty.cols}\u00d7${tty.rows}`),
+          h('button', { className: 'lb-ghost', onClick: clearAll }, t('clear')),
           h(
             'button',
             {
-              className: 'lb-ghost',
-              onClick: () => {
-                termApi.current?.clear();
-                commit([]);
-              },
-            },
-            t('clear'),
-          ),
-          h(
-            'button',
-            {
-              className: 'lb-ghost' + (settingsOpen ? ' on' : ''),
+              className: 'lb-ghost lb-ghost-icon' + (settingsOpen ? ' on' : ''),
               title: t('settings'),
               'aria-label': t('settings'),
               'aria-expanded': settingsOpen ? 'true' : 'false',
@@ -14048,6 +14468,17 @@ window.__ModuleLoader__.load({
             '\u2699',
           ),
         ),
+        banner !== null &&
+          h(
+            'div',
+            { className: 'lb-banner' + (banner.error ? ' lb-banner-error' : ''), role: 'status' },
+            h('span', { className: 'lb-banner-text', title: banner.text }, banner.text),
+            h(
+              'button',
+              { className: 'lb-btn-ghost lb-reconnect', onClick: reconnect, disabled: reconnectBusy },
+              reconnectBusy ? t('reconnecting') : t('reconnect'),
+            ),
+          ),
         settingsOpen &&
           h(ConnectionSettings, {
             t,
@@ -14069,8 +14500,11 @@ window.__ModuleLoader__.load({
             },
           },
           h('div', { className: 'lb-term', ref: termHost }),
+          // Before the first byte: one dim line, no invented prompt and no
+          // fake output — an empty terminal is allowed to look empty.
+          termState === 'ready' && !drew && h('div', { className: 'lb-empty' }, t('empty')),
           termState === 'failed' &&
-            h('div', { className: 'lb-line lb-term-error' }, `终端组件未启动：${termError || 'unknown error'}`),
+            h('div', { className: 'lb-line lb-term-error' }, `${t('terminalFailed')}: ${termError || 'unknown error'}`),
           termState !== 'ready' &&
             (lines.length
               ? lines.map((line, index) =>
@@ -14082,27 +14516,40 @@ window.__ModuleLoader__.load({
                       : '\u00a0',
                   ),
                 )
-              : h('div', { className: 'lb-line lb-placeholder' }, t('hint'))),
+              : !drew && h('div', { className: 'lb-line lb-placeholder' }, t('empty'))),
         ),
       );
     }
 
     const CSS = `
 .lb-col { width: 100%; height: 100%; display: flex; flex-direction: column; min-height: 0; background: var(--dsw-alias-bg-base); font-size: 13px; color: var(--dsw-alias-label-primary); }
-.lb-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--dsw-alias-border-l1); flex: 0 0 auto; }
-.lb-title { font-weight: 600; font-size: 13px; }
-.lb-sub { font-size: 11.5px; color: var(--dsw-alias-label-secondary); }
-.lb-state { font-size: 11.5px; color: var(--dsw-alias-label-secondary); }
-.lb-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dsw-alias-state-idle-primary); display: inline-block; }
+.lb-head { display: flex; align-items: center; gap: 8px; padding: 4px 8px 4px 12px; border-bottom: 1px solid var(--dsw-alias-border-l1); flex: 0 0 auto; min-height: 40px; box-sizing: border-box; }
+.lb-title { font-weight: 600; font-size: 13px; white-space: nowrap; flex: 0 0 auto; }
+.lb-sub { font-size: 11.5px; color: var(--dsw-alias-label-secondary); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lb-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dsw-alias-state-idle-primary); display: inline-block; flex: 0 0 auto; }
 .lb-dot.on { background: var(--dsw-alias-state-success-primary); }
-.lb-spacer { flex: 1; }
-.lb-ghost { background: transparent; border: none; color: var(--dsw-alias-label-secondary); font-size: 12px; padding: 2px 6px; border-radius: 6px; cursor: pointer; }
+.lb-dot.warn { background: var(--dsw-alias-state-warn-primary); }
+.lb-spacer { flex: 1 1 auto; min-width: 4px; }
+.lb-tty { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-secondary); border: 1px solid var(--dsw-alias-border-l1); border-radius: 999px; padding: 1px 8px; flex: 0 0 auto; }
+.lb-ghost { position: relative; display: inline-flex; align-items: center; justify-content: center; min-height: 28px; padding: 0 8px; background: transparent; border: none; color: var(--dsw-alias-label-secondary); font-size: 12px; border-radius: 7px; cursor: pointer; flex: 0 0 auto; }
+/* The shell's own strip controls are 28 px; the 36 px touch target is the hit
+   area, grown past the visible pill so the header keeps its row height. */
+.lb-ghost::after { content: ''; position: absolute; inset: -4px -2px; }
+.lb-ghost-icon { min-width: 28px; padding: 0; font-size: 13px; }
 .lb-ghost:hover { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); }
+.lb-ghost:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px; }
+.lb-ghost.on { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); }
+.lb-banner { display: flex; align-items: center; gap: 8px; padding: 4px 8px 4px 12px; border-bottom: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1); flex: 0 0 auto; font-size: 12px; color: var(--dsw-alias-label-secondary); }
+.lb-banner-error { color: var(--dsw-alias-state-error-primary); }
+.lb-banner-text { flex: 1 1 auto; min-width: 0; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; word-break: break-word; }
+.lb-reconnect { flex: 0 0 auto; min-height: 28px; padding: 0 10px; }
+.lb-reconnect::after { inset: -4px; }
 .lb-console { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 10px 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; line-height: 1.55; background: var(--dsw-alias-bg-base); }
 .lb-console-xterm { position: relative; overflow: hidden; padding: 0; }
 .lb-term { position: absolute; inset: 0; padding: 6px 4px 4px; }
 .lb-console-xterm .lb-term { display: block; }
 .lb-term .xterm .xterm-viewport { background: transparent !important; }
+.lb-empty { position: absolute; left: 12px; right: 12px; top: 30px; color: var(--dsw-alias-label-secondary); font-size: 12px; font-style: italic; pointer-events: none; }
 .lb-line { white-space: pre-wrap; word-break: break-all; min-height: 1.55em; }
 .lb-line-meta { font-style: italic; }
 .lb-term-error { color: var(--dsw-alias-state-error-primary); font-size: 11.5px; }
@@ -14121,7 +14568,6 @@ window.__ModuleLoader__.load({
 .lb-btn { background: var(--dsw-alias-brand-primary); border: 1px solid var(--dsw-alias-brand-primary); color: var(--dsw-alias-bg-base); border-radius: 7px; padding: 6px 12px; font-size: 12.5px; cursor: pointer; }
 .lb-btn:disabled { opacity: 0.55; cursor: default; }
 .lb-btn:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px; }
-.lb-ghost.on { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); }
 .lb-settings { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1); flex: 0 0 auto; }
 .lb-field { display: flex; flex-direction: column; gap: 4px; }
 .lb-field-label { color: var(--dsw-alias-label-secondary); font-size: 11.5px; }
@@ -14158,6 +14604,140 @@ window.__ModuleLoader__.load({
       const t = ctx.locale.bind(NS);
       reportDiag({ where: 'apply' });
 
+      // The right column's service, once it exists. Kept in a closure rather
+      // than in the component because the agent's "open" has to work while the
+      // panel is closed — a closed panel has no component to hear it.
+      let column = null;
+
+      /** Reveal the console panel: the tab if it is there, the column always. */
+      const openPanel = () => {
+        let opened = false;
+        let services = column?.sidebarRight ?? null;
+        if (services === null) {
+          // Before the right column's own apply has run: ask for the service
+          // directly, and treat "not there yet" as a plain no-op.
+          try {
+            services = ctx.get?.('sidebarRight') ?? null;
+          } catch {
+            services = null;
+          }
+        }
+        try {
+          // Opens the tab, focuses it if it is already open, and expands the
+          // column: content the user cannot see is not "opened".
+          services?.openTab?.(KIND);
+          opened = services !== null;
+        } catch (error) {
+          reportDiag({ where: 'panel-open', error: String((error && error.message) || error).slice(0, 200) });
+        }
+        try {
+          // Then tell the frame the panel is in its normal presentation, so the
+          // conversation makes room for it instead of it landing on top.
+          ctx.get?.('layout')?.openRightbar?.(true, false);
+        } catch (error) {
+          reportDiag({ where: 'panel-layout', error: String((error && error.message) || error).slice(0, 200) });
+        }
+        return opened;
+      };
+
+      /**
+       * One control event from the Host. "open" and "focus" reveal the panel
+       * (focusing what is not on screen scrolls nothing into view); "clear"
+       * only reaches a mounted panel.
+       */
+      const dispatchPanel = (action) => {
+        let acted = false;
+        if (action === 'open' || action === 'focus') {
+          acted = openPanel();
+          if (action === 'focus') panelActions.focus?.();
+        } else if (action === 'clear') {
+          if (panelActions.clear !== null) {
+            panelActions.clear();
+          } else {
+            // The Host emptied its ring while the panel was closed: the screen
+            // this page remembers is exactly what was cleared, so forget it —
+            // otherwise the next mount would put it back.
+            forgetScreen(Date.now());
+          }
+          acted = true;
+        }
+        reportDiag({ where: 'panel', action, acted });
+      };
+
+      // The control channel: one EventSource for the plugin's whole lifetime,
+      // not one per panel mount, so closing and reopening the tab cannot leak
+      // listeners. A route that is not there (an older Host) is retried with a
+      // backoff instead of hammering the page.
+      if (typeof EventSource === 'function') {
+        ctx.effect(() => {
+          let source = null;
+          let retry = null;
+          let closed = false;
+          let delay = 1500;
+
+          const detach = () => {
+            if (source === null) return;
+            source.onopen = null;
+            source.onmessage = null;
+            source.onerror = null;
+            try {
+              source.close();
+            } catch {
+              /* already gone */
+            }
+            source = null;
+          };
+
+          const schedule = () => {
+            if (closed || retry !== null) return;
+            retry = setTimeout(connect, delay);
+            delay = Math.min(Math.round(delay * 1.8), 15000);
+          };
+
+          function connect() {
+            retry = null;
+            if (closed) return;
+            let openedAt = 0;
+            try {
+              source = new EventSource(PANEL_URL);
+            } catch {
+              schedule();
+              return;
+            }
+            source.onopen = () => {
+              openedAt = Date.now();
+              delay = 1500;
+            };
+            source.onerror = () => {
+              detach();
+              schedule();
+            };
+            source.onmessage = (message) => {
+              let record;
+              try {
+                record = JSON.parse(message.data);
+              } catch {
+                return;
+              }
+              if (record === null || typeof record !== 'object' || record.type !== 'panel') return;
+              // The Host replays its small backlog so a panel that mounts late
+              // still hears it — but an action from before this page opened is
+              // history, not a command: honouring it would pop the panel open
+              // on a fresh load for a request the agent made long ago.
+              if (openedAt !== 0 && Number(record.at) > 0 && Number(record.at) < openedAt - 2000) return;
+              dispatchPanel(String(record.action || ''));
+            };
+          }
+
+          connect();
+          return () => {
+            closed = true;
+            if (retry !== null) clearTimeout(retry);
+            detach();
+          };
+        }, 'linkr-bee: panel channel');
+      }
+
       // The right column is a tab system owned by dsh-client-ui-sidebar-right.
       // A third-party panel joins it as a TAB TYPE. Registering straight into
       // `rightbar.session` instead is what killed the whole client boot: that
@@ -14170,6 +14750,12 @@ window.__ModuleLoader__.load({
       // ctx.inject() starts this half only once the right column exists; a shell
       // without one simply has no surface for the console.
       ctx.inject(['sidebarRightTabs', 'sidebarRight'], (right) => {
+        // The control channel's way in. Withdrawn with the services, so a
+        // disposed column can never be opened through a stale reference.
+        column = right;
+        right.effect(() => () => {
+          if (column === right) column = null;
+        }, 'linkr-bee: panel open path');
         right.effect(
           () =>
             right.sidebarRightTabs.register({

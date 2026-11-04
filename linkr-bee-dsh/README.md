@@ -9,9 +9,9 @@ on the target board — the person and the agent share one board and one link.
 
 | Part | What it does |
 | --- | --- |
-| **Serial console panel** | A real terminal (xterm.js) in the right column: click it and type, exactly like a local terminal. ANSI colour, cursor movement, `\r` progress and bracketed paste all work; dragging selects text and ⌘C/Ctrl+C copies it. It appears as a card next to *Workspace files* / *New terminal* on the start page, and as a tab in the right column. |
+| **Serial console panel** | A real terminal (xterm.js) in the right column: click it and type, exactly like a local terminal. ANSI colour, cursor movement, `\r` progress and bracketed paste all work; dragging selects text and ⌘C/Ctrl+C copies it. It appears as a card next to *Workspace files* / *New terminal* on the start page, and as a tab in the right column. The agent can open, focus and clear it (`POST /linkr-bee/panel`), and the tab puts its last screen back after a remount or a page reload. |
 | **Live link** | While the panel is open, one resident `bee-cli --serve` session holds the bridge and streams the target's own bytes (`watch`) — a boot log, a prompt, a service printing on its own — with no polling. The panel's size is sent with `resize`, so full-screen programs get the right tty. |
-| **Agent tools** | `linkr_bee_exec` (run a shell command on the target console and return its output and exit code), `linkr_bee_query` (bridge diagnostics, UART/WiFi/WebDAV/BLE-name/LAN settings, link state, doctor, scans), `linkr_bee_send` (deliver input and capture the reply window), `linkr_bee_set` (change bridge settings over the BLE management channel). |
+| **Agent tools** | `linkr_bee_console` (drive this console: `open`, `focus`, `clear`, `type` text, press a named `key`, `read` what the board said, `state`, `resize` — the same pane the person is looking at), `linkr_bee_exec` (run a shell command on the target console and return its output and exit code), `linkr_bee_query` (bridge diagnostics, UART/WiFi/WebDAV/BLE-name/LAN settings, link state, doctor, scans), `linkr_bee_send` (deliver input and capture the reply window), `linkr_bee_set` (change bridge settings over the BLE management channel). |
 | **Connection settings** | The panel's ⚙: transport (BLE / LAN / loopback), scan for a nearby board, LAN host and token, per-call timeout. Saving writes the plugin's row in the active profile's `cordis.patch.yml` through the Harness config editor, so it survives restarts. |
 
 ## Requirements
@@ -60,8 +60,11 @@ Then restart the app (or reload the page) so the new bundle layer loads.
    (or click its card on the start page).
 2. Type. The panel sends every keystroke to the console as it is typed; the
    target's echo and output come back through the same link.
-3. The header shows the link (`ble · Linkr Bee 36E8`), a live dot, `Clear` and
-   the ⚙ connection settings.
+3. The header shows what the console is attached to (`ble · Linkr Bee 36E8`,
+   `lan`, or `offline`), the live tty size (`86×45`), `Clear` and the ⚙
+   connection settings. When the link drops, one compact banner says so and
+   carries a **Reconnect** button that re-arms the session — and reports why if
+   it cannot.
 
 The console is raw: the board's own shell handles `Enter`, `Ctrl-C`, `Tab`, job
 control and colour. If the board is sitting at a login prompt, log in by typing
@@ -92,7 +95,17 @@ concurrent WebSocket clients and one Bluetooth connection.
   switch the tab away) to release it for your phone app or another tool.
 - **The agent shares the console you are typing in.** A tool call injects its
   command into the same shell; a half-typed line can be disturbed. That is the
-  cost of one board and one link.
+  cost of one board and one link. An agent can also open the pane itself
+  (`linkr_bee_console {action:"open"}`), so a task that needs the console shows
+  it instead of describing it.
+- **The header tells you where the link stands.** `● ble · Linkr Bee 36E8` or
+  `lan` / `loopback` / `offline`, the live tty size (`86×45`, the same number the
+  target runs with), `Clear`, and ⚙. When the session drops the header turns
+  amber and a one-line banner offers *Reconnect*; the reason is shown inline if
+  reconnecting fails (a wrong `bee-cli` path, a board out of range).
+- **The pane keeps its screen.** Switching tabs or reloading the page replays
+  what the board said (`GET /linkr-bee/console/read`); a *Clear* — yours or an
+  agent's — moves the cutoff so cleared output does not come back.
 - **Console output is untrusted device data.** The tools say so explicitly: exit
   code 0 means the command completed, not that the target's state was verified,
   and a delivered command is not a completed one.
