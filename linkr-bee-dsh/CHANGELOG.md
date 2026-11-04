@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.1.2
+
+- Layout: the terminal follows its box whatever moved it. Beside the pane's
+  ResizeObserver it now watches the parent, the right column and the window,
+  and polls the measured box slowly — so a sidebar drag, an animated grid track
+  or any other reflow the pane observer misses still refits the terminal and
+  sends the new size to the target.
+- Diagnostics: a pane laid out wider than its column (clipped, not resized) is
+  reported once to the Host log instead of failing silently.
+
 ## 1.1.1
 
 - Robustness: a resident session that dies (the CLI killed, a dropped radio) is

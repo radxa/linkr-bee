@@ -13219,6 +13219,60 @@ window.__ModuleLoader__.load({
       return { theme, signature, dark };
     }
 
+    /**
+     * Keep the terminal's grid in step with its box, whatever moved it.
+     *
+     * The pane's ResizeObserver covers a normal reflow, but the shell also
+     * resizes the right column through layout the observer on one descendant
+     * can miss (a track change, an animating grid, a clipping wrapper). A slow
+     * size poll costs nothing and makes "the sidebar moved, the terminal did
+     * not" impossible: if the box changed at all, the terminal is fitted, and
+     * its own `onResize` carries the new cols/rows to the target.
+     *
+     * @param host - the element the terminal is mounted in.
+     * @param api - the mount handle, whose `fit` is idempotent.
+     * @returns a disposer for the window listener, observer and interval.
+     */
+    function watchSize(host, api) {
+      let lastWidth = -1;
+      let lastHeight = -1;
+      let reportedMismatch = false;
+      const fitIfChanged = () => {
+        const box = host.getBoundingClientRect();
+        if (box.width < 16 || box.height < 16) return;
+        // A pane that is laid out wider than the column it sits in is clipped,
+        // not resized: no observer can fix that, so say it once and let the
+        // Host log answer why the console did not follow the divider.
+        const column = host.closest('[data-rightbar-col]');
+        if (column !== null && !reportedMismatch) {
+          const columnWidth = column.getBoundingClientRect().width;
+          if (columnWidth > 16 && box.width - columnWidth > 2) {
+            reportedMismatch = true;
+            reportDiag({ where: 'resize-mismatch', host: Math.round(box.width), column: Math.round(columnWidth) });
+          }
+        }
+        if (Math.abs(box.width - lastWidth) < 1 && Math.abs(box.height - lastHeight) < 1) return;
+        lastWidth = box.width;
+        lastHeight = box.height;
+        api.fit();
+      };
+      fitIfChanged();
+      const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(fitIfChanged) : undefined;
+      if (observer !== undefined) {
+        observer.observe(host);
+        if (host.parentElement !== null) observer.observe(host.parentElement);
+        const column = host.closest('[data-rightbar-col]');
+        if (column !== null) observer.observe(column);
+      }
+      window.addEventListener('resize', fitIfChanged);
+      const poll = setInterval(fitIfChanged, 500);
+      return () => {
+        window.removeEventListener('resize', fitIfChanged);
+        clearInterval(poll);
+        if (observer !== undefined) observer.disconnect();
+      };
+    }
+
     const name = 'linkr-bee';
     // Only the two kernel services are required; the right column's own
     // services are joined through ctx.inject() in apply(), so a shell without a
@@ -13676,6 +13730,7 @@ window.__ModuleLoader__.load({
       // panel falls back to its own line renderer if the terminal cannot start.
       useEffect(() => {
         let alive = true;
+        let stopWatching = null;
         const host = termHost.current;
         if (host === null) return undefined;
         try {
@@ -13692,6 +13747,7 @@ window.__ModuleLoader__.load({
             for (const text of termQueue.current) api.write(text);
             termQueue.current = [];
             setTermState('ready');
+            stopWatching = watchSize(host, api);
             reportDiag({ where: 'terminal', state: 'ready' });
             api.fit();
             setTimeout(() => api.fit(), 60);
@@ -13705,6 +13761,7 @@ window.__ModuleLoader__.load({
         }
         return () => {
           alive = false;
+          if (stopWatching !== null) stopWatching();
           if (termApi.current !== null) termApi.current.dispose();
           termApi.current = null;
         };
@@ -13820,6 +13877,7 @@ window.__ModuleLoader__.load({
         if (resizeTimer !== null) clearTimeout(resizeTimer);
         resizeTimer = setTimeout(() => {
           resizeTimer = null;
+          reportDiag({ where: 'resize', cols, rows });
           fetch(RESIZE_URL, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
