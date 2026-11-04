@@ -50,3 +50,6 @@ harmonyos/**/*.p7b
 
 # Binaries built for a machine to try
 bin/
+# …except an npm package's launcher, which lives in bin/ by npm's own convention.
+!tools/linkr-tui/npm/bin/
+!tools/linkr-tui/npm/bin/**

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Linkr Bee",
+    "description": "Drive the Linkr Bee wireless serial bridge from the agent (run commands on the target board, read bridge state, change settings) and from a serial console panel in the Web UI."
+  }
+}

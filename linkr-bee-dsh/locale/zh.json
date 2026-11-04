@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Linkr Bee 串口桥",
+    "description": "让 Agent 通过 Linkr Bee 无线串口桥操控目标开发板（执行命令、读取桥接器状态、修改配置），并在 Web UI 中提供串口控制台面板。"
+  }
+}

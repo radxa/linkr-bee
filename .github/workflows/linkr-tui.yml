@@ -304,6 +304,22 @@ jobs:
 
       # Only the host's own target can be executed here. The rest are checked by
       # the fact that they linked, which is the most this runner can say.
+      # The npm package (@dfsjklw/bee-cli) downloads one file, verifies it and
+      # runs it: no archive to unpack on the user's machine, and no shell. The
+      # raw asset is the CLI face's own binary, staged beside the archives so
+      # the artifact upload and the release carry it the same way.
+      - name: Stage the raw CLI binary for npm
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="${{ matrix.target }}"
+          exe=
+          case "$target" in *windows*) exe=.exe ;; esac
+          src="target/$target/release/bee$exe"
+          [ -f "$src" ] || { echo "no CLI binary at $src" >&2; exit 1; }
+          cp "$src" "dist/bee-cli-$target$exe"
+          ls -l "dist/bee-cli-$target$exe"
+
       - name: Run the packaged binaries
         if: matrix.native
         shell: bash
@@ -431,7 +447,7 @@ jobs:
           # Every format the matrix writes, and nothing else: a checksum file
           # that names a file nobody uploaded is worse than no file.
           shopt -s nullglob
-          files=(*.tar.gz *.zip *.dmg *.deb)
+          files=(*.tar.gz *.zip *.dmg *.deb bee-cli-*)
           sha256sum "${files[@]}" > SHA256SUMS
           cat SHA256SUMS
 
@@ -478,7 +494,7 @@ jobs:
           set -euo pipefail
           cd dist
           shopt -s nullglob
-          keep=(*.tar.gz *.zip *.dmg *.deb SHA256SUMS)
+          keep=(*.tar.gz *.zip *.dmg *.deb bee-cli-* SHA256SUMS)
           gh release view "$GITHUB_REF_NAME" --json assets \
             --jq '.assets[].name' > /tmp/assets
           while IFS= read -r name; do
@@ -499,7 +515,7 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          files=(dist/*.tar.gz dist/*.zip dist/*.dmg dist/*.deb dist/SHA256SUMS)
+          files=(dist/*.tar.gz dist/*.zip dist/*.dmg dist/*.deb dist/bee-cli-* dist/SHA256SUMS)
           gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
 
       # The run is not done when the upload returns: it is done when the
@@ -515,7 +531,7 @@ jobs:
           set -euo pipefail
           cd dist
           shopt -s nullglob
-          expected=(*.tar.gz *.zip *.dmg *.deb SHA256SUMS)
+          expected=(*.tar.gz *.zip *.dmg *.deb bee-cli-* SHA256SUMS)
           count=$(gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets | length')
           draft=$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft')
           echo "release $GITHUB_REF_NAME: assets=$count expected=${#expected[@]} draft=$draft"

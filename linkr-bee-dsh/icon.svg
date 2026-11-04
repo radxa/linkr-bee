@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Linkr Bee">
+  <defs>
+    <linearGradient id="lb-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2a6fb5"/>
+      <stop offset="1" stop-color="#1b4a80"/>
+    </linearGradient>
+    <linearGradient id="lb-bee" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffd34d"/>
+      <stop offset="1" stop-color="#f2a93b"/>
+    </linearGradient>
+    <clipPath id="lb-clip">
+      <circle cx="30" cy="37" r="13"/>
+    </clipPath>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="url(#lb-bg)"/>
+  <g stroke="#eaf3fb" stroke-width="3" stroke-linecap="round" fill="none" opacity="0.9">
+    <path d="M42 15a12 12 0 0 1 9 9"/>
+    <path d="M42 22a5.5 5.5 0 0 1 4 4"/>
+    <circle cx="42" cy="13.5" r="1.6" fill="#eaf3fb" stroke="none"/>
+  </g>
+  <g clip-path="url(#lb-clip)">
+    <circle cx="30" cy="37" r="13" fill="url(#lb-bee)"/>
+    <rect x="17" y="31.5" width="26" height="4.2" fill="#2b2b2b"/>
+    <rect x="17" y="39.5" width="26" height="4.2" fill="#2b2b2b"/>
+  </g>
+  <circle cx="30" cy="37" r="13" fill="none" stroke="#14355c" stroke-width="2.4"/>
+  <g fill="#14355c">
+    <circle cx="25.6" cy="33.6" r="1.7"/>
+    <circle cx="34.4" cy="33.6" r="1.7"/>
+  </g>
+  <g stroke="#14355c" stroke-width="2.2" stroke-linecap="round" fill="none">
+    <path d="M23.5 27.5 21 23"/>
+    <path d="M36.5 27.5 39 23"/>
+    <path d="M12 52h14M32 52h20"/>
+  </g>
+</svg>

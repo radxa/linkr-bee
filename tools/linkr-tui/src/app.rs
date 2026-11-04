@@ -950,6 +950,17 @@ pub struct App {
     pub collect_output: bool,
     /// What the target has said, kept only while [`Self::collect_output`] is on.
     pub output: VecDeque<Vec<u8>>,
+    /// Whether a `watch` caller wants the console's raw byte stream.
+    ///
+    /// Apart from [`Self::collect_output`] because the two answer different
+    /// questions: a script run wants the bytes *it* caused, a watched console
+    /// wants every byte the target says — escape sequences included, which the
+    /// journal masks to NUL and a terminal on the far end needs for colour.
+    pub watch_armed: bool,
+    /// Raw bytes said while [`Self::watch_armed`], drained by the session's
+    /// watcher on every idle tick. Bounded by chunk count, which the watcher
+    /// never approaches because it drains on the beat it fills.
+    pub watch_bytes: VecDeque<Vec<u8>>,
     /// The live link, when one is open. Owns the threads and the counters; the
     /// frame only ever reads what the pump folded out of it.
     pub session: Session,
@@ -1055,6 +1066,8 @@ impl Default for App {
             trace_file: None,
             collect_output: false,
             output: VecDeque::new(),
+            watch_armed: false,
+            watch_bytes: VecDeque::new(),
             talk: Conversation::new(),
             management: crate::protocol::ManagementReassembler::default(),
             watch_engine: SerialWatch::new(WatchOptions::default()),
@@ -2904,6 +2917,15 @@ impl App {
                     if self.collect_output {
                         self.output.push_back(bytes.clone());
                     }
+                    if self.watch_armed {
+                        // Whole, escape sequences and all: a terminal on the far
+                        // end needs them for colour and cursor movement, and the
+                        // journal's copy masks them to NUL.
+                        self.watch_bytes.push_back(bytes.clone());
+                        while self.watch_bytes.len() > 4096 {
+                            self.watch_bytes.pop_front();
+                        }
+                    }
                     {
                         // The same bytes, read a second time by the watch. It
                         // looks for a line saying `Kernel panic` or `Out of
@@ -3138,6 +3160,18 @@ impl App {
     /// pane of its own. See [`App::collect_output`].
     pub fn take_output(&mut self) -> Vec<Vec<u8>> {
         self.output.drain(..).collect()
+    }
+
+    /// Start or stop collecting the console's raw byte stream, dropping what is
+    /// already queued: a watcher subscribes, it does not replay.
+    pub fn watch_stream(&mut self, on: bool) {
+        self.watch_armed = on;
+        self.watch_bytes.clear();
+    }
+
+    /// The raw console bytes said since the last call, whole and in order.
+    pub fn take_watch_bytes(&mut self) -> Vec<Vec<u8>> {
+        self.watch_bytes.drain(..).collect()
     }
 
     /// Whether a question this view asked is still outstanding.

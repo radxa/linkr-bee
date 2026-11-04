@@ -1,0 +1,47 @@
+{
+  "name": "linkr-bee-cli",
+  "version": "0.1.2",
+  "description": "Linkr Bee wireless serial bridge: the command-line client (bee-cli) for talking to a board's UART console over Bluetooth LE, LAN or loopback.",
+  "keywords": [
+    "bee-cli",
+    "linkr-bee",
+    "serial",
+    "uart",
+    "console",
+    "bluetooth",
+    "ble",
+    "embedded",
+    "dsh"
+  ],
+  "homepage": "https://github.com/radxa/linkr-bee/tree/main/tools/linkr-tui/npm",
+  "bugs": {
+    "url": "https://github.com/radxa/linkr-bee/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/radxa/linkr-bee.git",
+    "directory": "tools/linkr-tui/npm"
+  },
+  "license": "Apache-2.0",
+  "type": "commonjs",
+  "bin": {
+    "bee-cli": "./bin/bee-cli.js"
+  },
+  "files": [
+    "bin",
+    "lib",
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_LICENSES.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "postinstall": "node ./lib/install.js",
+    "test": "node --test ./test/*.test.mjs"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
