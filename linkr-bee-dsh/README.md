@@ -17,7 +17,7 @@ on the target board — the person and the agent share one board and one link.
 ## Requirements
 
 - DeepSeek Harness `>=0.2.0-rc.1 <0.3.0` (`engines.dsh`).
-- **`bee-cli`**, the Linkr Bee command-line client, version **1.1.2 or newer with
+- **`bee-cli`**, the Linkr Bee command-line client, version **1.1.4 or newer with
   the `watch` and `resize` operations** (this plugin's streaming depends on
   them; a build without them falls back to one dial per command and shows no
   unsolicited output). Install it from npm — the package fetches, verifies and
@@ -32,7 +32,7 @@ on the target board — the person and the agent share one board and one link.
 
   ```sh
   git clone https://github.com/radxa/linkr-bee
-  cd linkr-bee/cliproxy-import/tools/linkr-tui
+  cd linkr-bee/tools/linkr-tui
   cargo build --release --no-default-features --features cli
   # install it under the name the plugin looks for
   rm -f target/release/bee-cli && cp target/release/bee target/release/bee-cli

@@ -1,16 +1,22 @@
 # Changelog
 
-## 1.1.3
+## 1.1.4
 
-- **One-step install.** The plugin now depends on `linkr-bee-cli`, so
+The published cut. Versions now follow the Linkr Bee main line: crate, tag,
+CLI npm package and plugin all read 1.1.4.
+
+- **One-step install.** The plugin depends on `linkr-bee-cli@^1.1.4`, so
   `dsh plugin add dsh-linkr-bee` also brings the client: the panel and the tools
   resolve `cliPath` → `$LINKR_BEE_CLI` → the launcher installed beside the
-  plugin → `bee-cli` on `PATH`, and the launcher downloads and verifies the
-  platform binary on first use. A `cliPath` you set yourself still wins. The
-  TUI (`linkr-tui`) stays a separate download — the plugin only needs the CLI.
-- `linkr-bee-cli` 1.1.3 runs **no install script** (nothing for a package
-  manager that refuses build scripts to block); the first call fetches the
-  binary instead.
+  plugin → `bee-cli` on `PATH`. The launcher downloads and verifies the platform
+  binary on first use; a `cliPath` you set yourself still wins. The TUI stays a
+  separate download — the plugin only needs the CLI.
+- The launcher is resolved from `createRequire(import.meta.url)` and from the
+  module's real path, so an ESM plugin behind a pnpm symlink still finds its
+  sibling dependency. `linkr-bee-cli` runs **no install script** (nothing for a
+  package manager that refuses build scripts to block).
+- The agent-operable console, panel polish and resize work listed under 1.1.2
+  shipped in this release; 1.1.2/1.1.3 were never published to npm.
 
 ## 1.1.2
 

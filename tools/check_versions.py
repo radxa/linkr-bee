@@ -9,7 +9,7 @@ reference client and the Rust CLI. The release assembler enforces that the
 version bump is cheapest to catch.
 
     python3 tools/check_versions.py            # the tree is consistent
-    python3 tools/check_versions.py v1.1.3     # ...and matches this tag
+    python3 tools/check_versions.py v1.1.4     # ...and matches this tag
 
 Exit status is 0 when consistent, 1 with one line per disagreement.
 """
@@ -94,7 +94,7 @@ def problems(tag: str | None = None) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("tag", nargs="?", help="release tag to compare against, e.g. v1.1.3")
+    parser.add_argument("tag", nargs="?", help="release tag to compare against, e.g. v1.1.4")
     args = parser.parse_args(argv)
     issues = problems(args.tag)
     if issues:
