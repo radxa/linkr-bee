@@ -4,11 +4,64 @@ export function deviceIdentity(status) {
   if (status.targetBinding?.verified) return `target:${status.targetBinding.targetId}`;
   return status.deviceId ? JSON.stringify([status.transport, status.deviceId, status.uart || '']) : null;
 }
-export function redactTaskText(value) {
-  return String(value || '').replace(/\b(Bearer\s+)\S+/gi, '$1[redacted]')
-    .replace(/((?:password|passwd|api[_-]?key|token|secret)\s*[:=]\s*)[^\s,;]+/gi, '$1[redacted]')
-    .replace(/https?:\/\/[^\s"<>]+/gi, value => {
-      try { const u = new URL(value); u.username = ''; u.password = ''; u.search = ''; u.hash = ''; return u.href; } catch { return '[url]'; }
+
+/* Credential shapes found in free text. The task store, the Markdown report and
+ * the MCP audit list all echo text that came from a model, a console or a tool
+ * result, so a credential often arrives without an argument key that names it:
+ * `{"apiKey":"…"}`, `curl -u user:pass …`, `Authorization: Bearer …`. The
+ * patterns below cover the labelled forms the app and common shell tools use.
+ * Redaction stays best effort and is not a safety review: an unlabelled secret,
+ * a credential split across two fields, or one inside an image or binary blob is
+ * not recognized. There is no interactive preview before the report is
+ * downloaded (the panel exports the finished text directly), so callers must
+ * read this as "the known shapes were removed", never as "the text is clean". */
+const REDACTED = '[redacted]';
+const SECRET_LABEL = '(?:password|passwd|secret|token|api[_-]?key|authorization|credential)';
+const QUOTED_LABEL = new RegExp(`((?:"|')${SECRET_LABEL}(?:"|')\\s*[:=]\\s*)("[^"\\n]*"|'[^'\\n]*'|[^\\s,;}]+)`, 'gi');
+const BARE_LABEL = new RegExp(`(${SECRET_LABEL}\\s*[:=]\\s*(?:(?:Bearer|Basic|Digest|Token)\\s+)?)("[^"\\n]*"|'[^'\\n]*'|[^\\s,;}]+)`, 'gi');
+const BEARER = /\b(Bearer\s+)(\S+)/gi;
+/* curl/wget credential flag: the whole user:pass pair goes, not just the
+ * password, because the pair is only useful to someone trying to authenticate. */
+const USER_FLAG = /(\s(?:-u|--user)[ =]\s*)([^\s:]+:[^\s]+)/gi;
+
+function maskQuoted(value, prefix) {
+  const quote = value[0] === '"' || value[0] === "'" ? value[0] : '';
+  return `${prefix}${quote}${REDACTED}${quote}`;
+}
+
+export function redactSecretText(value) {
+  return String(value ?? '')
+    .replace(BEARER, `$1${REDACTED}`)
+    .replace(QUOTED_LABEL, (_match, prefix, secret) => maskQuoted(secret, prefix))
+    .replace(BARE_LABEL, (_match, prefix, secret) => maskQuoted(secret, prefix))
+    .replace(USER_FLAG, `$1${REDACTED}`);
+}
+
+/* The values those labels marked as secret, so a caller can also scrub the same
+ * value from other text (MCP tool results, audit messages). Bounded: this is
+ * defence in depth, not a secret scanner. */
+export function secretValuesIn(text, limit = 16) {
+  const values = [];
+  for (const pattern of [BEARER, QUOTED_LABEL, BARE_LABEL, USER_FLAG]) {
+    for (const match of String(text ?? '').matchAll(pattern)) {
+      const value = String(match[2] ?? '').replace(/^["']|["']$/g, '');
+      if (value && value !== REDACTED && !values.includes(value)) values.push(value);
+      if (values.length >= limit) return values;
+    }
+  }
+  return values;
+}
+
+/* `secrets` are values already known to be secret (for example the credential
+ * of the current WiFi change): they are replaced by value, wherever they
+ * appear. Shorter values are skipped because replacing them would destroy
+ * unrelated text without protecting anything. */
+export function redactTaskText(value, secrets = []) {
+  const known = (Array.isArray(secrets) ? secrets : [])
+    .filter(secret => typeof secret === 'string' && secret.length >= 4);
+  return known.reduce((text, secret) => text.split(secret).join(REDACTED), redactSecretText(value))
+    .replace(/https?:\/\/[^\s"<>]+/gi, url => {
+      try { const u = new URL(url); u.username = ''; u.password = ''; u.search = ''; u.hash = ''; return u.href; } catch { return '[url]'; }
     }).slice(0, 2000);
 }
 function savedEvidence(value) {

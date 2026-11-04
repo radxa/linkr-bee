@@ -70,7 +70,12 @@ async function enable(f) {
 }
 test('executor requires a matching handshake, start and finish, preserving nonzero exit status', async () => {
   const f=fixture(), setup=await enable(f); assert.equal(f.device.getStatus().shellIntegration.status,'ready');
-  const record=await f.device.execute({text:`printf "it's fine\\n"; exit 7`,appendEnter:true,trackExit:true});
+  /* Full Auto now asks for shell text the guard cannot parse statically, and
+   * this one is quoted: the approval is part of the setup, not the assertion. */
+  const pending=f.device.execute({text:`printf "it's fine\\n"; exit 7`,appendEnter:true,trackExit:true});
+  const waiting=f.device.getRecords().at(-1); assert.equal(waiting.state,'awaiting-approval');
+  f.device.approve(waiting.id);
+  const record=await pending;
   assert.match(record.payload,/^__linkr_run_v1 /); assert.ok(!record.payload.includes(setup.shellTracking.nonce)); assert.ok(!record.payload.includes('LINKR_EXIT_'));
   f.receive(shellMarker(other,1,'C')+shellMarker(other,1,'D',0)); assert.equal(f.device.inspectExecution(record.id).executionStatus,'unknown');
   // Finish without start is not sufficient. Inspect this before delivering start.

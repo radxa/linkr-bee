@@ -1,5 +1,5 @@
 import { SHELL_FUNCTION, shellIntegrationCommand, shellQuote } from "./shell_integration.js";
-import { requiresInputApproval } from "./agent_execution_policy.js";
+import { createInputLineTracker, requiresInputApproval, serialInputReview } from "./agent_execution_policy.js";
 import { parseDeviceProfile } from "./device_profile.js";
 import { inspectSerialConsole } from "./serial_console.js";
 import { inputFingerprint } from "./agent_task_state.js";
@@ -26,6 +26,11 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
   let profile = null;
   let toolCapabilities = {};
   let shellIntegration = null;
+  /* The unfinished console input line, per device session. A serial console is
+   * a line editor, so a write is only a command in combination with what the
+   * next write completes; this is what lets `r` followed by `m -rf /tmp/x` be
+   * classified as the `rm -rf /tmp/x` it is. */
+  const inputLines = createInputLineTracker();
   function shellStatus() {
     const status = getStatus();
     if (shellIntegration && (shellIntegration.sessionId !== status.sessionId || !status.connected)) shellIntegration = null;
@@ -281,6 +286,7 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
     reset() {
       cancel();
       shellIntegration = null;
+      inputLines.reset();
       clearModeTimer();
       // A new conversation/session ends the unattended execution window.
       if (mode === "full-auto") mode = "auto";
@@ -305,6 +311,10 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
         console: consoleState(), profile, toolCapabilities:structuredClone(toolCapabilities) };
     },
     readLog(options) { return readLog(options); },
+    /* The unfinished console input line this executor has seen for the current
+     * session. A caller that must classify a write before asking (the MCP gate)
+     * reads it here so its decision matches the one this executor makes. */
+    pendingInputLine() { return inputLines.current(getStatus().sessionId); },
     getRecords() { return records.filter((record) => record.sessionId === getStatus().sessionId).map(snapshot); },
     inspectExecution,
     needsObservation,
@@ -322,7 +332,20 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
       active.rejectApproval(new Error("User rejected this input. Do not request it again."));
       return true;
     },
-    async execute(args, signal, { userApproved = false, shellSetup = null } = {}) {
+    /* `userApproved` is an ordinary-command approval, and it is text-scoped: the
+     * caller showed this exact text on its own surface (the MCP phone card, a
+     * resident task's sensitive-command card, or a button the user pressed that
+     * sends an app-built command such as the target-identity bind). The executor
+     * re-applies the destructive guard and honours the approval only while the
+     * write runs that same string.
+     *
+     * The trade-off is deliberate: a write that continues the console's
+     * unfinished input line executes a different, longer string, so the approval
+     * is ignored there — destructive text that only emerges after the join is
+     * never covered. That is the shard bypass. A caller that classified the
+     * joined line itself may assert coverage with `sensitiveApproved`
+     * (web/mcp_server.js does, from the same console line this executor sees). */
+    async execute(args, signal, { userApproved = false, sensitiveApproved = false, shellSetup = null } = {}) {
       signal?.throwIfAborted();
       if (active) throw new Error("Another serial action is still active.");
       if (typeof args?.text !== "string" || !args.text.length || args.text.length > 2048 || typeof args.appendEnter !== "boolean") {
@@ -340,6 +363,15 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
       // Hash the requested operation before wrapping it with a fresh exit token.
       // A reloaded executor can reuse serial-1; executorId prevents false matches.
       const requestedInput = {text:args.text, appendEnter:args.appendEnter};
+      /* Commands this app builds itself (its probes, the verification,
+       * file-read and download builders, and the shell handshake) are constants,
+       * not model text: their quoting cannot hide a command, and the read-only
+       * builders contain words the deliberately broad guard matches by accident
+       * (`dd` in a file read). They stay exempt from the opaque-input rule and
+       * from the ordinary-approval re-check; the mode gate still classifies
+       * them. Read the marker before the tracked wrapper replaces `args`. */
+      const appComposed = shellSetup !== null || args.applicationReadOnly === true ||
+        Boolean(profileProbe) || Boolean(toolProbe) || Boolean(download);
       let completionToken, shellTracking;
       shellStatus();
       if (args.trackExit || shellSetup) {
@@ -369,8 +401,23 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
       signal?.addEventListener("abort", abort, { once: true });
       records.push(record);
       if (records.length > 50) records.shift();
+      /* Classify the write against the console state as a whole: the unfinished
+       * input line is what makes the fragment-plus-completion path visible to
+       * the guard. */
+      const inputReview = serialInputReview({
+        text: requestedInput.text, appendEnter: requestedInput.appendEnter, payload: record.payload,
+        pendingLine: inputLines.current(status.sessionId), inputPending: status.inputPending === true,
+      });
+      /* Approval is text-scoped: it is honoured only while the write runs the
+       * string the caller showed, never when a pending line makes the executed
+       * command a different one. */
+      const needsApproval = userApproved
+        ? !sensitiveApproved && !appComposed && inputReview.continuesPendingLine && inputReview.needsReview
+        : requiresInputApproval(mode, {...args, text:requestedInput.text}, record.payload,
+          status.inputPending, getCommandPolicy(), appComposed ? null : inputReview) ||
+          inputReview.destructive || (mode === "auto" && record.console.kind !== "shell");
       try {
-        if (!userApproved && (requiresInputApproval(mode, {...args, text:requestedInput.text}, record.payload, status.inputPending, getCommandPolicy()) || (mode === "auto" && record.console.kind !== "shell"))) {
+        if (needsApproval) {
           record.state = "awaiting-approval";
           await new Promise((resolve, reject) => {
             let settled = false;
@@ -405,6 +452,10 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
         if (shellTracking) shellIntegration = {status:shellSetup ? "enabling" : "ready", nonce:shellTracking.nonce,
           sequence:shellTracking.sequence, sessionId:record.sessionId, cursor:record.logStart, healthTail:shellIntegration?.healthTail || ""};
         publish(record);
+        /* Remember what the console input line becomes before transport: a
+         * failed write may still have reached it, and over-remembering a
+         * fragment only costs one extra confirmation on the next write. */
+        inputLines.record(record.sessionId, record.payload);
         const receipt = await sendInput(record.payload, record.sessionId, controller.signal, record.inputRevision);
         record.delivery = "sent";
         record.sentRevision = receipt?.inputRevision ?? getStatus().inputRevision;

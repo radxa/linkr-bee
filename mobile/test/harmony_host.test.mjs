@@ -25,10 +25,12 @@ function connect(host, calls) {
     disconnect() {}, close() {},
     writeCharacteristicValue: async () => calls.push("write"),
     readCharacteristicValue: async () => { calls.push("read"); return { characteristicValue: new ArrayBuffer(0) }; },
+    setCharacteristicChangeNotification: async () => calls.push("subscribe"),
     setCharacteristicChangeIndication: async () => calls.push("subscribe"),
   };
   host.connectedDeviceId = "same-board";
-  host.characteristics.set("service/uart", { characteristicValue: new ArrayBuffer(0) });
+  host.characteristics.set("service/uart", { characteristicValue: new ArrayBuffer(0),
+    properties: { notify: false, indicate: true } });
 }
 
 for (const method of ["read", "write", "subscribe"]) {
@@ -42,7 +44,7 @@ for (const method of ["read", "write", "subscribe"]) {
     await Promise.resolve();
     const stale = method === "read" ? host.read("same-board", "service", "uart")
       : method === "write" ? host.write("same-board", "service", "uart", [114, 101, 98, 111, 111, 116, 13], true)
-      : host.setIndications("same-board", "service", "uart", true);
+      : host.setSubscription("same-board", "service", "uart", true);
     const rejected = [assert.rejects(first, /session changed/), assert.rejects(stale, /session changed/)];
     host.closeClient(true);
     connect(host, calls);
@@ -224,4 +226,68 @@ test("Harmony retiring a pairing cannot complete or close a replacement session"
   assert.equal(f.listeners.size, 0);
   assert.equal(f.timers.size, 0);
   assert.deepEqual(f.calls, ["link", "pair", "disconnect", "close"]);
+});
+test("Harmony subscribes with the CCC the characteristic actually declares", async () => {
+  const host = createHost();
+  const calls = [];
+  host.client = {
+    setCharacteristicChangeNotification: async (_characteristic, enabled) => calls.push(`notify:${enabled}`),
+    setCharacteristicChangeIndication: async (_characteristic, enabled) => calls.push(`indicate:${enabled}`),
+  };
+  host.connectedDeviceId = "same-board";
+  host.characteristics.set("svc/tx", { characteristicUuid: "tx",
+    properties: { notify: true, indicate: false } });
+  host.characteristics.set("svc/mgmt", { characteristicUuid: "mgmt",
+    properties: { notify: false, indicate: true } });
+  host.characteristics.set("svc/both", { characteristicUuid: "both",
+    properties: { notify: true, indicate: true } });
+  await host.setSubscription("same-board", "svc", "tx", true);
+  await host.setSubscription("same-board", "svc", "mgmt", true);
+  await host.setSubscription("same-board", "svc", "both", true);
+  await host.setSubscription("same-board", "svc", "tx", false);
+  assert.deepEqual(calls, ["notify:true", "indicate:true", "notify:true", "notify:false"],
+    "NUS TX is notify-only, Management uses indications, and both prefers the lower-latency path");
+});
+
+test("Harmony disconnect drops queued notifications instead of delivering them after a reconnect", async () => {
+  let deliver = () => {};
+  const delivered = [];
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const context = { exports: {}, setTimeout, clearTimeout,
+    require: () => ({ ble: { GattWriteType: { WRITE: 1, WRITE_NO_RESPONSE: 0 } }, hilog }) };
+  const source = outputText;
+  vm.runInNewContext(source, context);
+  const host = new context.exports.LinkrBleHost({
+    runJavaScript: async (script) => {
+      delivered.push(script);
+      // The first IPC stays in flight, so later notifications only queue.
+      if (delivered.length === 1) await gate;
+    },
+  });
+  const notification = (length) => ({ serviceUuid: "svc", characteristicUuid: "tx",
+    characteristicValue: new Uint8Array(length).fill(65).buffer });
+  host.client = { disconnect() {}, close() {} };
+  host.connectedDeviceId = "same-board";
+
+  host.sendNotification("same-board", notification(4));
+  await nextTurn();
+  host.sendNotification("same-board", notification(8));
+  assert.equal(host.pendingNotifications.length, 1, "the second notification waits behind the in-flight batch");
+
+  host.closeClient(true);
+  assert.equal(host.pendingNotifications.length, 0, "a disconnect empties the queue");
+  assert.equal(host.pendingNotificationBytes, 0, "and its byte counter");
+
+  host.client = { disconnect() {}, close() {} };
+  host.connectedDeviceId = "same-board";
+  host.sendNotification("same-board", notification(2));
+  release();
+  await nextTurn();
+  await nextTurn();
+  assert.ok(delivered.length >= 2, "the flush continues after the link changed");
+  const batches = delivered.map((script) => JSON.parse(script.replace(/^window.LinkrHarmonyBle.notifyBatch\(/, "").replace(/\);$/, "")));
+  assert.ok(batches.every((batch) => Array.isArray(batch)), "each delivery is a batch");
+  const deliveredBytes = batches.flat().map((item) => item.value.length);
+  assert.deepEqual(deliveredBytes, [4, 2], "the queued 8-byte batch from the retired link is never delivered");
 });

@@ -33,6 +33,43 @@ export const AGENT_PROVIDER_IDS = Object.keys(PROVIDER_STREAMS);
 const UART_TOOLS = new Set(['send_serial_input','run_shell_command','probe_device_profile','probe_tools',
   'probe_download_tools','download_to_target','verify_target_file','verify_target_service','read_target_file']);
 
+/* A tool probe is a handful of `command -v` calls: the target normally answers
+ * in well under a second. This deadline bounds how long a probe may wait for
+ * that answer before it reports "unanswered" and unlocks nothing. */
+const PROBE_TIMEOUT_MS = 4000;
+/* The probe command prints `TOOL:<name>:available`; `LINKR_TOOL:` is accepted
+ * too, so the namespaced spelling can be adopted without touching this parser.
+ * The app's execution observer reads the `TOOL:` line for its capability cache,
+ * which is why the printed marker keeps that shape. */
+const TOOL_PROBE_LINE = /^(?:LINKR_TOOL|TOOL):([A-Za-z0-9][A-Za-z0-9_.+-]{0,63}):(available|missing)$/;
+
+/**
+ * Which of the requested commands the target itself reported, taken only from
+ * the console evidence of the probe execution. A command with contradictory
+ * lines, or with no line at all, is not evidence and stays locked.
+ */
+export function parseToolProbeEvidence(evidence, names) {
+  const requested = [...new Set((names || []).map((name) => String(name).toLowerCase()))];
+  const answers = new Map();
+  for (const raw of String(evidence ?? "").replace(/\r/g, "").split("\n")) {
+    const match = TOOL_PROBE_LINE.exec(raw.trim());
+    if (!match) continue;
+    const name = match[1].toLowerCase();
+    if (!requested.includes(name)) continue;
+    const entry = answers.get(name) || { available: false, missing: false };
+    if (match[2] === "available") entry.available = true; else entry.missing = true;
+    answers.set(name, entry);
+  }
+  const available = [], missing = [], unobserved = [], conflicting = [];
+  for (const name of requested) {
+    const entry = answers.get(name);
+    if (!entry) { unobserved.push(name); continue; }
+    if (entry.available && entry.missing) { unobserved.push(name); conflicting.push(name); continue; }
+    (entry.available ? available : missing).push(name);
+  }
+  return { available, missing, unobserved, conflicting };
+}
+
 export function createSerialAgent({ config, device, onEvent, stream = null, webReader = readWebPage, docsSearch = null, computerDownload, requestUserInput = null, accessory = null, notes = null, restoredMessages = null, toolProfile = "focused", customInstructions = "", runLimits = { maxTurns: 32, maxTools: 96 }, authorityMode = null }) {
   if (!["focused", "full"].includes(toolProfile)) throw new Error("Unknown tool profile");
   config = validateAgentConfig(config);
@@ -240,17 +277,31 @@ export function createSerialAgent({ config, device, onEvent, stream = null, webR
     {
       name: "probe_tools", label: "Check required target tools",
         executionMode: "sequential",
-      description: "Check only the command names needed for the current task. Use a verified remembered profile for context instead of a full probe on every connection. Monitor this tracked read-only command before relying on its result.",
+      description: "Check only the command names needed for the current task. Use a verified remembered profile for context instead of a full probe on every connection. This waits for the tracked read-only command to answer: a gated tool appears only when the target itself printed every command it needs as available. A refused, unanswered, truncated or contradictory probe unlocks nothing.",
       parameters: Type.Object({ names: Type.Array(Type.String({ pattern: "^[A-Za-z0-9][A-Za-z0-9_.+-]{0,63}$" }), { minItems: 1, maxItems: 16 }) }, { additionalProperties: false }),
       execute: async (id, args, signal) => {
         if (!Array.isArray(args.names) || !args.names.length || args.names.length > 16 || args.names.some(name => typeof name !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.+-]{0,63}$/.test(name))) throw new Error("Invalid tool names");
-        /* A probe is also how the assistant discovers that a tool which needs
-         * specific target commands has become usable. */
-        const announced = unlockTools(args.names);
-        const names = [...new Set(args.names)].map(name => "'" + name + "'").join(" ");
-        const command = `for t in ${names}; do if command -v "$t" >/dev/null 2>&1; then printf 'TOOL:%s:available\\n' "$t"; else printf 'TOOL:%s:missing\\n' "$t"; fi; done`;
-        const sent = await sendVia(id, {text:command,appendEnter:true,trackExit:true,applicationReadOnly:true,toolProbe:[...new Set(args.names)]}, signal);
-        return announced.length ? { ...sent, content: [...sent.content, { type: "text", text: `Tools now available: ${announced.join(", ")}.` }], addedToolNames: announced } : sent;
+        const names = [...new Set(args.names)];
+        const quoted = names.map(name => "'" + name + "'").join(" ");
+        const command = `for t in ${quoted}; do if command -v "$t" >/dev/null 2>&1; then printf 'TOOL:%s:available\\n' "$t"; else printf 'TOOL:%s:missing\\n' "$t"; fi; done`;
+        /* The request is not evidence: only the target's own answer may unlock
+         * a tool that depends on the commands it was asked about. */
+        const sent = await sendVia(id, {text:command,appendEnter:true,trackExit:true,applicationReadOnly:true,toolProbe:names}, signal);
+        let executionId;
+        try { executionId = JSON.parse(sent.content.find((part) => part.type === "text")?.text || "{}").id; }
+        catch { executionId = undefined; }
+        if (!executionId) return sent;
+        const record = await monitorSerialExecution({ inspect: () => device.inspectExecution(executionId), signal,
+          timeoutMs: PROBE_TIMEOUT_MS, check: () => checkSession(signal) });
+        if (pendingExecution?.id === executionId) pendingExecution.reviewedRound = modelRound;
+        const observed = parseToolProbeEvidence(record.evidence, names);
+        const announced = observed.available.length ? unlockTools(observed.available) : [];
+        const { evidence: _evidence, ...rest } = record;
+        return result({ ...rest, source: "target-tool-probe", command,
+          requested: names, available: observed.available, missing: observed.missing,
+          unobserved: observed.unobserved, conflicting: observed.conflicting,
+          addedToolNames: announced, grantsPermission: false,
+          note: probeNote(observed, record) });
       },
     },
     {
@@ -631,6 +682,28 @@ export function createSerialAgent({ config, device, onEvent, stream = null, webR
       refreshTools();
     }
     return added.filter(name => toolProfile === 'full' || requestedTools.has(name));
+  }
+
+  /* What a probe result means, in the one place that knows the rule: only the
+   * target's own marker lines are evidence, and only for the commands the tool
+   * asked about. */
+  function probeNote(observed, record) {
+    if (record.delivery !== "sent") {
+      return `The probe was not delivered (${record.delivery}); nothing was unlocked. Do not retry automatically: inspect the execution first.`;
+    }
+    if (record.timedOut) {
+      return `The probe did not answer within ${Math.round(PROBE_TIMEOUT_MS / 1000)} s; nothing was unlocked. Inspect this execution before sending anything else.`;
+    }
+    if (observed.conflicting.length) {
+      return `The target printed contradictory availability for ${observed.conflicting.join(", ")}; nothing was unlocked from it.`;
+    }
+    if (!observed.available.length && !observed.missing.length) {
+      return "The target printed no tool markers for this probe, so nothing was unlocked. A prompt-only or truncated console cannot prove which commands exist.";
+    }
+    if (observed.unobserved.length) {
+      return `Only ${observed.available.concat(observed.missing).join(", ")} answered; ${observed.unobserved.join(", ")} produced no marker, so tools that need it stay locked.`;
+    }
+    return "Availability is the target's own answer to this probe. It says nothing about whether a command works, and gated tools still need every command they list.";
   }
 
   const PRINTABLE = /^[\t\n\r\x20-\x7e\u00a0-\uffff]*$/;

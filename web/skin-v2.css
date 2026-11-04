@@ -1279,9 +1279,9 @@ html.settings-drawer-layout .settings-tabs,
 .terminal-card .terminal-key,
 .terminal-card .terminal-keyboard {
   width: auto;
-  min-width: 34px;
-  height: 30px;
-  min-height: 30px;
+  min-width: 36px;
+  height: 36px;
+  min-height: 36px;
   padding: 0 9px;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
@@ -1319,8 +1319,8 @@ html.settings-drawer-layout .settings-tabs,
 #breakButton {
   flex: 0 0 auto;
   min-width: 62px;
-  height: 30px;
-  min-height: 30px;
+  height: 36px;
+  min-height: 36px;
   border-color: transparent;
   background: var(--tx);
   box-shadow:
@@ -2583,4 +2583,22 @@ button,
   margin-top: 16px;
   padding-top: 16px;
   border-top: 1px solid var(--line);
+}
+
+/* Touch, whatever the viewport says: a tablet is wider than 900 px and still
+ * pressed with a thumb, and Ctrl-C is the key reached for without looking.
+ * 44 px matches the coarse-pointer minimum the menus use (DESIGN.md). This
+ * lives last so it wins over the width-based phone rules above. */
+@media (pointer: coarse) {
+  .terminal-card .terminal-key,
+  .terminal-card .terminal-keyboard {
+    min-width: 44px;
+    height: 44px;
+    min-height: 44px;
+  }
+
+  #breakButton {
+    height: 44px;
+    min-height: 44px;
+  }
 }

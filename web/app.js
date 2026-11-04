@@ -137,7 +137,11 @@ const MGMT_CAP_WEBSOCKET = 1 << 2;
 const MGMT_CAP_DEVICE_ID = 1 << 3;
 const MGMT_CAP_ASYNC_EVENTS = 1 << 4;
 const MGMT_CAP_RELIABLE_UART = 1 << 5;
-const MGMT_CAP_PREFER_NUS = 1 << 6;
+/* Bit 6 was "prefer NUS" for the historical ESP32-CAM board, which is no
+ * longer produced: firmware never defines or sets it (src/ble_mgmt.h,
+ * src/ble_mgmt.c) and docs/LINKR_BLE_API.zh-CN.md does not document it. The
+ * client follows the documented capability map, so the bit is a reserved,
+ * always-zero bit here rather than a branch that can never run. */
 const BLE_MAX_ATT_VALUE = 244;
 /* Start every connection at the universally available ATT payload. Probing a
  * larger size first only works if the platform reports the rejection in a
@@ -2047,19 +2051,34 @@ function updateWifiDatalist() {
   );
 }
 
+/* Changing the WiFi state needs the board's asynchronous event channel (bit 4);
+ * a board that advertises WiFi (bit 0) without it can still be queried. While
+ * the answer is unknown — not connected yet, or the handshake is still running
+ * — the controls stay visible, per AGENTS.md "keep the controls visible while a
+ * board is not connected or the capability is still unknown". */
+function wifiMutationAllowed() {
+  if (!state.connected || state.mode === "ws" || !state.mgmtReady) return true;
+  return hasManagementCapability(MGMT_CAP_WIFI) &&
+    hasManagementCapability(MGMT_CAP_ASYNC_EVENTS);
+}
+
 function updateWifiConnectionView() {
   const wifi = state.wifiStatus;
   const connected = Boolean(wifi.connected);
   const wifiForm = document.querySelector(".wifi-form");
+  /* Query-only board: no form and no mutating buttons at all, but the status
+   * button and the connected-network summary stay. */
+  const mutable = wifiMutationAllowed();
 
   if (elements.wifiConnectedSummary) {
     elements.wifiConnectedSummary.hidden = !connected;
   }
   if (wifiForm) {
-    wifiForm.hidden = connected;
+    wifiForm.hidden = connected || !mutable;
   }
-  elements.wifiScanButton.hidden = connected;
-  elements.wifiSetButton.hidden = connected;
+  elements.wifiScanButton.hidden = connected || !mutable;
+  elements.wifiSetButton.hidden = connected || !mutable;
+  elements.wifiOffButton.hidden = !mutable;
 
   if (!connected) {
     return;
@@ -2269,6 +2288,9 @@ function renderSerialControl() {
   elements.wifiSetButton.disabled = !management || !hasManagementCapability(MGMT_CAP_ASYNC_EVENTS);
   elements.wifiOffButton.disabled = elements.wifiSetButton.disabled;
   elements.wifiScanButton.disabled = elements.wifiSetButton.disabled;
+  /* Disabled is not the same as absent: a query-only board shows no WiFi form
+   * or mutating buttons, only the status query. */
+  updateWifiConnectionView();
   elements.webdavSetButton.disabled = !management || !hasManagementCapability(MGMT_CAP_WEBDAV);
   elements.webdavOffButton.disabled = elements.webdavSetButton.disabled;
   elements.webdavQueryButton.disabled = !management || !hasManagementCapability(MGMT_CAP_WEBDAV);
@@ -3691,6 +3713,17 @@ function setFeature(key, supported) {
   applyFeatureVisibility();
 }
 
+/* What a management-driven feature starts as on a new connection. A board that
+ * finished the BLE handshake without a management service (legacy NUS
+ * firmware) cannot host any of these devices and has no command channel to
+ * probe them with, so "not probed yet" would keep every card, settings tab and
+ * rail entry on screen forever: answer false. While the handshake is still
+ * running, or on a LAN link, the answer is unknown (null) and the controls
+ * stay visible. */
+function unmanagedFeatureValue(connected, isWs, mgmtReady) {
+  return connected && !isWs && !mgmtReady ? false : null;
+}
+
 function setTabHidden(name, hidden) {
   const tab = document.querySelector(`.settings-tab[data-settings-target="${name}"]`);
   if (tab) tab.hidden = Boolean(hidden);
@@ -3770,6 +3803,21 @@ async function boardSend(command, { quiet = false } = {}) {
 /* A group that answers "unsupported" is a board variant, not an error: hide
  * its card and stop asking. */
 function hideUnsupportedFeature(key, text) {
+  if (!isUnsupportedReply(text)) return false;
+  setFeature(key, false);
+  return true;
+}
+
+/* The same answer arrives two ways. A board without the device can reply
+ * "OK <group> unsupported" to a query, or reject the control request with
+ * "ERR <group> unsupported" — the tracker turns the error flag into a
+ * rejected promise carrying the raw reply text. Both paths must land in the
+ * same place, otherwise the feature stays "not probed", applyFeatureVisibility
+ * keeps it visible, and the card, settings tab and rail entry stay on screen
+ * for a board that cannot use them (AGENTS.md: capabilities decide the UI,
+ * never a disabled ghost of an absent feature). */
+function hideUnsupportedFromError(key, error) {
+  const text = String((error && error.message) || error || "");
   if (!isUnsupportedReply(text)) return false;
   setFeature(key, false);
   return true;
@@ -3856,6 +3904,7 @@ async function refreshBoardLed({ quiet = true } = {}) {
     else boardStatus(elements.boardLedStatus, boardFailureText(text) || text.trim(), "error");
     return color;
   } catch (error) {
+    if (hideUnsupportedFromError("led", error)) return null;
     boardStatus(elements.boardLedStatus, error.message, "error");
     return null;
   }
@@ -3872,6 +3921,7 @@ async function refreshBoardOpto({ quiet = true } = {}) {
     else boardStatus(elements.boardOptoStatus, boardFailureText(text) || text.trim(), "error");
     return status;
   } catch (error) {
+    if (hideUnsupportedFromError("opto", error)) return null;
     boardStatus(elements.boardOptoStatus, error.message, "error");
     return null;
   }
@@ -3919,6 +3969,10 @@ async function refreshBoardIr({ quiet = true } = {}) {
     }
     return status;
   } catch (error) {
+    if (hideUnsupportedFromError("ir", error)) {
+      setFeature("irLearn", false);
+      return null;
+    }
     boardStatus(elements.boardIrStatus, error.message, "error");
     return null;
   }
@@ -4125,6 +4179,7 @@ async function refreshBoardSlots({ quiet = true } = {}) {
     }
     return parsed;
   } catch (error) {
+    if (hideUnsupportedFromError("irLearn", error)) return null;
     boardStatus(elements.boardLearnStatus, error.message, "error");
     return null;
   }
@@ -4256,6 +4311,10 @@ async function sendBoardIrFrame() {
       reply.ok ? reply.line : (reply.error || t("boardCmdError")),
       reply.ok ? "ok" : "error");
   } catch (error) {
+    if (hideUnsupportedFromError("ir", error)) {
+      setFeature("irLearn", false);
+      return;
+    }
     boardStatus(elements.boardIrStatus, error.message, "error");
   }
 }
@@ -4281,6 +4340,7 @@ async function boardOptoAction(action) {
         reply.ok ? "ok" : "error");
     }
   } catch (error) {
+    if (hideUnsupportedFromError("opto", error)) return;
     boardStatus(elements.boardOptoStatus, error.message, "error");
   }
 }
@@ -4303,6 +4363,7 @@ async function applyBoardLedColor() {
     }
     renderBoardLed(parseLedStatus(text) || color);
   } catch (error) {
+    if (hideUnsupportedFromError("led", error)) return;
     boardStatus(elements.boardLedStatus, error.message, "error");
   }
 }
@@ -4357,6 +4418,7 @@ async function refreshBoardPromptStatus({ quiet = true } = {}) {
     boardPromptStatusText(status.bytes);
     return status;
   } catch (error) {
+    if (hideUnsupportedFromError("prompt", error)) return null;
     boardStatus(elements.boardPromptStatus, error.message, "error");
     return null;
   }
@@ -4480,6 +4542,7 @@ function wireBoardIoControls() {
       if (reply.ok) renderBoardLed({ r: 0, g: 0, b: 0 }, { off: true });
       else boardStatus(elements.boardLedStatus, reply.error || t("boardCmdError"), "error");
     } catch (error) {
+      if (hideUnsupportedFromError("led", error)) return;
       boardStatus(elements.boardLedStatus, error.message, "error");
     }
   });
@@ -4627,13 +4690,16 @@ function setConnected(connected, { preserveJournal = false } = {}) {
   flushReadingPrefix(); serialPresentation.reset();
   if (connectionChanged) {
     shellIntegrationError = false;
+    const featureDefault = unmanagedFeatureValue(connected, isWs, state.mgmtReady);
     for (const key of ["bonds", "led", "opto", "ir", "irLearn", "irName", "prompt", "bleName"]) {
-      state.features[key] = null;
+      state.features[key] = featureDefault;
     }
-    state.features.wifi = connected && !isWs && state.mgmtReady
-      ? hasManagementCapability(MGMT_CAP_WIFI) : null;
-    state.features.webdav = connected && !isWs && state.mgmtReady
-      ? hasManagementCapability(MGMT_CAP_WEBDAV) : null;
+    state.features.wifi = featureDefault === false ? false
+      : connected && !isWs && state.mgmtReady
+        ? hasManagementCapability(MGMT_CAP_WIFI) : null;
+    state.features.webdav = featureDefault === false ? false
+      : connected && !isWs && state.mgmtReady
+        ? hasManagementCapability(MGMT_CAP_WEBDAV) : null;
     applyFeatureVisibility();
   }
   if (!connected) {
@@ -5776,9 +5842,8 @@ async function subscribeBleUart(device, signal, notificationSession) {
     }
   };
   const available = hasManagementCapability(MGMT_CAP_RELIABLE_UART);
-  const preferNus = hasManagementCapability(MGMT_CAP_PREFER_NUS);
-  state.uartReliableAvailable = available && !preferNus;
-  const plan = uartTransportPlan(state.uartSessionMode, { reliable: available, preferNus });
+  state.uartReliableAvailable = available;
+  const plan = uartTransportPlan(state.uartSessionMode, { reliable: available });
   let lastError;
   for (const channel of plan) {
     validSession();
@@ -5925,8 +5990,7 @@ async function connectOnce({ chooseDevice = false, reselectId = null, signal } =
     if (!hasManagementCapability(MGMT_CAP_DEVICE_ID)) {
       throw new Error("Device does not advertise Device ID support");
     }
-    if (!hasManagementCapability(MGMT_CAP_RELIABLE_UART) &&
-        !hasManagementCapability(MGMT_CAP_PREFER_NUS)) {
+    if (!hasManagementCapability(MGMT_CAP_RELIABLE_UART)) {
       throw new Error("Device does not advertise a UART transport");
     }
     const deviceIdValue = await bleTransport.read(

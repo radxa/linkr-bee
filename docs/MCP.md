@@ -509,8 +509,10 @@ the client:
   excerpts, diagnostics at 24 lines, and WiFi scans at 20 networks. Truncated
   results say so; they are not complete evidence.
 - **One accessory at a time.** Tools act on whatever connection the app currently
-  has. Changing the connection changes what the tools see; only one BLE host can
-  own the accessory at a time.
+  has. Changing the connection changes what the tools see. The firmware accepts
+  two BLE clients, but only one session controls the console; a second client is
+  read-only until control is handed over (see
+  [Multi-client serial sessions](MULTI_CLIENT.md)).
 - **Accessory tools need BLE.** In a LAN-only session the terminal data path
   works, but the encrypted management channel does not, so diagnostics and
   configuration tools return an explicit error. Firmware without the WiFi,

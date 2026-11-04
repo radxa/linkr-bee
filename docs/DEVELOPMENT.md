@@ -50,27 +50,39 @@ repository owns the accessory firmware and reference clients.
 
 ## Quick Start
 
-Get the firmware running in 5 steps:
+Set up the workspace once, then build, flash and connect:
 
 ```sh
-# 1. Clone and enter the workspace
-git clone https://github.com/radxa/linkr-bee.git
+# 0. Prerequisites: Python 3, git, cmake and ninja, plus west
+python3 -m pip install --user west
+
+# 1. Create the workspace once; the manifest names the app checkout `linkr-bee`
+mkdir linkr-workspace && cd linkr-workspace
+west init -m https://github.com/radxa/linkr-bee.git --mr main
+west update            # Zephyr v4.4.1, hal_espressif, mbedtls, tf-psa-crypto, hostap
+python3 -m pip install -r zephyr/scripts/requirements.txt
+
+# 2. Zephyr SDK 1.0.1 with the RISC-V and Xtensa toolchains this repo builds with
+west sdk install -t riscv64-zephyr-elf -t xtensa-espressif_esp32_zephyr-elf
+
+# 3. Build the application directory for ESP32-C3 Super Mini (default WiFi + BLE).
+#    `west build -b <board> linkr-bee` from the workspace root is equivalent.
 cd linkr-bee
+west build -b esp32c3_supermini .
 
-# 2. Build for ESP32-C3 Super Mini (default WiFi + BLE)
-west build -b esp32c3_supermini linkr-bee
-
-# 3. Flash to device
+# 4. Flash to device
 west flash
 
-# 4. Connect via Python terminal
+# 5. Connect via Python terminal
 python3 tools/linkr_ble_terminal.py
 
-# 5. Or serve Web terminal locally
+# 6. Or serve Web terminal locally
 tools/serve_web.sh  # Open http://127.0.0.1:8765/
 ```
 
-> **Note**: Requires Zephyr v4.4.1 west workspace with Espressif HAL blobs. See [Build](#build) for details.
+> **Note**: Requires Zephyr v4.4.1 west workspace with the Espressif HAL blobs
+> from `west.yml`. See [Build](#build) for details, the SDK alternative and the
+> other boards.
 
 ## Supported environment
 
@@ -97,28 +109,62 @@ CI workflow assert that the C3 (`ESP32_BT_CTLR_LE_SECURITY_ENABLE`) and C5
 (`ESP32_BT_LE_SECURITY_ENABLE`, `…_SM_SC`, `…_LL_CFG_FEAT_LE_ENCRYPTION`,
 `…_CRYPTO_STACK_MBEDTLS`) controller security symbols stay enabled.
 
-From that workspace:
+A fresh clone is only the application half of a workspace. Prepare the
+workspace once, from its root:
 
 ```sh
-west build -b esp32c3_devkitm linkr-bee
+python3 -m pip install --user west
+mkdir linkr-workspace && cd linkr-workspace
+west init -m https://github.com/radxa/linkr-bee.git --mr main
+west update            # Zephyr v4.4.1, hal_espressif, mbedtls, tf-psa-crypto, hostap
+west zephyr-export
+python3 -m pip install -r zephyr/scripts/requirements.txt
+
+# Zephyr SDK 1.0.1: RISC-V for ESP32-C3/C5, Xtensa for ESP32-WROOM
+west sdk install -t riscv64-zephyr-elf -t xtensa-espressif_esp32_zephyr-elf
+# or download zephyr-sdk-1.0.1_<host>.tar.xz and run its ./setup.sh
 ```
 
-or for DevKitC:
+`west update` pulls `hal_espressif` (the ESP32 HAL blobs the WiFi build needs)
+and the mbedTLS/hostap modules the C5 controller's pairing depends on; without
+them a C3/C5 build fails to configure instead of silently losing pairing.
+
+Then build the application directory — the board list below is the one
+`tools/verify.sh` and CI build:
 
 ```sh
-west build -b esp32c3_devkitc linkr-bee
+cd linkr-bee
 ```
 
-For ESP32-C3 Super Mini:
+ESP32-C3 DevKitM:
 
 ```sh
-west build -b esp32c3_supermini linkr-bee
+west build -b esp32c3_devkitm .
 ```
 
-For ESP32-C5 DevKitC:
+ESP32-C3 DevKitC:
 
 ```sh
-west build -b esp32c5_devkitc/esp32c5/hpcore linkr-bee
+west build -b esp32c3_devkitc .
+```
+
+ESP32-C3 Super Mini:
+
+```sh
+west build -b esp32c3_supermini .
+```
+
+ESP32-C5 DevKitC:
+
+```sh
+west build -b esp32c5_devkitc/esp32c5/hpcore .
+```
+
+ESP32-WROOM-32 (`esp32_devkitc/esp32/procpu`) is built by CI; its default
+configuration disables WebDAV for DRAM, and CI is the reference for that board:
+
+```sh
+west build -b esp32_devkitc/esp32/procpu .
 ```
 
 For the Linkr Bee X1.0 production board (MV013). The board definition lives in
@@ -127,7 +173,7 @@ registers the application root as a `BOARD_ROOT`, so no extra CMake argument is
 needed:
 
 ```sh
-west build -b linkr_bee_x1_0 linkr-bee
+west build -b linkr_bee_x1_0 .
 ```
 
 ### GitHub Actions build
@@ -353,7 +399,7 @@ not collide after reboot.
 A normal C3 build already includes it:
 
 ```sh
-west build -b esp32c3_supermini linkr-bee
+west build -b esp32c3_supermini .
 ```
 
 The ESP32-C3 SoC WiFi driver is `CONFIG_WIFI_ESP32` (defined in
@@ -418,6 +464,16 @@ WebSocket endpoint so LAN clients bypass BLE range and MTU limits entirely:
   build-time token (32 lowercase hex) and takes precedence over the generated one
 - Disable entirely with `-DCONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE=n`
 
+> **Warning — LAN mode without a token is open to the whole network.** The
+> bridge listens on `0.0.0.0` and checks no `Origin` or `Host` header, so any
+> page or script that can reach `ws://<device-ip>/ws` can open the socket.
+> Setting `@s token off`, or leaving
+> `CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_AUTH_TOKEN` empty, disables
+> authentication entirely: anyone on that network can then **read and write**
+> the target's UART. Keep the token on outside a trusted lab network, rotate it
+> with `@s token` and re-pair the clients. The bridge speaks plain `ws://`; there
+> is no TLS.
+
 The Web Bluetooth terminal (`web/`) has a BLE/LAN switch in the Connection
 card; LAN mode connects to `ws://<host>/ws`, keeps terminal input, quick-send
 chips and counters working, and disables management controls that require BLE
@@ -449,7 +505,7 @@ in a separate build directory:
 
 ```sh
 west build -p always -d build-c5-open-pairing \
-  -b esp32c5_devkitc/esp32c5/hpcore linkr-bee -- \
+  -b esp32c5_devkitc/esp32c5/hpcore . -- \
   -DEXTRA_CONF_FILE=dev_c5_open_pairing.conf
 ```
 
@@ -807,7 +863,7 @@ asset builds: those are covered by CI (`.github/workflows/build.yml`).
 Enable UART RX echo loopback:
 
 ```sh
-west build -b esp32c3_devkitm linkr-bee -- \
+west build -b esp32c3_devkitm . -- \
   -DEXTRA_CONF_FILE=test_uart.conf
 ```
 
@@ -824,7 +880,7 @@ Build the hardware loopback verifier after shorting UART0 TX (GPIO21) to RX
 (GPIO20):
 
 ```sh
-west build -p always -b esp32c3_devkitm linkr-bee -- \
+west build -p always -b esp32c3_devkitm . -- \
   -DEXTRA_CONF_FILE=test_loopback.conf
 ```
 
@@ -832,7 +888,7 @@ For a BLE NUS echo diagnostic using the same full firmware feature set (no
 UART wiring required):
 
 ```sh
-west build -p always -b esp32c3_supermini linkr-bee -- \
+west build -p always -b esp32c3_supermini . -- \
   -DEXTRA_CONF_FILE=test_ble_echo.conf
 ```
 

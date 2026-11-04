@@ -1,21 +1,26 @@
 ---
 name: Linkr Bee Terminal
 description: 浏览器里零安装的串口终端——BLE / 局域网直连 ESP32-C3 桥接器
+# 这些是 skin v2（web/skin-v2.css，在 style.css 之后加载）实际画到屏幕上的值；
+# style.css 里的同名 token 是它的底层默认值，运行时会被覆盖。改动颜色时以这里为准。
 colors:
   signal-green: "#3fc88a"
-  signal-green-bright: "#6fe0ab"
-  ink-on-green: "#052517"
-  focus-blue: "#7aa8f8"
-  danger-red: "#f2777c"
-  bench-bg: "#090d14"
-  panel: "#11161f"
-  panel-raised: "#151b26"
+  signal-green-bright: "#5fe0a6"
+  ink-on-green: "#04160e"
+  focus-blue: "#6aa6f5"
+  danger-red: "#ef6a68"
+  rx-blue: "#6aa6f5"
+  tx-amber: "#f0a868"
+  warn-amber: "#f0b45e"
+  bench-bg: "#05080d"
+  panel: "#111822"
+  panel-raised: "#18212e"
   panel-inset: "#1c2330"
   terminal-bg: "#05080d"
   input-bg: "#0e131c"
-  text: "#e8eef7"
-  text-muted: "#8d9bb0"
-  text-placeholder: "#7b8ba1"
+  text: "#e8eef6"
+  text-muted: "#9aa7b8"
+  text-placeholder: "#7c8a9e"
   border: "#242d3d"
   border-strong: "#33405a"
   btn-hover: "#232c3d"
@@ -50,7 +55,7 @@ typography:
 rounded:
   sm: "8px"
   md: "12px"
-  lg: "16px"
+  lg: "18px"
   pill: "999px"
 spacing:
   sm: "8px"
@@ -120,26 +125,42 @@ components:
 
 ### Primary
 - **信号绿 Signal Green** (#3fc88a): 连接状态点、主按钮渐变起点、可点击命令、聚焦态边框。它只意味着「通」与「可执行」。
-- **信号绿·亮 Signal Green Bright** (#6fe0ab): hover 态与深色底上的绿色文字（终端提示、RSSI 读数、预览 glyphs）。
-- **绿底墨色 Ink on Green** (#052517): 主按钮上的文字色，保证绿底对比度。
+- **信号绿·亮 Signal Green Bright** (#5fe0a6): hover 态与深色底上的绿色文字（终端提示、RSSI 读数、预览 glyphs）。
+- **绿底墨色 Ink on Green** (#04160e): 主按钮上的文字色，保证绿底对比度。
 
 ### Secondary
-- **焦点蓝 Focus Blue** (#7aa8f8): 仅用于键盘焦点环与输入框 focus 描边，与绿色语义严格分离。
+- **焦点蓝 Focus Blue** (#6aa6f5): 仅用于键盘焦点环与输入框 focus 描边，与绿色语义严格分离。
 
 ### Tertiary
-- **警示红 Danger Red** (#f2777c): 断连状态点、错误 toast 描边。不用于装饰。
+- **警示红 Danger Red** (#ef6a68): 断连状态点、错误 toast 描边。不用于装饰。
+
+### 传输方向 RX / TX / WARN
+串口界面必须一眼分出「设备说的话」和「我们发出去的话」，还要能标注「降级但还在跑」，所以皮肤里有三个彩色语义 token。它们是**方向与降级**的标记，不是第二、第三强调色：
+
+- **`--rx` 接收蓝**（深色 #6aa6f5 / 浅色 #2f6fd0）: 只给状态栏的 `#rxCount`（收到的字节数）。
+- **`--tx` 发送橙**（深色 #f0a868 / 浅色 #b8671f）: 只给状态栏的 `#txCount`，以及「一键 Ctrl-C」`#breakButton` 的底色——那是一次向设备发送中断。
+- **`--warn` 警示琥珀**（#f0b45e）: 只给「降级但仍在工作」的提示条（供应商脚本没加载出来的 boot notice）。成功用信号绿、失败用警示红，琥珀的含义是「能用，但有问题」。浅色主题下该提示条改用更深的琥珀字色 `#7a5210`；`--warn` 本身目前只有深色值，是已知缺口，不是新增颜色的许可。
+
+三者都不得出现在插画、装饰背景、卡片描边或营销图形里；它们出现在别处就说明用错了 token。
 
 ### Neutral
-- **工作台底 Bench Background** (#090d14): 页面底色，带两团极淡的绿/蓝径向辉光。
-- **面板 Panel** (#11161f) / **面板·浮 Panel Raised** (#151b26) / **面板·嵌 Panel Inset** (#1c2330): 三级面板阶梯，卡片用浮层渐变，输入框与芯片用嵌层。
+- **工作台底 Bench Background** (#05080d): 页面底色，带两团极淡的绿/蓝径向辉光。
+- **面板 Panel** (#111822, 72% 不透明玻璃) / **面板·浮 Panel Raised** (#18212e) / **面板·嵌 Panel Inset** (#1c2330): 三级面板阶梯，卡片用浮层渐变，输入框与芯片用嵌层。Glass 只给 chrome（顶栏、侧边栏、抽屉、键条、芯片），终端画布保持近实心。
 - **终端底 Terminal Background** (#05080d): 全站最暗的表面，只属于串口输出区。
-- **正文 Text** (#e8eef7) / **次要 Text Muted** (#8d9bb0) / **占位 Text Placeholder** (#7b8ba1): 三级文字阶梯，占位色对比度 ≥4.5:1。
+- **正文 Text** (#e8eef6) / **次要 Text Muted** (#9aa7b8) / **占位 Text Placeholder** (#7c8a9e): 三级文字阶梯，占位色对比度 ≥4.5:1。
 - **描边 Border** (#242d3d) / **描边·强 Border Strong** (#33405a): 静态边框与 hover 加亮边框。
+
+### Token 分层
+- `web/style.css` 定义这套颜色的**默认值**，`web/skin-v2.css` 在其后加载并**整体重定义**同一组 token（上面列出的是皮肤实际生效值）。皮肤是 presentation layer，不改行为、不改 DOM 钩子。
+- 新代码只消费 token，不写字面色值；要调色只改 `skin-v2.css`，并同步本文件的 frontmatter。
+- 主题切换只靠 `[data-theme="light"]` 覆盖同一组 token；任何组件都不应出现 `[data-theme]` 分支里的第二次配色。
 
 ### Named Rules
 **The One Voice Rule.** 信号绿在任意屏幕上的占比不超过 10%。它的稀缺就是它的语义——满屏绿色等于没有绿色。
 
 **The Green Means Go Rule.** 绿色禁止用于纯装饰（插画、背景渐变主体、营销图形）。用户看到绿色就必须能回答：什么通了？
+
+**The Two Directions Rule.** 有方向的彩色（RX 蓝 / TX 橙）只用来区分数据流向；一旦它开始表达「好看」，方向就失效了。
 
 ## 3. Typography
 
@@ -166,30 +187,39 @@ components:
 环境分层：面板靠低透明度、大范围的深色投影浮于工作台底色之上，层级由「面板三级色阶 + 投影 + 1px 描边」共同表达，不堆叠多重阴影。
 
 ### Shadow Vocabulary
-- **面板投影 Panel Shadow** (`0 8px 24px rgba(2,6,16,0.42), 0 2px 6px rgba(2,6,16,0.28)`): 顶栏、卡片、状态栏、toast 共用的唯一投影。
-- **主按钮辉光 Primary Glow** (`0 6px 16px rgba(47,179,119,0.3), inset 0 1px 0 rgba(255,255,255,0.18)`): 仅主按钮与 logo，hover 时加深。
+投影按**层级**分配，每一层一个 token，同层不并存第二种投影。三个 token 都定义在 `web/skin-v2.css`（`--shadow` / `--shadow-flat`）与 `web/window.css`（`--window-shadow` / `--overlay-shadow`），并且都有 `[data-theme="light"]` 变体：
+
+- **`--shadow` 窗口投影**（skin v2：`0 40px 90px -46px rgba(0,0,0,0.95), inset 0 1px 0 rgba(255,255,255,0.06)`）: 浮在页面上、带自己标题栏的大窗口与卡片（终端窗口、Agent 窗口、设置抽屉）。
+- **`--shadow-flat` 面板投影**（skin v2：`0 24px 50px -38px rgba(0,0,0,0.9), inset 0 1px 0 rgba(255,255,255,0.05)`）: 停在页面上的静态卡片（`.card`、面板内分区）。它比 `--shadow` 更贴地：同一屏幕里两者必须一眼看出是同一套光。
+- **`--overlay-shadow` 浮层投影**（window.css：`0 12px 32px rgba(2,6,16,0.35), 0 2px 8px rgba(2,6,16,0.2)`）: 临时压在其他内容之上并脱离文档流的东西——下拉菜单、选择器弹层、复制气泡。
+- **`--window-shadow` 贴地阴影**（window.css：`0 2px 8px rgba(2,6,16,0.2)`）: 与页面同层的窗壳，只用来把 1px 描边和底色分开，不表达「浮起」。
+- **主按钮辉光 Primary Glow** (`0 6px 16px rgba(47,179,119,0.3), inset 0 1px 0 rgba(255,255,255,0.18)`): 仅主按钮与 logo，hover 时加深。它不是层级，是「这一个能按」的提示。
 - **连接脉冲 Connected Pulse** (状态点 `::after` 环形扩散，transform/opacity): 仅已连接状态点，纯合成层动画。
+- 内阴影 `inset 0 1px 0 rgba(255,255,255,…)` 属于表面高光（玻璃质感），不算独立投影层级。
 
 ### Named Rules
-**The One Shadow Rule.** 全站只有一种面板投影。需要「更高」的层级时，用色阶和描边解决，不发明新阴影。
+**The One Shadow Per Level Rule.** 一个层级只有一种投影，且必须来自上面列出的 token；需要「更高」时先换层级（`--shadow-flat` → `--shadow`），不发明新阴影。散落的字面量 `box-shadow` 只允许用于焦点环（`0 0 0 3px …`）与表面高光 `inset`。
 
 ## 5. Components
 
 ### Buttons
 - **Shape:** 利落小圆角（10px），高度 36px，内边距 0 13px
+- **Touch:** 36px 是硬下限；`@media (pointer: coarse)` 下一切手指按钮（含终端键条 `.terminal-key`、`#breakButton`、菜单项）升到 44px。宽屏平板也算粗指针——不要用「宽度 > 900px」推断有鼠标
 - **Primary:** 信号绿渐变（135deg, #4dd596→#2fb377）+ 绿底墨色文字 + 辉光投影；仅用于每区一个的主动作（连接、连接 WiFi）
 - **Hover / Focus:** hover 边框提亮为信号绿、背景升档；`:active` 下沉 1px 并微缩（translateY(1px) scale(0.99)）；焦点环为焦点蓝 3px 外发光
 - **Secondary / Soft:** 面板·浮底色 + 描边，用于次要动作；disabled 统一 opacity 0.4
 - **Loading:** 连接中隐藏图标、显示旋转 spinner，按钮文案切换为「连接中…」
+
+**The Touch Target Rule.** 36px 是鼠标场景的硬下限，44px 是手指场景的硬下限；是否算手指只看 `@media (pointer: coarse)`，不看视口宽度。终端键条按这条规则执行——它是「不看也要按对」的那组控件。
 
 ### Chips (preset chips / network chips)
 - **Style:** 胶囊形（999px），面板·浮底色，等宽 12px，次要色文字
 - **State:** hover 边框变绿、文字转正、上浮 1px；disabled 降为 0.4 透明度
 
 ### Cards / Containers
-- **Corner Style:** 大圆角（16px）
+- **Corner Style:** 大圆角（18px，`--radius-lg`）
 - **Background:** 面板·浮→面板的纵向渐变 + 1px 描边
-- **Shadow Strategy:** 唯一的面板投影（见 Elevation）
+- **Shadow Strategy:** 停在页面上的卡片用 `--shadow-flat`（见 Elevation）
 - **Internal Padding:** 16px；卡片间距 14px
 - **Title:** Title 层级 + 信号绿 7px 圆点引导
 - **Vertical rhythm:** 一张卡内部的竖向节奏只由**一种**机制决定。`display: grid; gap` 的卡片（`.board-card`、`.bond-card`）里，标题带和子项自带的上下外边距必须清零，否则 gap 会与它们叠加（14 + 14 + 8 = 36px，而 block 卡片是 14px）——同一列的卡片看起来就对不齐。
@@ -294,15 +324,17 @@ components:
 
 ### Do:
 - **Do** 让绿色只表达「连接/正常/可执行」（The Green Means Go Rule），主动作按钮每区至多一个。
-- **Do** 用三级面板色阶 + 唯一面板投影表达层级（The One Shadow Rule）。
+- **Do** 用三级面板色阶 + 每层一个投影 token 表达层级（The One Shadow Per Level Rule）。
 - **Do** 给一切数据用等宽字体 + tabular-nums（The Machine Speaks Mono Rule）。
 - **Do** 保持按钮触感：hover 提亮边框、active 下沉 1px，过渡 ≤0.15s。
+- **Do** 让按钮至少 36px 高，粗指针 44px（The Touch Target Rule）。
 - **Do** 为所有动效提供 `prefers-reduced-motion` 降级。
 
 ### Don't:
 - **Don't** 做成「PuTTY 时代的老旧桌面工具」：灰底、拥挤、无边框层次、系统默认控件外观。
 - **Don't** 做成「营销味 SaaS」：hero 区、营销文案卡片、大面积渐变装饰、展示级大标题（The No Display Type Rule）。
 - **Don't** 把信号绿当装饰色使用——背景、插画、非语义图形一律禁止（The One Voice Rule）。
-- **Don't** 发明第二种面板阴影或第二套圆角阶梯。
+- **Don't** 在同一层级发明第二种阴影，也不要写死投影字面量——用 token。
+- **Don't** 发明第二套圆角阶梯。
 - **Don't** 用 `transition: all`；只过渡明确列出的属性。
 - **Don't** 用 box-shadow 做循环动画；脉冲类效果只用 transform/opacity。

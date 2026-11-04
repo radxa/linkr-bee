@@ -13,7 +13,8 @@ if (typeof document !== "undefined") {
  * screen. Host-only methods just cover the host's own internal budget; keep the
  * connect value above HOST_CONNECT_WORST_CASE_MS in
  * harmonyos/entry/src/main/ets/bridge/LinkrBleHost.ets so the page never gives
- * up on a connect the radio is still completing. */
+ * up on a connect the radio is still completing. harmonyos/BRIDGE_PROTOCOL.md
+ * documents the same table for host implementers; keep the two in step. */
 const REQUEST_TIMEOUT_MS = 30000;
 const INTERACTIVE_TIMEOUT_MS = 180000;
 const METHOD_TIMEOUTS = {

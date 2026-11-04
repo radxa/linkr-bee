@@ -82,8 +82,12 @@ Each BLE peer has independent receive reassembly, sequence numbers, subscription
 selection, management indications, bounded UART output queues and a sender.
 Explicit CCC writes select NUS/Reliable for that peer; restored bonded CCC state
 does not override a later explicit choice. Disconnecting one peer does not
-purge another peer's requests or output. A full/failed output queue disconnects
-the slow peer rather than blocking capture or silently continuing a broken log.
+purge another peer's requests or output. A full output queue does **not**
+disconnect the slow peer: the bridge drops that chunk for that peer, counts the
+lost bytes (`linkr_ble_peer_dropped()`) and keeps the link, because dropping the
+connection would turn a burst of shell output into a dead terminal. The loss is
+logged at most once a second; the UART ring on the target side loses data the
+same way.
 
 UART input packets and queued mutating management commands carry an ownership
 generation. Release, handover and disconnect invalidate old queued work. A

@@ -231,6 +231,12 @@ while Bluetooth is connected; the Python and C terminals print it. The token gat
 access but does not encrypt anything, so `ws://` traffic is visible on the same
 network. Use LAN mode on a network you trust.
 
+**Without a token the bridge is open to the whole network.** The WebSocket listens
+on every interface and the firmware checks no `Origin` or `Host` header, so
+`@s token off` (or an empty build-time token) lets any page or script that can
+reach the accessory read **and write** the target's UART. Keep the token on
+outside a trusted lab network; see [LAN warning](docs/DEVELOPMENT.md#uart-over-websocket-lan-bridge).
+
 ## Pairing and security
 
 - The Bluetooth LE link is encrypted and bonded. On C3/C5 each new host is
@@ -252,7 +258,7 @@ network. Use LAN mode on a network you trust.
 
 | Symptom | Check |
 | --- | --- |
-| No device in the client | Accessory powered and in range, and not already connected to another host; only one Bluetooth LE connection is served at a time |
+| No device in the client | Accessory powered and in range. The default firmware accepts two BLE connections, but only one session may type or change settings — see [Multi-client serial sessions](docs/MULTI_CLIENT.md) |
 | Browser cannot connect | Chrome or Chromium, served over HTTPS or `localhost`. `tools/serve_web.sh` uses `localhost` |
 | No output | Target TX to accessory RX, target is printing, baud rate matches |
 | Output but no input | Target RX to accessory TX; hardware flow control off unless CTS and RTS are both wired |

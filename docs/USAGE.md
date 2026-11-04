@@ -27,9 +27,15 @@ and the individual platform guides.
    stop bits, and flow control; the default is `115200,8,n,1,n`.
 5. Reset the target or press Enter in the terminal to obtain its console prompt.
 
-Only one BLE host can connect at a time. If another client owns the connection,
-disconnect it before selecting the accessory here. Use the
-[pairing and recovery guide (Chinese)](BLE_PAIRING.md) for lost bonds or a full bond list.
+The default firmware accepts **two simultaneous BLE connections** and shows the
+target's console to both. Exactly one of them may type or change accessory
+settings at a time: that session owns the console until it releases control, and
+another client takes over when the owner has been idle (the Web/mobile terminal's
+**Take control** is the immediate path). See [Multi-client serial
+sessions](MULTI_CLIENT.md) for the ownership rules and the `@c` commands. If
+another client is actively writing, ask it to release control before typing
+here. Use the [pairing and recovery guide (Chinese)](BLE_PAIRING.md) for lost
+bonds or a full bond list.
 
 If a live BLE or LAN link drops unexpectedly (the board goes out of range,
 reboots, or loses power), the terminal redials on its own with a bounded

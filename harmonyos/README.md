@@ -15,7 +15,9 @@ BLE access and exposes it through the JSON-RPC contract in
   requests `ohos.permission.ACCESS_BLUETOOTH` at runtime;
 - Management Service-filtered scan and native device picker;
 - GATT connect, service discovery, MTU 247 request, serialized reads/writes, and
-  indication subscriptions;
+  subscriptions that pick notification or indication from the characteristic's
+  declared properties (NUS TX is notify-only; Management/Reliable UART use
+  indications);
 - ArkWeb-to-ArkTS request dispatch plus notification and disconnect events;
 - shared web resource build and automatic copy into `resources/rawfile/`.
 

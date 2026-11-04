@@ -2,6 +2,15 @@
  * what was actually sent to the target, what came back, and what is durable
  * about the device. Built for a bug report or a shift handover, so everything
  * passes through the same redaction as the task store and the size is capped.
+ *
+ * Redaction limits: the shared patterns remove the credential shapes a model,
+ * a shell command or a JSON snippet normally use, and `secrets` scrubs values
+ * the caller already knows. Anything unlabelled — a raw token that arrived as
+ * ordinary console text with no `key: value` around it — is not recognized, and
+ * there is no interactive preview step before the file is downloaded (the panel
+ * exports this string directly). Treat an exported report as redacted for known
+ * shapes, not as reviewed: move credentials out of the source text instead of
+ * trusting the filter.
  */
 import { redactTaskText } from "./agent_tasks.js";
 
@@ -18,38 +27,38 @@ function printable(text) {
   return String(text ?? "").replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "").replace(/\r/g, "");
 }
 
-function planSection(plan, zh) {
+function planSection(plan, zh, redact) {
   if (!Array.isArray(plan) || !plan.length) return [];
   const out = [zh ? "## 计划" : "## Plan", ""];
   for (const step of plan) {
-    out.push(`- [${step.status || "pending"}] ${redactTaskText(step.title || "")}`.trimEnd());
-    if (step.verification) out.push(`  - ${zh ? "验证" : "Verification"}: ${redactTaskText(step.verification)}`);
-    if (step.expectedResult) out.push(`  - ${zh ? "预期" : "Expected"}: ${redactTaskText(step.expectedResult)}`);
+    out.push(`- [${step.status || "pending"}] ${redact(step.title || "")}`.trimEnd());
+    if (step.verification) out.push(`  - ${zh ? "验证" : "Verification"}: ${redact(step.verification)}`);
+    if (step.expectedResult) out.push(`  - ${zh ? "预期" : "Expected"}: ${redact(step.expectedResult)}`);
     if (step.completion) out.push(`  - ${zh ? "证据类别" : "Evidence category"}: ${step.completion}`);
-    for (const evidence of step.evidence || []) out.push(`  - ${redactTaskText(evidence.id)}: ${redactTaskText(evidence.tool)} · ${redactTaskText(evidence.subject)} · ${redactTaskText(evidence.status)} · ${redactTaskText(JSON.stringify(evidence.expected || {}))}`);
-    if (step.nextAction) out.push(`  - ${zh ? "下一步" : "Next"}: ${redactTaskText(step.nextAction)}`);
+    for (const evidence of step.evidence || []) out.push(`  - ${redact(evidence.id)}: ${redact(evidence.tool)} · ${redact(evidence.subject)} · ${redact(evidence.status)} · ${redact(JSON.stringify(evidence.expected || {}))}`);
+    if (step.nextAction) out.push(`  - ${zh ? "下一步" : "Next"}: ${redact(step.nextAction)}`);
   }
   out.push("");
   return out;
 }
 
-function executionSection(records, zh) {
+function executionSection(records, zh, redact) {
   if (!records.length) return [];
   const out = [zh ? "## 串口执行记录" : "## Target executions", ""];
   for (const record of records) {
     out.push(`### ${record.id || "execution"}`);
-    out.push(line(zh ? "命令" : "Command", `\`${printable(redactTaskText(record.payload || ""))}\``));
+    out.push(line(zh ? "命令" : "Command", `\`${printable(redact(record.payload || ""))}\``));
     out.push(line(zh ? "投递" : "Delivery", record.delivery, record.executionStatus,
       record.exitCode === undefined ? "" : `${zh ? "退出码" : "exit code"} ${record.exitCode}`,
       record.observation));
-    if (record.error) out.push(line(zh ? "错误" : "Error", redactTaskText(record.error)));
+    if (record.error) out.push(line(zh ? "错误" : "Error", redact(record.error)));
     if (record.download) {
-      out.push(line(zh ? "下载" : "Download", redactTaskText(record.download.path || ""),
+      out.push(line(zh ? "下载" : "Download", redact(record.download.path || ""),
         record.download.bytes === undefined ? "" : `${record.download.bytes} bytes`,
         record.download.sha256 ? `SHA-256 ${record.download.sha256}` : ""));
     }
     if (record.evidence) {
-      const evidence = printable(redactTaskText(record.evidence)).slice(-REPORT_EVIDENCE_CHARS);
+      const evidence = printable(redact(record.evidence)).slice(-REPORT_EVIDENCE_CHARS);
       out.push("", "```text", evidence, "```");
     }
     out.push("");
@@ -57,35 +66,36 @@ function executionSection(records, zh) {
   return out;
 }
 
-export function buildTaskReport({ lang = "en", device = "", task = null, tasks = [], records = [], notes = [] } = {}) {
+export function buildTaskReport({ lang = "en", device = "", task = null, tasks = [], records = [], notes = [], secrets = [] } = {}) {
   const zh = String(lang).startsWith("zh");
+  const redact = (value) => redactTaskText(value, secrets);
   const out = [
     zh ? "# Linkr Bee 排查报告" : "# Linkr Bee diagnostic report",
     "",
-    line(zh ? "设备" : "Device", redactTaskText(device)),
+    line(zh ? "设备" : "Device", redact(device)),
     line(zh ? "生成时间" : "Generated", new Date().toISOString()),
   ];
-  if (task?.goal) out.push(line(zh ? "目标" : "Goal", redactTaskText(task.goal)));
+  if (task?.goal) out.push(line(zh ? "目标" : "Goal", redact(task.goal)));
   if (task?.status) out.push(line(zh ? "状态" : "Status", task.status));
   out.push("");
 
   if (task?.summary) {
-    out.push(zh ? "## 助手结论" : "## Assistant summary", "", redactTaskText(task.summary), "");
+    out.push(zh ? "## 助手结论" : "## Assistant summary", "", redact(task.summary), "");
   }
-  out.push(...planSection(task?.plan, zh));
-  out.push(...executionSection(records, zh));
+  out.push(...planSection(task?.plan, zh, redact));
+  out.push(...executionSection(records, zh, redact));
 
   if (notes.length) {
     out.push(zh ? "## 设备笔记" : "## Device notes", "");
     for (const note of notes) {
-      out.push(`- ${redactTaskText(note.text)}${note.evidence ? ` (${redactTaskText(note.evidence)})` : ""}`);
+      out.push(`- ${redact(note.text)}${note.evidence ? ` (${redact(note.evidence)})` : ""}`);
     }
     out.push("");
   }
   if (tasks.length) {
     out.push(zh ? "## 该设备的历史任务" : "## Earlier tasks on this device", "");
     for (const item of tasks) {
-      out.push(`- ${redactTaskText(item.goal)} — ${item.status}${item.updatedAt ? ` (${new Date(item.updatedAt).toISOString()})` : ""}`);
+      out.push(`- ${redact(item.goal)} — ${item.status}${item.updatedAt ? ` (${new Date(item.updatedAt).toISOString()})` : ""}`);
     }
     out.push("");
   }

@@ -39,6 +39,10 @@ interface PendingNotification {
   deviceId: string;
   serviceUuid: string;
   characteristicUuid: string;
+  /* The connection this byte arrived on. A batch is only delivered while the
+   * same connection is still the live one; anything else belongs to a console
+   * that is gone. */
+  generation: number;
   value: number[];
 }
 
@@ -84,6 +88,7 @@ export class LinkrBleHost {
   private pendingNotificationBytes: number = 0;
   private notificationFlushActive: boolean = false;
   private droppedNotificationBytes: number = 0;
+  private staleNotificationBytes: number = 0;
 
   constructor(controller: webview.WebviewController) {
     this.controller = controller;
@@ -154,7 +159,7 @@ export class LinkrBleHost {
         );
         return null;
       case 'startNotifications':
-        await this.setIndications(
+        await this.setSubscription(
           this.requireString(args.deviceId, 'deviceId'),
           this.requireString(args.serviceUuid, 'serviceUuid'),
           this.requireString(args.characteristicUuid, 'characteristicUuid'),
@@ -162,7 +167,7 @@ export class LinkrBleHost {
         );
         return null;
       case 'stopNotifications':
-        await this.setIndications(
+        await this.setSubscription(
           this.requireString(args.deviceId, 'deviceId'),
           this.requireString(args.serviceUuid, 'serviceUuid'),
           this.requireString(args.characteristicUuid, 'characteristicUuid'),
@@ -570,6 +575,12 @@ export class LinkrBleHost {
     this.connectedDeviceId = '';
     this.characteristics.clear();
     this.operationTail = Promise.resolve();
+    /* A disconnect ends the byte stream: whatever is still queued was received
+     * on the connection that just went away and must never be delivered to the
+     * next one. The running flush notices the empty queue and stops. */
+    this.pendingNotifications = [];
+    this.pendingNotificationBytes = 0;
+    this.droppedNotificationBytes = 0;
     if (client === null) {
       return;
     }
@@ -638,7 +649,28 @@ export class LinkrBleHost {
     });
   }
 
-  private setIndications(
+  /* NUS TX advertises NOTIFY only; the Management and Reliable UART
+   * characteristics advertise INDICATE. Driving the wrong CCC silently
+   * subscribes to nothing (or is refused), so the characteristic's own
+   * properties decide which one is enabled. NOTIFY is preferred when a
+   * characteristic declares both, because it is the lower-latency path used for
+   * interactive console bytes. */
+  private subscriptionMode(
+    characteristic: ble.BLECharacteristic,
+  ): 'notify' | 'indicate' {
+    const properties = characteristic.properties;
+    if (properties !== undefined && properties !== null) {
+      if (properties.notify === true) {
+        return 'notify';
+      }
+      if (properties.indicate === true) {
+        return 'indicate';
+      }
+    }
+    return 'notify';
+  }
+
+  private setSubscription(
     deviceId: string,
     serviceUuid: string,
     characteristicUuid: string,
@@ -650,7 +682,11 @@ export class LinkrBleHost {
         serviceUuid,
         characteristicUuid,
       );
-      await client.setCharacteristicChangeIndication(characteristic, enabled);
+      if (this.subscriptionMode(characteristic) === 'indicate') {
+        await client.setCharacteristicChangeIndication(characteristic, enabled);
+      } else {
+        await client.setCharacteristicChangeNotification(characteristic, enabled);
+      }
     });
   }
 
@@ -715,7 +751,8 @@ export class LinkrBleHost {
   ): void {
     const value = new Uint8Array(characteristic.characteristicValue);
     this.pendingNotifications.push({ deviceId, serviceUuid: characteristic.serviceUuid,
-      characteristicUuid: characteristic.characteristicUuid, value: Array.from(value) });
+      characteristicUuid: characteristic.characteristicUuid,
+      generation: this.connectionGeneration, value: Array.from(value) });
     this.pendingNotificationBytes += value.length;
 
     // Keep the newest bytes: the terminal is most useful near the live end of a
@@ -754,6 +791,21 @@ export class LinkrBleHost {
         const batch = this.pendingNotifications.splice(0, count);
         this.pendingNotificationBytes -= size;
 
+        /* Deliver only under the connection the bytes arrived on. `closeClient`
+         * empties the queue, so this guards the batch that was already in
+         * flight when the link changed: an old console must never be spliced
+         * into a new session. */
+        const generation = batch.length === 0
+          ? this.connectionGeneration
+          : batch[0].generation;
+        const sameGeneration = generation === this.connectionGeneration &&
+          batch.every((item: PendingNotification) => item.generation === generation);
+        if (!sameGeneration) {
+          this.staleNotificationBytes += size;
+          this.reportStaleNotifications();
+          continue;
+        }
+
         const dropped = this.droppedNotificationBytes;
         this.droppedNotificationBytes = 0;
         if (dropped > 0) {
@@ -774,6 +826,19 @@ export class LinkrBleHost {
     } finally {
       this.notificationFlushActive = false;
     }
+  }
+
+  private reportStaleNotifications(): void {
+    if (this.staleNotificationBytes === 0) {
+      return;
+    }
+    hilog.warn(
+      DOMAIN,
+      'LinkrBee',
+      'discarded %{public}d BLE notification bytes from a closed session',
+      this.staleNotificationBytes,
+    );
+    this.staleNotificationBytes = 0;
   }
 
   private async resolveRequest(

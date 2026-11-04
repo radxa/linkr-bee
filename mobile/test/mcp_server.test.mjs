@@ -524,7 +524,9 @@ test("send_serial_input asks the phone for approval and sends once approved", as
   assert.equal(typeof approvals[0].timeoutMs, "number");
   assert.equal(calls.execute.length, 1);
   assert.deepEqual(calls.execute[0].args, { text: "uname -a", appendEnter: true });
-  assert.deepEqual(calls.execute[0].options, { userApproved: true });
+  /* The MCP gate owns the approval for this write; sensitiveApproved tells the
+   * executor's own destructive guard not to ask a second time. */
+  assert.deepEqual(calls.execute[0].options, { userApproved: true, sensitiveApproved: true });
   assert.ok(calls.execute[0].signal instanceof AbortSignal);
   assert.equal(host.getAudit()[0].outcome, "ok");
 });
@@ -729,7 +731,10 @@ test("high-risk-only mode gates credential, bridge and forget changes", async ()
 });
 
 test("isHighRiskToolCall keeps the guarded gate narrowly high risk", () => {
-  assert.equal(isHighRiskToolCall("send_serial_input", { text: "uname -a" }), false);
+  /* A complete line with nothing opaque: not high risk. A write that omits
+   * appendEnter leaves the console line unfinished, which is high risk. */
+  assert.equal(isHighRiskToolCall("send_serial_input", { text: "uname -a", appendEnter: true }), false);
+  assert.equal(isHighRiskToolCall("send_serial_input", { text: "uname -a" }), true);
   assert.equal(isHighRiskToolCall("send_serial_input", { text: "rm -rf /tmp/x" }), true);
   assert.equal(isHighRiskToolCall("send_serial_input", { text: "dd if=/dev/zero of=/dev/mmcblk0" }), true);
   assert.equal(isHighRiskToolCall("send_serial_input", { text: "sudo systemctl restart ssh" }), true);

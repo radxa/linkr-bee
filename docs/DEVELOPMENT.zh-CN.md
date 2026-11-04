@@ -48,23 +48,33 @@ Linkr 端通过上方 BLE 配件 API 文档实现发现、串口、配网和局�
 
 ## 快速开始
 
-5 步完成固件构建和运行：
+从零准备 workspace，然后构建、刷写并连接：
 
 ```sh
-# 1. 克隆并进入工作区
-git clone https://github.com/radxa/linkr-bee.git
+# 0. 准备：Python 3、git、cmake、ninja，并安装 west
+python3 -m pip install --user west
+
+# 1. 只建一次 west workspace；manifest 把应用仓库放在 `linkr-bee` 子目录
+mkdir linkr-workspace && cd linkr-workspace
+west init -m https://github.com/radxa/linkr-bee.git --mr main
+west update            # Zephyr v4.4.1、hal_espressif、mbedtls、tf-psa-crypto、hostap
+python3 -m pip install -r zephyr/scripts/requirements.txt
+
+# 2. 安装 Zephyr SDK 1.0.1：RISC-V 与 Xtensa 两套工具链
+west sdk install -t riscv64-zephyr-elf -t xtensa-espressif_esp32_zephyr-elf
+
+# 3. 在应用目录里构建 ESP32-C3 Super Mini 固件（默认 WiFi + BLE）
+#    也可在 workspace 根目录执行 `west build -b <板型> linkr-bee`
 cd linkr-bee
+west build -b esp32c3_supermini .
 
-# 2. 构建 ESP32-C3 Super Mini 固件（默认 WiFi + BLE）
-west build -b esp32c3_supermini linkr-bee
-
-# 3. 刷写到设备
+# 4. 刷写到设备
 west flash
 
-# 4. 通过 Python 终端连接
+# 5. 通过 Python 终端连接
 python3 tools/linkr_ble_terminal.py
 
-# 5. 或启动 Web 终端
+# 6. 或启动 Web 终端
 tools/serve_web.sh  # 打开 http://127.0.0.1:8765/
 ```
 
@@ -84,28 +94,60 @@ tools/serve_web.sh  # 打开 http://127.0.0.1:8765/
 请使用 Zephyr v4.4.1 的 west workspace。默认的 WiFi 构建还要求 west manifest
 内存在 Espressif HAL blobs（`modules/hal_espressif`）。
 
-在该 workspace 中：
+刚克隆的仓库只是 workspace 的应用部分。先在 workspace 根目录完成一次性准备：
 
 ```sh
-west build -b esp32c3_devkitm linkr-bee
+python3 -m pip install --user west
+mkdir linkr-workspace && cd linkr-workspace
+west init -m https://github.com/radxa/linkr-bee.git --mr main
+west update            # Zephyr v4.4.1、hal_espressif、mbedtls、tf-psa-crypto、hostap
+west zephyr-export
+python3 -m pip install -r zephyr/scripts/requirements.txt
+
+# Zephyr SDK 1.0.1：C3/C5 用 RISC-V，WROOM 用 Xtensa
+west sdk install -t riscv64-zephyr-elf -t xtensa-espressif_esp32_zephyr-elf
+# 也可下载 zephyr-sdk-1.0.1_<host>.tar.xz 后执行其 ./setup.sh
 ```
 
-或 DevKitC：
+`west update` 会拉取 `hal_espressif`（WiFi 构建需要的 ESP32 HAL blobs）以及
+C5 控制器配对依赖的 mbedTLS/hostap 模块；缺这些模块时 C3/C5 会直接配置失败，
+而不是悄悄丢掉配对能力。
+
+然后在应用目录里构建——下面的板型列表就是 `tools/verify.sh` 与 CI 使用的列表：
 
 ```sh
-west build -b esp32c3_devkitc linkr-bee
+cd linkr-bee
+```
+
+ESP32-C3 DevKitM：
+
+```sh
+west build -b esp32c3_devkitm .
+```
+
+ESP32-C3 DevKitC：
+
+```sh
+west build -b esp32c3_devkitc .
 ```
 
 ESP32-C3 Super Mini：
 
 ```sh
-west build -b esp32c3_supermini linkr-bee
+west build -b esp32c3_supermini .
 ```
 
 ESP32-C5 DevKitC：
 
 ```sh
-west build -b esp32c5_devkitc/esp32c5/hpcore linkr-bee
+west build -b esp32c5_devkitc/esp32c5/hpcore .
+```
+
+ESP32-WROOM-32（`esp32_devkitc/esp32/procpu`）由 CI 构建；它的默认配置因 DRAM
+关闭 WebDAV，以 CI 为准：
+
+```sh
+west build -b esp32_devkitc/esp32/procpu .
 ```
 
 Linkr Bee X1.0（MV013）量产板：板级定义在本仓库
@@ -113,7 +155,7 @@ Linkr Bee X1.0（MV013）量产板：板级定义在本仓库
 `BOARD_ROOT`，不需要额外的 CMake 参数：
 
 ```sh
-west build -b linkr_bee_x1_0 linkr-bee
+west build -b linkr_bee_x1_0 .
 ```
 
 ### GitHub Actions 构建与刷写
@@ -280,7 +322,7 @@ WiFi 凭据默认只保存在 RAM，重启即丢失。仅在量产设备已经�
 普通 C3 构建即包含：
 
 ```sh
-west build -b esp32c3_supermini linkr-bee
+west build -b esp32c3_supermini .
 ```
 
 ESP32-C3 SoC WiFi 驱动是 `CONFIG_WIFI_ESP32`（定义于 `drivers/wifi/esp32/Kconfig.esp32`），它会自动 select L2/ethernet/mgmt 层和 MBEDTLS。STA 模式由 `CONFIG_WIFI_USAGE_MODE_STA` choice 选择。
@@ -315,6 +357,13 @@ WiFi 拿到 IP 地址后,固件还会把桥接 UART 暴露为 WebSocket 端点,�
 - 可选门槛:`CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_AUTH_TOKEN` 要求客户端在 3 秒内把 token 作为首条文本帧发送
 - 整体关闭:`-DCONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE=n`
 
+> **警告：局域网模式关掉令牌后对整个网段开放。** 桥接器监听 `0.0.0.0`，固件也不
+> 校验 `Origin`/`Host`，能访问 `ws://<设备 IP>/ws` 的网页或脚本都能直接建立连接。
+> 执行 `@s token off`，或让 `CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_AUTH_TOKEN` 为空，
+> 就等于彻底关闭鉴权：同一网段的任何人都能**读写目标板串口**。除可信实验网络外，
+> 请始终保留令牌；轮换用 `@s token`，随后重新配对客户端。桥接只提供明文 `ws://`，
+> 没有 TLS。
+
 Web 终端(`web/`)的「连接」卡片里有 BLE/局域网切换;局域网模式连接 `ws://<主机>/ws`,终端输入、快捷命令、计数器照常工作,仅 BLE 专属的控制按钮(`@u`/`@w`/`@d`/`@i?`)被禁用。当 BLE 诊断拿到 IP 时,局域网地址输入框会自动预填。WebDAV 日志上传并行运行不受影响。
 
 出厂构建在所有板型上启用 `CONFIG_LINKR_BLE_BRIDGE_UART_RX_DROP_NO_CONN=y`。
@@ -338,7 +387,7 @@ C5 DevKitC 需要在 GPIO1 外接按钮或跳线；板载 BOOT 和 RST 不能用
 
 ```sh
 west build -p always -d build-c5-open-pairing \
-  -b esp32c5_devkitc/esp32c5/hpcore linkr-bee -- \
+  -b esp32c5_devkitc/esp32c5/hpcore . -- \
   -DEXTRA_CONF_FILE=dev_c5_open_pairing.conf
 ```
 
@@ -638,7 +687,7 @@ Web 资源——这些由 CI（`.github/workflows/build.yml`）覆盖。
 启用 UART RX 回环：
 
 ```sh
-west build -b esp32c3_devkitm linkr-bee -- \
+west build -b esp32c3_devkitm . -- \
   -DEXTRA_CONF_FILE=test_uart.conf
 ```
 
@@ -652,14 +701,14 @@ west build -b esp32c3_devkitm linkr-bee -- \
 将 UART0 TX（GPIO21）和 RX（GPIO20）短接后，可构建硬件回环验证镜像：
 
 ```sh
-west build -p always -b esp32c3_devkitm linkr-bee -- \
+west build -p always -b esp32c3_devkitm . -- \
   -DEXTRA_CONF_FILE=test_loopback.conf
 ```
 
 使用同一完整固件功能集的 BLE NUS echo 诊断不需要 UART 接线：
 
 ```sh
-west build -p always -b esp32c3_supermini linkr-bee -- \
+west build -p always -b esp32c3_supermini . -- \
   -DEXTRA_CONF_FILE=test_ble_echo.conf
 ```
 

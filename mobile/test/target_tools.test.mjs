@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createAssistantMessageEventStream, getCurrentTools } from "@earendil-works/pi-ai";
-import { createSerialAgent } from "../src/pi-agent.mjs";
+import { createSerialAgent, parseToolProbeEvidence } from "../src/pi-agent.mjs";
 import { SerialJournal } from "../../web/serial_journal.js";
 
 /* The gated tools only exist once the target is known to support them, and the
@@ -31,8 +31,12 @@ const toolText = (message) => message.content.filter((part) => part.type === "te
 /* `files` is the fake target's filesystem: a read command for a known path
  * makes the target print the same markers the real firmware-side script does,
  * so the parser under test is exercised against realistic output. */
-function makeAgent({ stream, journal, files = {}, getStatus = () => status }) {
+function makeAgent({ stream, journal, files = {}, getStatus = () => status, probe = {} }) {
   const sent = [];
+  /* The probe fixtures: `tools` maps a command to whether the fake target has
+   * it; `mode` reproduces the ways a real probe can fail to answer. */
+  const probeAvailable = probe.tools || {};
+  const probeMode = probe.mode || "normal";
   const toBase64 = (bytes) => {
     let binary = "";
     for (const byte of bytes) binary += String.fromCharCode(byte);
@@ -46,6 +50,16 @@ function makeAgent({ stream, journal, files = {}, getStatus = () => status }) {
       sendInput: async (payload) => { sent.push(payload); return { inputRevision: 1 }; },
       execute: async (args) => {
         sent.push(args.text);
+        const probeMatch = /for t in ([^;]+); do if command -v/.exec(String(args.text));
+        if (probeMatch) {
+          if (probeMode === "refuse") throw new Error("Input refused: the owner did not approve this command.");
+          const names = [...probeMatch[1].matchAll(/'([^']+)'/g)].map((match) => match[1]);
+          const lines = names
+            .filter((name, index) => probeMode !== "partial" || index === 0)
+            .map((name) => `TOOL:${name}:${probeAvailable[name] === false ? "missing" : "available"}`);
+          if (probeMode === "conflicting") lines.push(`TOOL:${names[0]}:missing`);
+          journal.append(new TextEncoder().encode(`\r\n${lines.join("\r\n")}\r\n`));
+        }
         if (String(args.text).includes("LINKR_FILE")) {
           const path = Object.keys(files).find((candidate) => args.text.includes(candidate));
           if (!path) {
@@ -65,8 +79,10 @@ function makeAgent({ stream, journal, files = {}, getStatus = () => status }) {
         }
         return { id: "serial-1", delivery: "sent", console: { kind: "shell" } };
       },
-      inspectExecution: () => ({ id: "serial-1", delivery: "sent", executionStatus: "completed", exitCode: 0,
-        observation: "prompt-returned", evidence: journal.read({ limit: 4000 }).text }),
+      inspectExecution: () => (probeMode === "timeout"
+        ? { id: "serial-1", delivery: "sent", executionStatus: "sent", observationClosed: false, evidence: "" }
+        : { id: "serial-1", delivery: "sent", executionStatus: "completed", exitCode: 0,
+            observation: "prompt-returned", evidence: journal.read({ limit: 4000 }).text }),
       getRecords: () => [],
     },
   });
@@ -134,4 +150,108 @@ test("an unreadable target file is reported as the target's own answer", async (
     }) });
   await agent.prompt("Read /root/secret");
   assert.equal(turns, 4);
+});
+
+test("probe evidence parser accepts both marker spellings and ignores unrequested names", () => {
+  const parsed = parseToolProbeEvidence(
+    "TOOL:dd:available\r\nLINKR_TOOL:base64:available\r\nTOOL:sh:missing\r\nTOOL:dd:missing\r\nTOOL:curl\r\n",
+    ["dd", "base64"]);
+  assert.deepEqual(parsed.available, ["base64"], "a name reported both ways is not evidence");
+  assert.deepEqual(parsed.missing, [], "a command that was not requested never counts, even when it is missing");
+  assert.deepEqual(parsed.conflicting, ["dd"]);
+  assert.deepEqual(parsed.unobserved, ["dd"]);
+});
+
+test("a refused probe unlocks nothing and reports the refusal", async () => {
+  const journal = new SerialJournal();
+  journal.append(new TextEncoder().encode("root@board:~# "));
+  const seen = [];
+  let turns = 0;
+  let answer = "";
+  const { agent } = makeAgent({ journal, probe: { mode: "refuse" }, stream: fakeStream((context) => {
+    seen.push(getCurrentTools(context.messages).map((tool) => tool.name));
+    if (++turns === 1) return [call("probe_tools", { names: ["dd", "base64"] })];
+    answer = toolText(context.messages.at(-1));
+    return [{ type: "text", text: "Understood." }];
+  }) });
+  await agent.prompt("Read a target file");
+  assert.equal(seen[1].includes("read_target_file"), false, "a refused probe is not evidence of anything");
+  assert.match(answer, /refused/i, "the refusal is reported back to the model");
+});
+
+test("a probe that finds nothing unlocks nothing", async () => {
+  const journal = new SerialJournal();
+  journal.append(new TextEncoder().encode("root@board:~# "));
+  const seen = [];
+  let turns = 0;
+  let result = null;
+  const { agent } = makeAgent({ journal, probe: { tools: { dd: false, base64: false } },
+    stream: fakeStream((context) => {
+    seen.push(getCurrentTools(context.messages).map((tool) => tool.name));
+    if (++turns === 1) return [call("probe_tools", { names: ["dd", "base64"] })];
+    result = JSON.parse(toolText(context.messages.at(-1)));
+    return [{ type: "text", text: "Neither is installed." }];
+  }) });
+  await agent.prompt("Read a target file");
+  assert.equal(seen[1].includes("read_target_file"), false);
+  assert.deepEqual(result.available, []);
+  assert.deepEqual(result.missing, ["dd", "base64"], "the target's own missing lines are reported");
+  assert.deepEqual(result.addedToolNames, []);
+});
+
+test("partial probe output unlocks only the commands that answered", async () => {
+  const journal = new SerialJournal();
+  journal.append(new TextEncoder().encode("root@board:~# "));
+  const seen = [];
+  let turns = 0;
+  let result = null;
+  const { agent } = makeAgent({ journal, probe: { mode: "partial" }, stream: fakeStream((context) => {
+    seen.push(getCurrentTools(context.messages).map((tool) => tool.name));
+    if (++turns === 1) return [call("probe_tools", { names: ["dd", "base64"] })];
+    result = JSON.parse(toolText(context.messages.at(-1)));
+    return [{ type: "text", text: "Only dd answered." }];
+  }) });
+  await agent.prompt("Read a target file");
+  assert.equal(seen[1].includes("read_target_file"), false, "the file tool needs both commands");
+  assert.deepEqual(result.available, ["dd"]);
+  assert.deepEqual(result.unobserved, ["base64"], "a command with no marker is not assumed present");
+  assert.deepEqual(result.addedToolNames, []);
+});
+
+test("contradictory probe output is not evidence", async () => {
+  const journal = new SerialJournal();
+  journal.append(new TextEncoder().encode("root@board:~# "));
+  const seen = [];
+  let turns = 0;
+  let result = null;
+  const { agent } = makeAgent({ journal, probe: { mode: "conflicting" }, stream: fakeStream((context) => {
+    seen.push(getCurrentTools(context.messages).map((tool) => tool.name));
+    if (++turns === 1) return [call("probe_tools", { names: ["dd", "base64"] })];
+    result = JSON.parse(toolText(context.messages.at(-1)));
+    return [{ type: "text", text: "Confusing output." }];
+  }) });
+  await agent.prompt("Read a target file");
+  assert.equal(seen[1].includes("read_target_file"), false);
+  assert.deepEqual(result.conflicting, ["dd"]);
+  assert.deepEqual(result.available, ["base64"], "only the clean name counts as available");
+  assert.deepEqual(result.addedToolNames, [], "the file tool still needs the contradictory command");
+});
+
+test("a probe that never answers unlocks nothing and says so", async () => {
+  const journal = new SerialJournal();
+  journal.append(new TextEncoder().encode("root@board:~# "));
+  const seen = [];
+  let turns = 0;
+  let result = null;
+  const { agent } = makeAgent({ journal, probe: { mode: "timeout" }, stream: fakeStream((context) => {
+    seen.push(getCurrentTools(context.messages).map((tool) => tool.name));
+    if (++turns === 1) return [call("probe_tools", { names: ["dd", "base64"] })];
+    result = JSON.parse(toolText(context.messages.at(-1)));
+    return [{ type: "text", text: "No answer." }];
+  }) });
+  await agent.prompt("Read a target file");
+  assert.equal(seen[1].includes("read_target_file"), false, "an unanswered probe is not evidence");
+  assert.equal(result.timedOut, true);
+  assert.deepEqual(result.addedToolNames, []);
+  assert.match(result.note, /did not answer/);
 });
