@@ -12,7 +12,7 @@ on the target board — the person and the agent share one board and one link.
 | **Serial console panel** | A real terminal (xterm.js) in the right column: click it and type, exactly like a local terminal. ANSI colour, cursor movement, `\r` progress and bracketed paste all work; dragging selects text and ⌘C/Ctrl+C copies it. It appears as a card next to *Workspace files* / *New terminal* on the start page, and as a tab in the right column. The agent can open, focus and clear it (`POST /linkr-bee/panel`), and the tab puts its last screen back after a remount or a page reload. |
 | **Live link** | While the panel is open, one resident `bee-cli --serve` session holds the bridge and streams the target's own bytes (`watch`) — a boot log, a prompt, a service printing on its own — with no polling. The panel's size is sent with `resize`, so full-screen programs get the right tty. |
 | **Agent tools** | `linkr_bee_console` (drive this console: `open`, `focus`, `clear`, `type` text, press a named `key`, `read` what the board said, `state`, `resize` — the same pane the person is looking at), `linkr_bee_exec` (run a shell command on the target console and return its output and exit code), `linkr_bee_query` (bridge diagnostics, UART/WiFi/WebDAV/BLE-name/LAN settings, link state, doctor, scans), `linkr_bee_send` (deliver input and capture the reply window), `linkr_bee_set` (change bridge settings over the BLE management channel). |
-| **Connection settings** | The panel's ⚙: transport (BLE / LAN / loopback), scan for a nearby board, LAN host and token, per-call timeout. Saving writes the plugin's row in the active profile's `cordis.patch.yml` through the Harness config editor, so it survives restarts. |
+| **Connection settings** | The panel's ⚙: transport (BLE / LAN / loopback), scan for a nearby board, LAN host and token, per-call timeout, and **UART settings** (baud, data bits, parity, stop bits, flow control). The UART card reads the bridge's current values and applies a new `baud,data,parity,stop,flow` spec over the Bluetooth LE management channel; on LAN/loopback links it says so instead of offering controls that cannot work. Saving writes the plugin's row in the active profile's `cordis.patch.yml` through the Harness config editor, so it survives restarts. |
 
 ## Requirements
 
@@ -109,6 +109,7 @@ concurrent WebSocket clients and one Bluetooth connection.
 - **Console output is untrusted device data.** The tools say so explicitly: exit
   code 0 means the command completed, not that the target's state was verified,
   and a delivered command is not a completed one.
+- **UART settings are a bridge setting, not a target command.** Use ⚙ → UART settings, or `GET`/`POST /linkr-bee/uart` with `{"value":"115200,8,n,1,none"}`. The agent's `linkr_bee_query target=uart` and `linkr_bee_set target=uart` speak the same management channel.
 - **Local surface only.** The plugin serves `/linkr-bee/*` on the Harness web
   server (loopback) and refuses requests whose `Origin` is not the page's own
   host. The LAN token is never echoed back to the page — it is masked.

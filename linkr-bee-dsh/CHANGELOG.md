@@ -10,6 +10,11 @@
 - Diagnostics: the terminal reports, once per mount, the element chain that
   receives a pointerdown when it is not the xterm screen — evidence for a
   pane overlay that swallows drag selection in some environments.
+- UART settings: the ⚙ panel now reads and changes the bridge's UART format
+  (baud, data bits, parity, stop bits, flow) over the BLE management channel,
+  with `GET`/`POST /linkr-bee/uart` behind it. LAN/loopback links show why the
+  controls are unavailable rather than presenting dead ones. The bridge is
+  read back after a change, and a bad spec is refused before dialing.
 - Divider alignment: the panel header drew its own bottom border, but the
   shell clips the pane body, so that rule began at the right column's left edge
   while the left side had none (and at a slightly different height/colour).

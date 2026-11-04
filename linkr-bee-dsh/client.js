@@ -13352,6 +13352,7 @@ window.__ModuleLoader__.load({
     const INPUT_URL = '/linkr-bee/input';
     const CONFIG_URL = '/linkr-bee/config';
     const SCAN_URL = '/linkr-bee/scan';
+    const UART_URL = '/linkr-bee/uart';
     const WATCH_URL = '/linkr-bee/watch';
     const RESIZE_URL = '/linkr-bee/resize';
     // The Host's own record of what the target said (a 64 KiB ring). Unlike
@@ -13407,6 +13408,20 @@ window.__ModuleLoader__.load({
       memoryOnly: '仅本次运行生效',
       configHint: '修改后插件会按新配置重启，串口会自动重连。',
       loading: '读取配置…',
+      uartTitle: '串口参数',
+      uartBaud: '波特率',
+      uartData: '数据位',
+      uartParity: '校验',
+      uartStop: '停止位',
+      uartFlow: '流控',
+      uartRead: '读取',
+      uartApply: '应用',
+      uartApplying: '应用中…',
+      uartApplied: '串口参数已更新',
+      uartFailed: '串口参数失败',
+      uartBleOnly: '仅蓝牙 BLE 管理通道可读取或修改串口参数',
+      uartUnknown: '未读到当前参数',
+      uartCustom: '自定义',
     };
     const en = {
       title: 'Serial monitor',
@@ -13448,6 +13463,20 @@ window.__ModuleLoader__.load({
       memoryOnly: 'applies to this run only',
       configHint: 'The plugin restarts with the new config; the link reconnects by itself.',
       loading: 'Reading config…',
+      uartTitle: 'UART settings',
+      uartBaud: 'Baud',
+      uartData: 'Data bits',
+      uartParity: 'Parity',
+      uartStop: 'Stop bits',
+      uartFlow: 'Flow',
+      uartRead: 'Read',
+      uartApply: 'Apply',
+      uartApplying: 'Applying…',
+      uartApplied: 'UART settings updated',
+      uartFailed: 'UART settings failed',
+      uartBleOnly: 'UART settings are read and changed over the Bluetooth LE management channel only',
+      uartUnknown: 'Current settings unknown',
+      uartCustom: 'Custom',
     };
 
     /**
@@ -13625,6 +13654,167 @@ window.__ModuleLoader__.load({
      * LAN credentials. Saves go to the Host, which persists them through the
      * profile patch and restarts this plugin with the new config.
      */
+    /**
+     * The bridge's UART format (baud, data, parity, stop, flow). These live in
+     * the bridge, not the board, and only the BLE management channel can read
+     * or change them — a LAN/loopback link says so instead of offering dead
+     * controls (the repo's capability rule: hide what the link cannot do).
+     */
+    const BAUD_RATES = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
+
+    function UartSettings({ t, transport }) {
+      const [baud, setBaud] = useState('115200');
+      const [dataBits, setDataBits] = useState('8');
+      const [parity, setParity] = useState('n');
+      const [stopBits, setStopBits] = useState('1');
+      const [flow, setFlow] = useState('none');
+      const [customBaud, setCustomBaud] = useState(false);
+      const [known, setKnown] = useState(false);
+      const [notice, setNotice] = useState('');
+      const [busy, setBusy] = useState(false);
+      const initial = useRef(true);
+
+      const spec = `${baud},${dataBits},${parity},${stopBits},${flow}`;
+      const ble = transport === 'ble';
+
+      const applyReply = (payload) => {
+        const match = /(\d{3,7}),([5-8]),([nNeEoO]),([12]),(none|rtscts)/.exec(payload?.reply || payload?.spec || '');
+        if (payload?.spec) {
+          const fields = payload.spec.split(',');
+          if (fields.length === 5) {
+            setBaud(fields[0]);
+            setDataBits(fields[1]);
+            setParity(fields[2].toLowerCase());
+            setStopBits(fields[3]);
+            setFlow(fields[4].toLowerCase());
+            setCustomBaud(!BAUD_RATES.includes(Number(fields[0])));
+            setKnown(true);
+            return;
+          }
+        }
+        if (match) {
+          setBaud(match[1]);
+          setDataBits(match[2]);
+          setParity(match[3].toLowerCase());
+          setStopBits(match[4]);
+          setFlow(match[5].toLowerCase());
+          setCustomBaud(!BAUD_RATES.includes(Number(match[1])));
+          setKnown(true);
+        }
+      };
+
+      const read = async () => {
+        setBusy(true);
+        setNotice('');
+        try {
+          const response = await fetch(UART_URL);
+          const payload = await response.json().catch(() => ({}));
+          if (payload.ok === false) {
+            // An automatic read on an unattached board is not a user error.
+            // Keep the card quiet until the person explicitly asks.
+            if (!initial.current) setNotice(payload.error || t('uartFailed'));
+          } else {
+            applyReply(payload);
+          }
+        } catch (error) {
+          if (!initial.current) setNotice(`${t('uartFailed')}: ${String((error && error.message) || error)}`);
+        } finally {
+          initial.current = false;
+          setBusy(false);
+        }
+      };
+
+      const apply = async () => {
+        setBusy(true);
+        setNotice('');
+        try {
+          const response = await fetch(UART_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ value: spec }),
+          });
+          const payload = await response.json().catch(() => ({}));
+          if (!response.ok || payload.ok === false) {
+            setNotice(`${t('uartFailed')}: ${payload.error || response.status}`);
+          } else {
+            setNotice(`${t('uartApplied')} · ${payload.value || spec}`);
+            applyReply(payload);
+          }
+        } catch (error) {
+          setNotice(`${t('uartFailed')}: ${String((error && error.message) || error)}`);
+        } finally {
+          setBusy(false);
+        }
+      };
+
+      useEffect(() => {
+        if (ble) void read();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [ble]);
+
+      const select = (value, onChange, options, disabled) =>
+        h(
+          'select',
+          { className: 'lb-mode', value, onChange: (e) => onChange(e.target.value), disabled },
+          options.map((option) =>
+            h('option', { key: String(option.value), value: String(option.value) }, option.label),
+          ),
+        );
+
+      if (!ble) {
+        return h(
+          'div',
+          { className: 'lb-uart' },
+          h('div', { className: 'lb-uart-title' }, t('uartTitle')),
+          h('div', { className: 'lb-note' }, t('uartBleOnly')),
+        );
+      }
+
+      return h(
+        'div',
+        { className: 'lb-uart' },
+        h('div', { className: 'lb-uart-title' }, t('uartTitle')),
+        h(
+          'div',
+          { className: 'lb-uart-grid' },
+          h('label', { className: 'lb-field' }, h('span', { className: 'lb-field-label' }, t('uartBaud')),
+            customBaud
+              ? h('input', { className: 'lb-cmd', inputMode: 'numeric', value: baud, onChange: (e) => setBaud(e.target.value), disabled: busy })
+              : select(baud, (value) => {
+                  if (value === 'custom') {
+                    setCustomBaud(true);
+                    setBaud('115200');
+                  } else {
+                    setBaud(value);
+                  }
+                }, [
+                  ...BAUD_RATES.map((rate) => ({ value: String(rate), label: String(rate) })),
+                  { value: 'custom', label: t('uartCustom') },
+                ], busy),
+          ),
+          h('label', { className: 'lb-field' }, h('span', { className: 'lb-field-label' }, t('uartData')),
+            select(dataBits, setDataBits, ['5', '6', '7', '8'].map((v) => ({ value: v, label: v })), busy)),
+          h('label', { className: 'lb-field' }, h('span', { className: 'lb-field-label' }, t('uartParity')),
+            select(parity, setParity, [
+              { value: 'n', label: 'None (n)' }, { value: 'e', label: 'Even (e)' }, { value: 'o', label: 'Odd (o)' },
+            ], busy)),
+          h('label', { className: 'lb-field' }, h('span', { className: 'lb-field-label' }, t('uartStop')),
+            select(stopBits, setStopBits, [{ value: '1', label: '1' }, { value: '2', label: '2' }], busy)),
+          h('label', { className: 'lb-field' }, h('span', { className: 'lb-field-label' }, t('uartFlow')),
+            select(flow, setFlow, [{ value: 'none', label: 'None' }, { value: 'rtscts', label: 'RTS/CTS' }], busy)),
+        ),
+        h(
+          'div',
+          { className: 'lb-uart-foot' },
+          h('span', { className: 'lb-note' }, notice || (known ? spec : t('uartUnknown'))),
+          h('button', { className: 'lb-btn-ghost', onClick: read, disabled: busy }, t('uartRead')),
+          h('button', { className: 'lb-btn', onClick: apply, disabled: busy }, busy ? t('uartApplying') : t('uartApply')),
+        ),
+        customBaud &&
+          h('button', { className: 'lb-ghost', onClick: () => { setCustomBaud(false); setBaud('115200'); } }, t('uartCustom') + ' ↩'),
+      );
+    }
+
     function ConnectionSettings({ t, onClose }) {
       const [form, setForm] = useState(null);
       const [notice, setNotice] = useState('');
@@ -13791,6 +13981,7 @@ window.__ModuleLoader__.load({
             onChange: (e) => setForm({ ...form, timeoutMs: e.target.value }),
           }),
         ),
+        h(UartSettings, { t, transport: form.transport }),
         h(
           'div',
           { className: 'lb-settings-foot' },
@@ -14726,6 +14917,11 @@ window.__ModuleLoader__.load({
 .lb-btn-ghost { background: transparent; border: 1px solid var(--dsw-alias-border-l2); color: var(--dsw-alias-label-primary); border-radius: 7px; padding: 6px 10px; font-size: 12.5px; cursor: pointer; flex: 0 0 auto; }
 .lb-btn-ghost:hover { border-color: var(--dsw-alias-brand-primary); }
 .lb-btn-ghost:disabled { opacity: 0.55; cursor: default; }
+.lb-uart { border-top: 1px solid var(--dsw-alias-border-l1); padding: 10px 0 4px; display: flex; flex-direction: column; gap: 8px; }
+.lb-uart-title { font-size: 12px; font-weight: 600; color: var(--dsw-alias-label-secondary); }
+.lb-uart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: 8px; }
+.lb-uart-foot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.lb-uart-foot .lb-note { flex: 1 1 auto; min-width: 0; }
 .lb-settings-foot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .lb-settings-foot .lb-note { flex: 1 1 140px; }
 `;

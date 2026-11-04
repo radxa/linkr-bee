@@ -502,6 +502,44 @@ async function readJsonBody(req) {
   return text ? JSON.parse(text) : {};
 }
 
+/** The five UART fields the bridge understands: baud,data,parity,stop,flow. */
+const UART_SPEC = /^\s*(\d{3,7})\s*,\s*([5-8])\s*,\s*([nNeEoO])\s*,\s*([12])\s*,\s*(none|rtscts)\s*$/;
+
+function parseUartSpec(value) {
+  const match = typeof value === 'string' ? UART_SPEC.exec(value) : null;
+  if (!match) {
+    throw new Error('UART format must be baud,data,parity,stop,flow — e.g. 115200,8,n,1,none');
+  }
+  return { baud: Number(match[1]), dataBits: Number(match[2]), parity: match[3].toLowerCase(), stopBits: Number(match[4]), flow: match[5].toLowerCase() };
+}
+
+/** Read the bridge's current UART settings over the BLE management channel. */
+async function queryUart(config, signal) {
+  const run = await runBee(config, [...(await jsonArgs(config, signal)), QUERY_FLAGS.uart], { signal });
+  const result = run.events.find((event) => event.event === 'result' && event.what === 'uart');
+  const reply = result?.reply || result?.detail || '';
+  const match = /uart\s*=\s*([^\s,]+(?:,[^\s,]+){4})/.exec(reply) ||
+    /(\d{3,7},[5-8],[nNeEoO],[12],(?:none|rtscts))/.exec(reply);
+  if (result && result.ok === false) {
+    return { ok: false, error: result.detail || reply || 'the bridge did not answer the UART query', reply };
+  }
+  return { ok: true, spec: match ? match[1] : null, reply, raw: renderRun(run) };
+}
+
+/** Apply UART settings over the BLE management channel and read them back. */
+async function setUart(config, spec, signal) {
+  const fields = parseUartSpec(spec);
+  const value = `${fields.baud},${fields.dataBits},${fields.parity},${fields.stopBits},${fields.flow}`;
+  const run = await runBee(config, [...(await jsonArgs(config, signal)), SET_FLAGS.uart, value], { signal });
+  const result = run.events.find((event) => event.event === 'result' && event.what === 'uart');
+  const reply = result?.reply || result?.detail || '';
+  if (result && result.ok === false) {
+    return { ok: false, value, error: result.detail || reply || 'the bridge refused the UART change', reply, raw: renderRun(run) };
+  }
+  publishConsole({ type: 'meta', text: `UART → ${value}`, source: 'panel' });
+  return { ok: true, value, reply, raw: renderRun(run) };
+}
+
 /** Console output events of one bee-cli run, as text for the terminal pane. */
 function consoleOutputOf(run) {
   return run.events
@@ -1438,6 +1476,26 @@ export function apply(ctx, rawConfig) {
               // a console nobody is watching.
               releaseIfIdle();
               sendJson(res, 200, result);
+            } catch (error) {
+              sendJson(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) });
+            }
+            return;
+          }
+          // UART settings live in the bridge, not the target board: they are
+          // read and written over the BLE management channel. LAN and loopback
+          // links have no such channel, and bee-cli says so explicitly.
+          if (req.method === 'GET' && path === '/uart') {
+            try {
+              sendJson(res, 200, await queryUart(config, undefined));
+            } catch (error) {
+              sendJson(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) });
+            }
+            return;
+          }
+          if (req.method === 'POST' && path === '/uart') {
+            try {
+              const body = await readJsonBody(req);
+              sendJson(res, 200, await setUart(config, body?.value, undefined));
             } catch (error) {
               sendJson(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) });
             }
