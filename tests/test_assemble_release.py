@@ -32,6 +32,13 @@ def write_fixture(root: Path, *, firmware_version: str = "1.1.3",
                 (root / "desktop" / f"{prefix}-1.1.3-{target}.dmg").write_bytes(b"fixture")
     for arch in ("amd64", "arm64", "armhf", "i386"):
         (root / "desktop" / f"linkr-bee_1.1.3_{arch}.deb").write_bytes(b"fixture")
+    # The bare CLI binaries the `linkr-bee-cli` npm package downloads: no
+    # version in the name, and executable, because the launcher execs them.
+    for target in TARGETS:
+        name = f"bee-cli-{target}" + (".exe" if "windows" in target else "")
+        path = root / "desktop" / name
+        path.write_bytes(b"fixture")
+        path.chmod(0o755)
     for board in BOARDS:
         bundle = root / "firmware" / f"linkr-bee-{board}"
         bundle.mkdir()
@@ -65,6 +72,39 @@ def command_for(root: Path, repo: str | None = None,
 
 
 class ReleaseAssemblyTests(unittest.TestCase):
+    def test_raw_cli_binaries_ride_along(self):
+        """The npm launcher downloads these by name; the assembler must keep them."""
+        with tempfile.TemporaryDirectory(prefix="linkr-release-test-") as tmp:
+            root = Path(tmp)
+            write_fixture(root)
+            result = subprocess.run(command_for(root), capture_output=True,
+                                    text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            manifest = json.loads((root / "out/release-manifest.json").read_text())
+            cli = [entry for entry in manifest["assets"] if entry["kind"] == "cli"]
+            self.assertEqual(len(cli), 10, cli)
+            self.assertEqual({entry["target"] for entry in cli},
+                             {"x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu",
+                              "armv7-unknown-linux-gnueabihf", "i686-unknown-linux-gnu",
+                              "x86_64-pc-windows-gnu", "i686-pc-windows-gnu",
+                              "x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc",
+                              "aarch64-apple-darwin", "x86_64-apple-darwin"})
+            for entry in cli:
+                self.assertNotIn("component_version", entry)
+                self.assertTrue((root / "out" / entry["name"]).is_file())
+            sums = (root / "out/SHA256SUMS").read_text()
+            for entry in cli:
+                self.assertIn(entry["name"], sums)
+
+    def test_an_unknown_cli_target_is_refused(self):
+        with tempfile.TemporaryDirectory(prefix="linkr-release-test-") as tmp:
+            root = Path(tmp)
+            write_fixture(root)
+            (root / "desktop/bee-cli-riscv64-unknown-linux-gnu").write_bytes(b"fixture")
+            result = subprocess.run(command_for(root), capture_output=True,
+                                    text=True, timeout=10)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("unknown CLI target", result.stderr)
     def test_artifacts_and_notes_point_to_the_selected_repository(self):
         for repo in (None, "https://github.example/team/linkr-bee"):
             with self.subTest(repo=repo), tempfile.TemporaryDirectory(prefix="linkr-release-test-") as tmp:
@@ -82,9 +122,9 @@ class ReleaseAssemblyTests(unittest.TestCase):
                 with zipfile.ZipFile(root / "out/linkr-bee-v1.1.3-web.zip") as archive:
                     readme = archive.read("linkr-bee-v1.1.3-web/README.txt").decode()
                 self.assertIn(f"Source: {expected}/tree/v1.1.3", readme)
-                self.assertEqual(len(list((root / "out").iterdir())), 38)
+                self.assertEqual(len(list((root / "out").iterdir())), 48)
                 manifest = json.loads((root / "out/release-manifest.json").read_text())
-                self.assertEqual(len(manifest["assets"]), 36)
+                self.assertEqual(len(manifest["assets"]), 46)
                 for asset in manifest["assets"]:
                     self.assertEqual(asset["sha256"], hashlib.sha256(
                         (root / "out" / asset["name"]).read_bytes()).hexdigest())

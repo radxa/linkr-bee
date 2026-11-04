@@ -38,6 +38,12 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y libdbus-1-dev pkg-config fish zsh
           python3 -m pip install kconfiglib==14.1.0
+      # One version, everywhere. The release assembler proves the *artifacts*
+      # match the tag; this proves the tree agrees with itself (and with the
+      # tag, when a release tag is what triggered the build) before anything is
+      # compiled — the cheapest place to catch a half-done version bump.
+      - name: Version consistency
+        run: python3 tools/check_versions.py "${{ github.ref_name }}"
       - run: python3 -m unittest discover -s tests -v
       - name: Build the C reference terminal
         run: make -C tools clean all

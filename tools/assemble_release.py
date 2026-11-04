@@ -57,7 +57,7 @@ DEB_RE = re.compile(r"^linkr-bee_([0-9]+\.[0-9]+\.[0-9]+)_([a-z0-9]+)\.deb$")
 # the `linkr-bee-cli` npm package downloads exactly that file (then verifies it
 # against SHA256SUMS and execs it). The name deliberately carries no version:
 # the release it is attached to is the version.
-RAW_CLI_RE = re.compile(r"^bee-cli-([a-z0-9]+(?:-[a-z0-9]+)*)(\.exe)?$")
+RAW_CLI_RE = re.compile(r"^bee-cli-([a-z0-9_]+(?:-[a-z0-9_]+)*)(\.exe)?$")
 # The desktop workflow's matrix, spelled as `bee-cli-<target>[.exe]`. A target
 # added there must be added here, and the count check below says so.
 CLI_TARGETS = (
