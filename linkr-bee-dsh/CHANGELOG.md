@@ -26,8 +26,9 @@ CLI npm package and plugin all read 1.1.4.
   module's real path, so an ESM plugin behind a pnpm symlink still finds its
   sibling dependency. `linkr-bee-cli` runs **no install script** (nothing for a
   package manager that refuses build scripts to block).
-- The agent-operable console, panel polish and resize work listed under 1.1.2
-  shipped in this release; 1.1.2/1.1.3 were never published to npm.
+- This release also includes the agent-operable console, panel polish and resize
+  work shipped in 1.1.2. The plugin's 1.1.2 was published to npm; only its 1.1.3
+  was skipped (`linkr-bee-cli` 1.1.3 was published separately).
 
 ## 1.1.2
 
