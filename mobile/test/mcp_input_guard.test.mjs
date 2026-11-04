@@ -30,7 +30,7 @@ const memoryStorage = () => {
 };
 
 /* A real executor over a real journal, the way the app wires it. */
-function executorFixture(initial = "root@board:~# ") {
+function executorFixture(initial = "root@board:~# ", hooks = {}) {
   const journal = new SerialJournal();
   journal.append(new TextEncoder().encode(initial));
   const status = { connected: true, sessionId: 1, inputRevision: 0, inputPending: false };
@@ -38,8 +38,13 @@ function executorFixture(initial = "root@board:~# ") {
   const device = createDeviceExecutor({
     getStatus: () => ({ ...status }),
     readLog: (options) => journal.read(options),
-    prepareInput: ({ text, appendEnter }) => text + (appendEnter ? "\r" : ""),
+    prepareInput: ({ text, appendEnter }) => {
+      hooks.prepareInput?.();
+      return text + (appendEnter ? "\r" : "");
+    },
+    onRecord: hooks.onRecord,
     sendInput: async (payload) => {
+      hooks.beforeSend?.(payload);
       sent.push(payload);
       return { inputRevision: ++status.inputRevision };
     },
@@ -47,7 +52,7 @@ function executorFixture(initial = "root@board:~# ") {
   return { device, status, sent, journal };
 }
 
-function mcpFixture(initial) {
+function mcpFixture(initial, { onApproval } = {}) {
   const fixture = executorFixture(initial);
   const approvals = [];
   const host = createMcpHost({
@@ -57,6 +62,7 @@ function mcpFixture(initial) {
     readLog: (options) => fixture.journal.read(options),
     requestApproval: async (request) => {
       approvals.push(request);
+      if (onApproval) return onApproval(request, fixture);
       return { approved: true };
     },
     getLang: () => "en",
@@ -150,6 +156,117 @@ test("confirm mode still asks for every serial write, ordinary input included", 
   assert.equal(host.getConfig().access, "confirm");
   await rpc(host, "send_serial_input", { text: "uname -a", appendEnter: true });
   assert.equal(approvals.length, 1);
+});
+
+test("a phone approval cannot cover a line changed by local input while it was pending", async () => {
+  const { host, approvals, sent } = mcpFixture(undefined, {
+    onApproval: async (_request, { device }) => {
+      // The human can still type in the terminal while the MCP card is open.
+      await device.execute({ text: "r", appendEnter: false }, undefined,
+        { userApproved: true, sensitiveApproved: true });
+      return { approved: true };
+    },
+  });
+  const reply = await rpc(host, "send_serial_input", { text: "m -rf /tmp/x", appendEnter: true });
+  assert.equal(reply.result.isError, true);
+  assert.match(reply.result.content[0].text, /input changed/i);
+  assert.match(approvals[0].summary, /"m -rf \/tmp\/x"/);
+  assert.doesNotMatch(approvals[0].summary, /"rm -rf/);
+  assert.deepEqual(sent, ["r"], "the unapproved joined command must not be sent");
+});
+
+test("approval also binds the tracked line when a failed transport did not advance the input revision", async () => {
+  const { host, sent } = mcpFixture(undefined, {
+    onApproval: async (_request, { device, status }) => {
+      const revision = status.inputRevision;
+      await device.execute({ text: "r", appendEnter: false }, undefined,
+        { userApproved: true, sensitiveApproved: true });
+      status.inputRevision = revision;
+      return { approved: true };
+    },
+  });
+  const reply = await rpc(host, "send_serial_input", { text: "m -rf /tmp/x", appendEnter: true });
+  assert.equal(reply.result.isError, true);
+  assert.match(reply.result.content[0].text, /input changed/i);
+  assert.deepEqual(sent, ["r"]);
+});
+
+test("approval is invalidated by a revision, unknown input, disconnect or replacement session", async (t) => {
+  for (const [field, value] of [["inputRevision", 1], ["inputPending", true], ["connected", false], ["sessionId", 2]]) {
+    await t.test(field, async () => {
+      const { host, sent } = mcpFixture(undefined, {
+        onApproval: async (_request, { status }) => {
+          status[field] = value;
+          return { approved: true };
+        },
+      });
+      const reply = await rpc(host, "send_serial_input", { text: "uname -a", appendEnter: true });
+      assert.equal(reply.result.isError, true);
+      assert.match(reply.result.content[0].text, /changed/i);
+      assert.deepEqual(sent, []);
+    });
+  }
+});
+
+test("changing MCP access while approval is pending still revokes the call", async () => {
+  let fixture;
+  fixture = mcpFixture(undefined, {
+    onApproval: async () => {
+      await fixture.host.setConfig({ access: "read" });
+      return { approved: true };
+    },
+  });
+  const reply = await rpc(fixture.host, "send_serial_input", { text: "uname -a", appendEnter: true });
+  assert.equal(reply.result.isError, true);
+  assert.deepEqual(fixture.sent, []);
+});
+
+test("executor rechecks approved input after its asynchronous fingerprint", async () => {
+  let fixture;
+  fixture = executorFixture(undefined, {
+    prepareInput: () => queueMicrotask(() => { fixture.status.inputPending = true; }),
+  });
+  const approvalInputState = { sessionId: 1, inputRevision: 0, inputPending: false, pendingLine: "" };
+  await assert.rejects(fixture.device.execute({ text: "uname -a", appendEnter: true }, undefined,
+    { userApproved: true, sensitiveApproved: true, approvalInputState }), /input changed/i);
+  assert.deepEqual(fixture.sent, []);
+  assert.equal(fixture.device.getRecords().at(-1).delivery, "not-sent");
+});
+
+test("executor rechecks approved input at the synchronous transport boundary", async () => {
+  let fixture;
+  const published = [];
+  fixture = executorFixture(undefined, {
+    onRecord: (record) => {
+      published.push(record);
+      if (record.state === "sending") fixture.status.inputPending = true;
+    },
+  });
+  const approvalInputState = { sessionId: 1, inputRevision: 0, inputPending: false, pendingLine: "" };
+  await assert.rejects(fixture.device.execute({ text: "uname -a", appendEnter: true }, undefined,
+    { userApproved: true, sensitiveApproved: true, approvalInputState }), /input changed/i);
+  assert.deepEqual(fixture.sent, []);
+  assert.equal(published.find((record) => record.state === "sending").delivery, "unknown");
+  assert.equal(published.at(-1).state, "failed");
+  assert.equal(published.at(-1).delivery, "not-sent", "a rejected pre-dispatch write must retract its pending reference");
+  assert.equal(fixture.device.pendingInputLine(), "");
+});
+
+test("an unknown reference with its fingerprint is published before approved input reaches the wire", async () => {
+  const published = [];
+  const fixture = executorFixture(undefined, {
+    onRecord: (record) => published.push(record),
+    beforeSend: () => {
+      const latest = published.at(-1);
+      assert.equal(latest.state, "sending");
+      assert.equal(latest.delivery, "unknown");
+      assert.match(latest.requestFingerprint, /^[a-f0-9]{64}$/);
+    },
+  });
+  const approvalInputState = { sessionId: 1, inputRevision: 0, inputPending: false, pendingLine: "" };
+  await fixture.device.execute({ text: "uname -a", appendEnter: true }, undefined,
+    { userApproved: true, sensitiveApproved: true, approvalInputState });
+  assert.deepEqual(fixture.sent, ["uname -a\r"]);
 });
 
 test("a text-scoped approval is honoured while the write runs the approved string", async () => {

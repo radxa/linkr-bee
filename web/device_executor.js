@@ -345,7 +345,7 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
      * never covered. That is the shard bypass. A caller that classified the
      * joined line itself may assert coverage with `sensitiveApproved`
      * (web/mcp_server.js does, from the same console line this executor sees). */
-    async execute(args, signal, { userApproved = false, sensitiveApproved = false, shellSetup = null } = {}) {
+    async execute(args, signal, { userApproved = false, sensitiveApproved = false, approvalInputState = null, shellSetup = null } = {}) {
       signal?.throwIfAborted();
       if (active) throw new Error("Another serial action is still active.");
       if (typeof args?.text !== "string" || !args.text.length || args.text.length > 2048 || typeof args.appendEnter !== "boolean") {
@@ -353,6 +353,21 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
       }
       const status = getStatus();
       if (!status.connected) throw new Error("Device is disconnected.");
+      /* A phone approval covers the input line as it stood when it was shown,
+       * not just these bytes. Copy the snapshot so a caller cannot update its
+       * meaning while hashing the request or waiting on another approval. */
+      const approvedInput = approvalInputState === null ? null : { ...approvalInputState };
+      const checkApprovedInput = () => {
+        if (approvedInput === null) return;
+        const current = getStatus();
+        if (!current.connected || current.sessionId !== approvedInput.sessionId ||
+            current.inputRevision !== approvedInput.inputRevision ||
+            (current.inputPending === true) !== approvedInput.inputPending ||
+            inputLines.current(current.sessionId) !== approvedInput.pendingLine) {
+          throw new Error("Terminal input changed after approval; request a new command before sending.");
+        }
+      };
+      checkApprovedInput();
       const download = args.download;
       const profileProbe = args.profileProbe;
       const toolProbe = args.toolProbe;
@@ -437,6 +452,7 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
         check(record, controller.signal);
         record.requestFingerprint = await inputFingerprint(requestedInput);
         check(record, controller.signal);
+        checkApprovedInput();
         // Close older observations before another command can contribute output.
         observe();
         // Observing a prior incomplete operation can invalidate the helper.
@@ -449,9 +465,21 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
         record.observedEnd = record.logStart;
         record.state = "sending";
         record.delivery = "unknown";
+        try {
+          /* Persist the fingerprint and uncertain reference before bytes can
+           * reach the wire, so a reload cannot silently replay the operation. */
+          publish(record);
+          /* The synchronous observer may itself change terminal input. Keep
+           * approval validation after it and immediately before dispatch. */
+          controller.signal.throwIfAborted();
+          checkApprovedInput();
+        } catch (error) {
+          // Nothing was attempted: retract the tentative pending reference.
+          record.delivery = "not-sent";
+          throw error;
+        }
         if (shellTracking) shellIntegration = {status:shellSetup ? "enabling" : "ready", nonce:shellTracking.nonce,
           sequence:shellTracking.sequence, sessionId:record.sessionId, cursor:record.logStart, healthTail:shellIntegration?.healthTail || ""};
-        publish(record);
         /* Remember what the console input line becomes before transport: a
          * failed write may still have reached it, and over-remembering a
          * fragment only costs one extra confirmation on the next write. */

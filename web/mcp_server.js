@@ -822,9 +822,18 @@ export function createMcpHost(deps = {}) {
       pendingLine = null;
     }
     return {
+      sessionId: status?.sessionId,
+      inputRevision: status?.inputRevision,
       pendingLine: typeof pendingLine === "string" ? pendingLine : inputLines.current(target?.sessionId),
       inputPending: status?.inputPending === true,
     };
+  }
+
+  function checkInputState(target, approved) {
+    const current = inputStateFor(target);
+    if (Object.keys(approved).some((key) => approved[key] !== current[key])) {
+      throw new Error("Terminal input changed while awaiting approval; request a new command before sending.");
+    }
   }
 
   function checkTarget(previous) {
@@ -1482,7 +1491,7 @@ export function createMcpHost(deps = {}) {
     }
   }
 
-  async function executeTool(name, args, { signal, sensitiveApproved = false }) {
+  async function executeTool(name, args, { signal, sensitiveApproved = false, approvalInputState = null }) {
     switch (name) {
       case "get_device_status": {
         const device = requireTargetDevice();
@@ -1592,7 +1601,9 @@ export function createMcpHost(deps = {}) {
          * for this write, high-risk-only mode classified it against the same
          * console input line the executor sees, and fully-authorized mode is
          * the owner's explicit choice. When it is false the executor's guard
-         * makes the decision instead. */
+         * makes the decision instead. The input snapshot travels with that
+         * decision so the executor can reject a later line change at the
+         * actual send boundary, after its asynchronous fingerprint. */
         const payload = `${args.text}${args.appendEnter === true ? "\r" : ""}`;
         let record;
         try {
@@ -1603,7 +1614,7 @@ export function createMcpHost(deps = {}) {
               ...(args.trackExit === true ? { trackExit: true } : {}),
             },
             signal,
-            { userApproved: true, sensitiveApproved },
+            { userApproved: true, sensitiveApproved, approvalInputState },
           );
         } finally {
           /* Remember the console line even when delivery is uncertain: a
@@ -1870,6 +1881,7 @@ export function createMcpHost(deps = {}) {
 
       call.signal.throwIfAborted();
       checkTarget(target);
+      if (name === "send_serial_input") checkInputState(target, inputState);
       call.execute();
       call.signal.throwIfAborted();
       /* sensitiveApproved says this gate already owns the destructive class for
@@ -1880,7 +1892,8 @@ export function createMcpHost(deps = {}) {
       const sensitiveApproved = approvalGranted || config.access === MCP_ACCESS_AUTO;
       let value;
       try {
-        value = await executeTool(name, args, { signal: call.signal, sensitiveApproved });
+        value = await executeTool(name, args, { signal: call.signal, sensitiveApproved,
+          approvalInputState: name === "send_serial_input" ? inputState : null });
       } catch (error) {
         const message = error?.message ? String(error.message) : "The tool failed.";
         recordAudit({ tool: name, args, outcome: "error", message, durationMs: Date.now() - startedAt, remote });

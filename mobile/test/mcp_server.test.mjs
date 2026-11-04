@@ -526,7 +526,8 @@ test("send_serial_input asks the phone for approval and sends once approved", as
   assert.deepEqual(calls.execute[0].args, { text: "uname -a", appendEnter: true });
   /* The MCP gate owns the approval for this write; sensitiveApproved tells the
    * executor's own destructive guard not to ask a second time. */
-  assert.deepEqual(calls.execute[0].options, { userApproved: true, sensitiveApproved: true });
+  assert.deepEqual(calls.execute[0].options, { userApproved: true, sensitiveApproved: true,
+    approvalInputState: { sessionId: "session-1", inputRevision: 3, pendingLine: "", inputPending: false } });
   assert.ok(calls.execute[0].signal instanceof AbortSignal);
   assert.equal(host.getAudit()[0].outcome, "ok");
 });
