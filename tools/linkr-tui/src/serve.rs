@@ -121,6 +121,8 @@ fn wait_for_request(
 struct Watch {
     /// Whether this session pushes idle bytes.
     on: bool,
+    /// At most three bytes of a UTF-8 scalar split across transport reads.
+    utf8_tail: Vec<u8>,
 }
 
 impl Watch {
@@ -128,12 +130,14 @@ impl Watch {
     /// replay. What the board said before this is the journal's business.
     fn turn_on(&mut self, app: &mut App) {
         self.on = true;
+        self.utf8_tail.clear();
         app.watch_stream(true);
     }
 
     /// Stop pushing. The bytes said from here on belong to nobody's caller.
     fn turn_off(&mut self, app: &mut App) {
         self.on = false;
+        self.utf8_tail.clear();
         app.watch_stream(false);
     }
 
@@ -143,6 +147,9 @@ impl Watch {
     fn reanchor(&mut self, app: &mut App) {
         // `watch_stream` clears the queue as it re-arms the same mode.
         app.watch_stream(self.on);
+        // A request owns the intervening bytes (and may reconnect the link).
+        // An unfinished character from before it must not prefix that stream.
+        self.utf8_tail.clear();
     }
 
     /// The line to push for whatever has arrived since the last one.
@@ -159,12 +166,28 @@ impl Watch {
         if chunks.is_empty() {
             return None;
         }
-        let mut text = String::new();
-        let mut bytes = 0usize;
-        for chunk in &chunks {
-            bytes += chunk.len();
-            text.push_str(&String::from_utf8_lossy(chunk));
+        let bytes: usize = chunks.iter().map(Vec::len).sum();
+        let mut joined = std::mem::take(&mut self.utf8_tail);
+        for chunk in chunks {
+            joined.extend_from_slice(&chunk);
         }
+        // Keep an incomplete suffix even across idle ticks. Invalid complete
+        // sequences still use the normal replacement character, but a BLE read
+        // boundary is not evidence that the device sent invalid UTF-8.
+        let mut offset = 0;
+        while offset < joined.len() {
+            match std::str::from_utf8(&joined[offset..]) {
+                Ok(_) => break,
+                Err(error) => match error.error_len() {
+                    Some(length) => offset += error.valid_up_to() + length,
+                    None => {
+                        self.utf8_tail = joined.split_off(offset + error.valid_up_to());
+                        break;
+                    }
+                },
+            }
+        }
+        let text = String::from_utf8_lossy(&joined);
         Some(cli::json_event(&[
             ("event", Json::Text("stream")),
             ("data", Json::Text(&text)),
@@ -1583,6 +1606,79 @@ mod tests {
              \"webdav-off\",\"ble-name\",\"lan\",\"bonds\",\"bond-label\",\
              \"bond-remove\",\"exec\",\"send\",\"watch\",\"resize\",\
              \"loopback-test\",\"state\",\"quit\"]"
+        );
+    }
+
+    fn watch_text(watch: &mut Watch, app: &mut App, chunks: &[&[u8]]) -> (String, i64) {
+        for chunk in chunks {
+            app.watch_bytes.push_back(chunk.to_vec());
+        }
+        let line = watch
+            .idle_line(app)
+            .expect("received bytes produce a stream event");
+        // Reuse the flat JSON reader, whose only request-specific requirement
+        // is an op field. A stream event itself deliberately has no op/id.
+        let event = request(&line.replacen('{', "{\"op\":\"state\",", 1));
+        (
+            event.string_wanted("data").unwrap().to_string(),
+            event.count_wanted("bytes").unwrap(),
+        )
+    }
+
+    #[test]
+    fn watch_preserves_unicode_split_between_chunks_and_idle_ticks() {
+        let source = "prefix 中🙂\r\n";
+        for split in 1..source.len() {
+            let mut app = App::default();
+            let mut watch = Watch::default();
+            watch.turn_on(&mut app);
+            let (first, a) = watch_text(&mut watch, &mut app, &[&source.as_bytes()[..split]]);
+            let (last, b) = watch_text(&mut watch, &mut app, &[&source.as_bytes()[split..]]);
+            assert_eq!(first + &last, source, "split at byte {split}");
+            assert_eq!(a + b, source.len() as i64);
+            assert!(watch.utf8_tail.is_empty());
+        }
+        let mut app = App::default();
+        let mut watch = Watch::default();
+        watch.turn_on(&mut app);
+        let (text, bytes) = watch_text(&mut watch, &mut app, &[&[0xe4], &[0xb8], &[0xad]]);
+        assert_eq!(text, "中");
+        assert_eq!(bytes, 3);
+    }
+
+    #[test]
+    fn watch_keeps_only_the_incomplete_scalar_and_recovers_after_invalid_bytes() {
+        let mut app = App::default();
+        let mut watch = Watch::default();
+        watch.turn_on(&mut app);
+        let source = "中🙂";
+        let mut text = String::new();
+        for byte in source.bytes() {
+            text.push_str(&watch_text(&mut watch, &mut app, &[&[byte]]).0);
+            assert!(watch.utf8_tail.len() <= 3);
+        }
+        assert_eq!(text, source);
+        let (text, _) = watch_text(&mut watch, &mut app, &[&[0xff, 0xe4]]);
+        assert_eq!(text, "\u{fffd}");
+        let (text, _) = watch_text(&mut watch, &mut app, &[b"OK"]);
+        assert_eq!(text, "\u{fffd}OK");
+        assert!(watch.utf8_tail.is_empty());
+    }
+
+    #[test]
+    fn watch_does_not_join_unicode_across_stop_or_request_boundaries() {
+        let mut app = App::default();
+        let mut watch = Watch::default();
+        watch.turn_on(&mut app);
+        assert_eq!(watch_text(&mut watch, &mut app, &[&[0xe4]]).0, "");
+        watch.turn_off(&mut app);
+        watch.turn_on(&mut app);
+        assert_eq!(watch_text(&mut watch, &mut app, &[&[0xb8, 0xad]]).0, "��");
+        assert_eq!(watch_text(&mut watch, &mut app, &[&[0xe4]]).0, "");
+        watch.reanchor(&mut app);
+        assert_eq!(
+            watch_text(&mut watch, &mut app, &[b"new link"]).0,
+            "new link"
         );
     }
 }

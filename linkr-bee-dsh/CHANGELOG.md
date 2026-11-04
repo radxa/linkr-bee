@@ -2,6 +2,17 @@
 
 ## Unreleased (not published; version stays 1.1.4 until confirmed)
 
+- Execution safety: cancellation covers connection startup and queued requests.
+  An operation whose delivery or result is uncertain is never automatically
+  replayed, and a failed send is reported as a failure rather than as delivery.
+- Link ownership: tools return an idle connection when finished; an open panel
+  keeps its stream. Queries wait for active operations, and closing the panel,
+  stopping an old CLI poll or reloading the plugin cannot strand or steal a link.
+- Console replay: atomic ring snapshots and Host epoch/sequence cursors prevent
+  duplicate output after reconnect, restore gaps beyond the event backlog, and
+  keep cleared output cleared. Late callbacks cannot revive a retired stream.
+- UART results: reads and changes require BLE and an affirmative CLI result;
+  failed commands never announce a successfully changed configuration.
 - Selection/copy: xterm paints its selection on a canvas layer, not a DOM
   text selection, so a pane that cannot drag-select used to offer nothing.
   The header now has a **Copy** button (disabled until something is selected,

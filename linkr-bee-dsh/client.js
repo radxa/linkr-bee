@@ -13186,6 +13186,13 @@ window.__ModuleLoader__.load({
             /* already gone */
           }
         },
+        reset() {
+          try {
+            terminal.reset();
+          } catch {
+            /* already gone */
+          }
+        },
         focus,
         fit: doFit,
         /** The text currently painted as a selection, or ''. */
@@ -13355,10 +13362,6 @@ window.__ModuleLoader__.load({
     const UART_URL = '/linkr-bee/uart';
     const WATCH_URL = '/linkr-bee/watch';
     const RESIZE_URL = '/linkr-bee/resize';
-    // The Host's own record of what the target said (a 64 KiB ring). Unlike
-    // the event journal, this is emptied when the panel is cleared, so it is
-    // the only honest source for putting a screen back.
-    const READ_URL = '/linkr-bee/console/read';
     // The other direction of the panel channel: a clear this page asks for.
     const PANEL_ACTION_URL = '/linkr-bee/panel';
     // Control, not content: the agent's open/focus/clear ride a channel of
@@ -14021,7 +14024,43 @@ window.__ModuleLoader__.load({
      * re-seeds the screen from it, and records at or before that moment are
      * already on screen and are not drawn twice.
      */
-    const screen = { text: '', at: 0, conn: '', drew: false };
+    const screen = { text: '', at: 0, conn: '', drew: false, epoch: null, seq: 0 };
+
+    /** Event identity survives reconnects, remounts and millisecond collisions. */
+    function createConsoleCursor(state) {
+      const retired = new Set();
+      const advance = (record, snapshot) => {
+        const seq = record?.seq;
+        if (!Number.isSafeInteger(seq) || seq < (snapshot ? 0 : 1)) {
+          return { accepted: false, reset: false };
+        }
+        // Pre-cursor hosts still supplied seq; their lifetime is one legacy epoch.
+        const epoch = typeof record.epoch === 'string' && record.epoch ? record.epoch : 'legacy';
+        if (retired.has(epoch)) return { accepted: false, reset: false };
+        let reset = false;
+        if (state.epoch !== epoch) {
+          // Only a snapshot from the current SSE connection can replace an
+          // established Host epoch. A delayed panel/HTTP clear is not one.
+          if (!snapshot && state.epoch !== null) return { accepted: false, reset: false };
+          reset = state.epoch !== null;
+          if (state.epoch !== null) retired.add(state.epoch);
+          if (retired.size > 8) retired.delete(retired.values().next().value);
+          state.epoch = epoch;
+          state.seq = 0;
+          state.at = 0;
+        }
+        if (seq < state.seq || (!snapshot && seq === state.seq)) {
+          return { accepted: false, reset: false };
+        }
+        state.seq = seq;
+        return { accepted: true, reset };
+      };
+      return {
+        accept: (record) => advance(record, false),
+        seed: (snapshot) => advance(snapshot, true),
+      };
+    }
+    const consoleCursor = createConsoleCursor(screen);
 
     /** Keep the tail of the text drawn so far, and the time of its last record. */
     function rememberScreen(text, at) {
@@ -14151,9 +14190,10 @@ window.__ModuleLoader__.load({
       }, [selectionText]);
 
       /** Empty the screen: the panel's clear button and the agent's "clear". */
-      const clearScreen = useCallback(() => {
+      const clearScreen = useCallback(({ reset = false } = {}) => {
         try {
-          termApi.current?.clear();
+          if (reset) termApi.current?.reset();
+          else termApi.current?.clear();
         } catch {
           /* a terminal that never started has nothing to clear */
         }
@@ -14178,7 +14218,9 @@ window.__ModuleLoader__.load({
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ action: 'clear' }),
             keepalive: true,
-          }).catch(() => {});
+          }).then((response) => response.json())
+            .then((payload) => { if (payload.event) panelActions.clear?.(payload.event); })
+            .catch(() => {});
         } catch {
           /* the panel can outlive the route during a plugin restart */
         }
@@ -14251,7 +14293,13 @@ window.__ModuleLoader__.load({
             /* a disposed terminal has nothing to focus */
           }
         };
-        const clear = () => clearScreen();
+        const clear = (record) => {
+          if (Number.isSafeInteger(record?.consoleSeq)) {
+            const decision = consoleCursor.accept({ epoch: record.consoleEpoch, seq: record.consoleSeq });
+            if (!decision.accepted) return;
+            clearScreen({ reset: decision.reset });
+          } else clearScreen();
+        };
         panelActions.focus = focus;
         panelActions.clear = clear;
         return () => {
@@ -14582,36 +14630,53 @@ window.__ModuleLoader__.load({
       useEffect(() => {
         let source = null;
         let retry = null;
+        let seedTimer = null;
         let closed = false;
         let delay = 1000;
-        let since = screen.at;
         let seeding = screen.text === '';
         const buffered = [];
 
-        // 0 means "no timestamp": such a record is never treated as old.
-        const stamp = (record) => {
-          const ts = Number(record && record.ts);
-          return Number.isFinite(ts) && ts > 0 ? ts : 0;
-        };
-
         const draw = (record) => {
-          // The Host replays its journal on every stream; anything at or before
-          // the last record on screen is already there.
-          const at = stamp(record);
-          if (since > 0 && at > 0 && at <= since) return;
+          const decision = consoleCursor.accept(record);
+          if (!decision.accepted) return;
+          if (decision.reset) clearScreen({ reset: true });
+          if (record.type === 'clear') { clearScreen(); return; }
           appendEvent(record);
         };
 
         const seedScreen = () => {
           const text = seedText(screen.text);
           if (text === '') return;
-          if (termApi.current !== null) {
-            termApi.current.write(text);
-          } else {
-            for (const segs of parseChunk(cleanStreamText(text))) linesRef.current.push({ kind: 'out', segs });
-          }
+          if (termApi.current !== null) termApi.current.write(text);
+          else for (const segs of parseChunk(cleanStreamText(text))) linesRef.current.push({ kind: 'out', segs });
           dirtyRef.current = true;
           setDrew(true);
+        };
+
+        const finishSeeding = () => {
+          if (closed || !seeding) return;
+          seeding = false;
+          if (seedTimer !== null) clearTimeout(seedTimer);
+          seedTimer = null;
+          for (const record of buffered.splice(0)) draw(record);
+        };
+
+        const snapshot = (record) => {
+          // A reconnect on the same Host replays only what the cursor missed.
+          // A fresh mount or a restarted Host seeds the atomic ring snapshot
+          // preceding that connection's backlog, never a separate HTTP clock.
+          const gap = record.epoch === screen.epoch && Number.isSafeInteger(record.firstSeq) &&
+            record.firstSeq > screen.seq + 1 && record.seq >= screen.seq;
+          if (!seeding && record.epoch === screen.epoch && !gap) return;
+          const decision = consoleCursor.seed(record);
+          if (decision.accepted) {
+            if (decision.reset || gap) clearScreen({ reset: true });
+            const text = typeof record.text === 'string' ? record.text : '';
+            if (text !== '') { rememberScreen(text, 0); seedScreen(); }
+            if (record.link) setLink(record.link);
+            if (record.session) setSession(record.session);
+          }
+          finishSeeding();
         };
 
         const detach = () => {
@@ -14619,11 +14684,7 @@ window.__ModuleLoader__.load({
           source.onopen = null;
           source.onmessage = null;
           source.onerror = null;
-          try {
-            source.close();
-          } catch {
-            /* already gone */
-          }
+          try { source.close(); } catch { /* already gone */ }
           source = null;
         };
 
@@ -14636,85 +14697,32 @@ window.__ModuleLoader__.load({
         function connect() {
           retry = null;
           if (closed) return;
-          try {
-            source = new EventSource(STREAM_URL);
-          } catch {
-            schedule();
-            return;
-          }
-          source.onopen = () => {
-            delay = 1000;
-            setLive(true);
-            setEverLive(true);
-          };
-          source.onerror = () => {
-            setLive(false);
-            detach();
-            schedule();
-          };
-          source.onmessage = (message) => {
+          let current;
+          try { current = new EventSource(STREAM_URL); source = current; }
+          catch { schedule(); return; }
+          const active = () => !closed && source === current;
+          current.onopen = () => { if (!active()) return; delay = 1000; setLive(true); setEverLive(true); };
+          current.onerror = () => { if (!active()) return; setLive(false); detach(); schedule(); };
+          current.onmessage = (message) => {
+            if (!active()) return;
             let record;
-            try {
-              record = JSON.parse(message.data);
-            } catch {
-              return;
-            }
+            try { record = JSON.parse(message.data); } catch { return; }
             if (record === null || typeof record !== 'object') return;
-            if (seeding) buffered.push(record);
-            else draw(record);
+            if (record.type === 'snapshot') { snapshot(record); return; }
+            if (seeding) buffered.push(record); else draw(record);
           };
         }
-
-        /**
-         * Ask the Host what the target said before this page existed. The ring,
-         * not the event journal: the journal still holds the text a panel clear
-         * removed, so replaying it would put back exactly what the agent asked
-         * to stop showing. The ring answers with the console itself.
-         */
-        const replayRing = () => {
-          if (!seeding) return Promise.resolve();
-          return fetch(READ_URL)
-            .then((response) => response.json())
-            .then((payload) => {
-              const text = typeof payload.text === 'string' ? payload.text : '';
-              // What the ring holds is what the console has; everything the
-              // stream still replays from before this moment is either that
-              // same text or something a clear removed.
-              const at = Date.now();
-              if (text !== '') {
-                rememberScreen(text, at);
-                lastTs.current = at;
-                seedScreen();
-              }
-              if (at > since) since = at;
-              if (payload.link) setLink(payload.link);
-              if (payload.session) setSession(payload.session);
-            })
-            .catch(() => {});
-        };
-
-        const finishSeeding = () => {
-          if (!seeding) return;
-          seeding = false;
-          for (const record of buffered.splice(0)) draw(record);
-        };
 
         seedScreen();
+        if (seeding) seedTimer = setTimeout(finishSeeding, 1500);
         connect();
-        if (seeding) {
-          // A read that never answers must not hold the live stream hostage.
-          const fallback = setTimeout(finishSeeding, 1500);
-          replayRing().then(() => {
-            clearTimeout(fallback);
-            finishSeeding();
-          });
-        }
         return () => {
           closed = true;
           if (retry !== null) clearTimeout(retry);
+          if (seedTimer !== null) clearTimeout(seedTimer);
           detach();
         };
-      }, [appendEvent]);
+      }, [appendEvent, clearScreen]);
 
 
       /**
@@ -14989,19 +14997,21 @@ window.__ModuleLoader__.load({
        * (focusing what is not on screen scrolls nothing into view); "clear"
        * only reaches a mounted panel.
        */
-      const dispatchPanel = (action) => {
+      const dispatchPanel = (action, record = {}) => {
         let acted = false;
         if (action === 'open' || action === 'focus') {
           acted = openPanel();
           if (action === 'focus') panelActions.focus?.();
         } else if (action === 'clear') {
           if (panelActions.clear !== null) {
-            panelActions.clear();
+            panelActions.clear(record);
           } else {
-            // The Host emptied its ring while the panel was closed: the screen
-            // this page remembers is exactly what was cleared, so forget it —
-            // otherwise the next mount would put it back.
-            forgetScreen(Date.now());
+            // A delayed panel-channel clear cannot erase bytes newer than its
+            // ordered console cutoff. Remounts retain the same cursor.
+            const decision = Number.isSafeInteger(record.consoleSeq)
+              ? consoleCursor.accept({ epoch: record.consoleEpoch, seq: record.consoleSeq })
+              : { accepted: true };
+            if (decision.accepted) forgetScreen(0);
           }
           acted = true;
         }
@@ -15042,21 +15052,27 @@ window.__ModuleLoader__.load({
             retry = null;
             if (closed) return;
             let openedAt = 0;
+            let current;
             try {
-              source = new EventSource(PANEL_URL);
+              current = new EventSource(PANEL_URL);
+              source = current;
             } catch {
               schedule();
               return;
             }
-            source.onopen = () => {
+            const active = () => !closed && source === current;
+            current.onopen = () => {
+              if (!active()) return;
               openedAt = Date.now();
               delay = 1500;
             };
-            source.onerror = () => {
+            current.onerror = () => {
+              if (!active()) return;
               detach();
               schedule();
             };
-            source.onmessage = (message) => {
+            current.onmessage = (message) => {
+              if (!active()) return;
               let record;
               try {
                 record = JSON.parse(message.data);
@@ -15069,7 +15085,7 @@ window.__ModuleLoader__.load({
               // history, not a command: honouring it would pop the panel open
               // on a fresh load for a request the agent made long ago.
               if (openedAt !== 0 && Number(record.at) > 0 && Number(record.at) < openedAt - 2000) return;
-              dispatchPanel(String(record.action || ''));
+              dispatchPanel(String(record.action || ''), record);
             };
           }
 
