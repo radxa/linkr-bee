@@ -62,6 +62,13 @@ with the project owner's HUAWEI ID, and wait for DevEco Studio to populate the
 debug signing configuration. The resulting certificates, keystore, and profile
 files are ignored by Git and must not be committed.
 
+The tree ships `build-profile.json5.template`, whose signing material is
+placeholder text: copy it to `build-profile.json5` (gitignored) and let DevEco
+Studio fill the paths and passwords on your machine, or let DevEco generate the
+file from scratch. A committed `build-profile.json5` is a mistake: it carries
+one person's absolute paths and encrypted passwords, and it makes the project
+unbuildable everywhere else.
+
 After signing is configured, use DevEco Studio's **Run** action for a simulator
 or device. The command-line build continues to produce an unsigned HAP unless
 the generated `signingConfigs` entry is available to hvigor.

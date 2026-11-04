@@ -1,6 +1,20 @@
 {
   "app": {
-    "signingConfigs": [],
+    "signingConfigs": [
+      {
+        "name": "default",
+        "type": "HarmonyOS",
+        "material": {
+          "certpath": "/path/to/your-debug-certificate.cer",
+          "keyAlias": "debugKey",
+          "keyPassword": "REPLACE_WITH_YOUR_LOCAL_SIGNING_MATERIAL",
+          "profile": "/path/to/your-debug-profile.p7b",
+          "signAlg": "SHA256withECDSA",
+          "storeFile": "/path/to/your-debug-keystore.p12",
+          "storePassword": "REPLACE_WITH_YOUR_LOCAL_SIGNING_MATERIAL"
+        }
+      }
+    ],
     "products": [
       {
         "name": "default",

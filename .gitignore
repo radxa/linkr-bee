@@ -35,6 +35,8 @@ harmonyos/oh_modules/
 harmonyos/local.properties
 harmonyos/entry/oh_modules/
 harmonyos/signing/
+# Signing material is per-machine: the tree ships the template, DevEco writes this.
+harmonyos/build-profile.json5
 harmonyos/**/*.cer
 harmonyos/**/*.p12
 harmonyos/**/*.p7b
