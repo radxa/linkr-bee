@@ -15,7 +15,9 @@ import { spawn } from 'node:child_process';
 import { appendFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 
 /** Identity helper mirroring the tool-registry's typing helper. */
 const defineTool = (tool) => tool;
@@ -78,14 +80,32 @@ function resolveCli(config) {
     if (candidate && existsSync(candidate)) return { command: candidate, args: [] };
   }
   // A launcher is JavaScript: it forwards its arguments and stdio to the real
-  // binary, so the session speaks to the same pipes either way.
-  try {
-    const launcher = require.resolve('linkr-bee-cli/bin/bee-cli.js');
-    return { command: process.execPath, args: [launcher] };
-  } catch {
-    /* not installed beside the plugin: fall through to the PATH lookup */
+  // binary, so the session speaks to the same pipes either way. A package
+  // manager may hand the plugin over through a symlink (pnpm does), so the
+  // launcher is looked up from both this file's URL and its real path.
+  for (const launcher of launcherCandidates()) {
+    if (launcher !== null) return { command: process.execPath, args: [launcher] };
   }
   return { command: 'bee-cli', args: [] };
+}
+
+/** The installed `linkr-bee-cli` launcher, or null when this profile has none. */
+function launcherCandidates() {
+  const here = fileURLToPath(import.meta.url);
+  const bases = [here];
+  try {
+    const real = realpathSync(here);
+    if (real !== here) bases.push(real);
+  } catch {
+    /* a broken link is the same as no link */
+  }
+  return bases.map((base) => {
+    try {
+      return createRequire(base).resolve('linkr-bee-cli/bin/bee-cli.js');
+    } catch {
+      return null;
+    }
+  });
 }
 
 function connectionArgs(config) {
