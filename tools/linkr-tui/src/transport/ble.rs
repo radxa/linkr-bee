@@ -31,7 +31,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use btleplug::api::{Central, Manager as _, Peripheral as _, ScanFilter, WriteType};
 use btleplug::platform::{Manager, Peripheral};
@@ -64,12 +64,23 @@ pub const NUS_TX: Uuid = Uuid::from_u128(0x6e400003_b5a3_f393_e0a9_e50e24dcca9e)
 /// (`tools/linkr_ble_terminal.py`) speaks to these same five.
 pub const MGMT_SERVICE: Uuid = Uuid::from_u128(0x4c4b0001_9a7e_4f4e_8b8a_3d6f12a0c001);
 /// Read: the negotiated protocol version, size limits and capability bits.
+///
+/// TODO(review M10): nothing reads it yet. The client always dials NUS and
+/// takes each management response's length from its own header, so a board
+/// that advertises a smaller `mgmtMaxPayload` is only discovered by a write
+/// that fails, and capability-driven choices (Reliable UART, the single-owner
+/// MULTI_SESSION bit) are not made the way the web client makes them. Reading
+/// it means choosing the transport and the feature set from what the board
+/// says — a connection-level change whose failure modes are worse than the
+/// assumption, so it is not half-built here.
 pub const MGMT_PROTOCOL: Uuid = Uuid::from_u128(0x4c4b0002_9a7e_4f4e_8b8a_3d6f12a0c001);
 /// Read: this board's stable identifier.
 pub const MGMT_DEVICE_ID: Uuid = Uuid::from_u128(0x4c4b0003_9a7e_4f4e_8b8a_3d6f12a0c001);
 /// Write: one management request, framed as `protocol` encodes it.
 pub const MGMT_COMMAND: Uuid = Uuid::from_u128(0x4c4b0004_9a7e_4f4e_8b8a_3d6f12a0c001);
-/// Notify: the responses, as one `protocol::ManagementReassembler` stream.
+/// Notify: the responses, a fragment stream whose header arrives in the first
+/// fragment only. [`ManagementMessages`] assembles each message and absorbs a
+/// re-delivered copy before the application sees it.
 pub const MGMT_RESPONSE: Uuid = Uuid::from_u128(0x4c4b0005_9a7e_4f4e_8b8a_3d6f12a0c001);
 
 /// The advertised-name prefix used by firmware that predates per-device names.
@@ -1351,8 +1362,7 @@ async fn wire(peripheral: &Peripheral) -> Result<(), String> {
     Ok(())
 }
 
-/// The first of a run of identical management notifications, and nothing of
-/// the rest.
+/// How long a re-delivered management message may follow the original.
 ///
 /// BlueZ re-broadcasts one GATT notification once per outstanding notify
 /// session on the characteristic, so a client sees the same value several
@@ -1363,17 +1373,121 @@ async fn wire(peripheral: &Peripheral) -> Result<(), String> {
 /// are the daemon's alone; passing them on turns one scan result into four
 /// rows and one ending into several orphans.
 ///
-/// The comparison is against the *immediately* previous notification rather
-/// than a set of seen ones: what arrives is runs of repeats, and a value that
-/// legitimately comes back later — a state that is published twice — is not
-/// this function's to swallow. Terminal bytes never come through here, so
-/// nothing a user types is ever suppressed.
-fn keep_once(last: &mut Option<Vec<u8>>, value: Vec<u8>) -> Option<Vec<u8>> {
-    if last.as_deref() == Some(value.as_slice()) {
-        return None;
+/// A copy is on the socket by the time the original has been read, so this
+/// window is generous for the daemon and short enough that a bridge which
+/// genuinely publishes the same state twice, a second apart, is not silenced.
+const MANAGEMENT_REPEAT_WINDOW: Duration = Duration::from_millis(1000);
+
+/// The message being assembled from management fragments.
+struct Incoming {
+    /// Every byte received for this message so far, header included.
+    bytes: Vec<u8>,
+    /// The message's declared length, header included.
+    total: usize,
+}
+
+/// A message already handed to the application, kept as the anchor for repeat
+/// detection.
+struct Delivered {
+    bytes: Vec<u8>,
+    at: Instant,
+}
+
+/// The management notification stream, cut into whole messages.
+///
+/// A management response is a *fragment* stream: only the first fragment of a
+/// message carries the header, and every fragment after it is bare payload
+/// bytes. Two fragments in a row can legitimately be byte-identical — uniform
+/// padding, a repeated status string — and a continuation fragment has no
+/// sequence number, so that pair is indistinguishable from one notification
+/// the daemon delivered twice. Duplicate detection therefore must not look at
+/// fragments at all: it looks at *messages*. A message, header and all, that
+/// arrives again inside [`MANAGEMENT_REPEAT_WINDOW`] of the first copy is the
+/// re-broadcast this type exists to absorb; every other fragment is payload
+/// and is kept. Dropping a repeat after the whole message has been assembled
+/// is also what keeps a run of copies (three, four, as sessions pile up) from
+/// looking like a new message each time.
+///
+/// Terminal bytes never come through here. `NUS_TX` has no framing at all, so
+/// nothing a target prints — and nothing a user types — can be suppressed.
+struct ManagementMessages {
+    /// The message being assembled, from its header to its last declared byte.
+    pending: Option<Incoming>,
+    /// The last message handed over, the anchor a copy is compared against.
+    delivered: Option<Delivered>,
+}
+
+impl ManagementMessages {
+    fn new() -> ManagementMessages {
+        ManagementMessages {
+            pending: None,
+            delivered: None,
+        }
     }
-    *last = Some(value.clone());
-    Some(value)
+
+    /// Feed one notification value; hand back at most one whole message.
+    ///
+    /// `None` covers both "still arriving" and "a re-delivery": a caller that
+    /// only ever sees complete messages never has to decide anything about a
+    /// fragment, which is exactly the property the old byte-level filter
+    /// lacked.
+    fn push(&mut self, value: Vec<u8>, now: Instant) -> Option<Vec<u8>> {
+        if self.pending.is_none() {
+            // A message starts with a header. A value that does not parse as
+            // one is passed through untouched: the application's reassembler
+            // has words for that break, and guessing here would replace them
+            // with silence.
+            let Ok(header) = crate::protocol::parse_management_header(&value) else {
+                return Some(value);
+            };
+            let total = crate::protocol::MGMT_HEADER_SIZE + header.expected as usize;
+            if value.len() >= total {
+                // The common case: the whole answer fitted in one indication.
+                return self.whole(value, now);
+            }
+            self.pending = Some(Incoming {
+                bytes: value,
+                total,
+            });
+            return None;
+        }
+        let mut pending = self.pending.take().expect("checked above");
+        pending.bytes.extend_from_slice(&value);
+        if pending.bytes.len() < pending.total {
+            self.pending = Some(pending);
+            return None;
+        }
+        if pending.bytes.len() > pending.total {
+            // More bytes than the header declared: this cannot be the message
+            // that header started. The partial copy goes, and the fragment
+            // that broke it is offered as it came so the application reports
+            // the break and the next header starts from a clean slate.
+            // Swallowing it would leave the caller waiting on a message that
+            // is never coming.
+            return Some(value);
+        }
+        self.whole(pending.bytes, now)
+    }
+
+    /// Hand a complete message over, unless it is the previous one arriving
+    /// again inside the window.
+    fn whole(&mut self, message: Vec<u8>, now: Instant) -> Option<Vec<u8>> {
+        if let Some(last) = &self.delivered {
+            let repeated = last.bytes == message
+                && now.saturating_duration_since(last.at) <= MANAGEMENT_REPEAT_WINDOW;
+            if repeated {
+                // Keep the original as the anchor: a run of four copies is one
+                // message, and comparing the fifth with the first is what
+                // keeps it that way.
+                return None;
+            }
+        }
+        self.delivered = Some(Delivered {
+            bytes: message.clone(),
+            at: now,
+        });
+        Some(message)
+    }
 }
 
 // CoreBluetooth can keep the notification stream open after a physical link
@@ -1411,9 +1525,10 @@ async fn carry(
     let Ok(mut notifications) = peripheral.notifications().await else {
         return;
     };
-    // The last management notification, so its repeats can be told apart.
-    // See `keep_once`.
-    let mut last_response: Option<Vec<u8>> = None;
+    // The management channel, cut into whole messages so a re-delivered one
+    // can be told apart from a fragment that merely matches its neighbour.
+    // See `ManagementMessages`.
+    let mut messages = ManagementMessages::new();
     let disconnected = wait_for_disconnect(|| is_up(peripheral), Duration::from_millis(500));
     tokio::pin!(disconnected);
 
@@ -1433,7 +1548,7 @@ async fn carry(
                         // response down the target's stream would type the
                         // bridge's answer into somebody's shell prompt.
                         if notification.uuid == MGMT_RESPONSE {
-                            if let Some(bytes) = keep_once(&mut last_response, notification.value) {
+                            if let Some(bytes) = messages.push(notification.value, Instant::now()) {
                                 if management.send(bytes).is_err() {
                                     return;
                                 }
@@ -2005,30 +2120,138 @@ mod tests {
         assert_eq!(got, sent, "ten bytes through a four-byte buffer, whole");
     }
 
-    /// A notification the daemon repeated is passed on once, and its repeats
-    /// are dropped — but only while they are *repeats*: the same value coming
-    /// back after a different one is a new event and is not this link's to
-    /// swallow.
-    #[test]
-    fn a_repeated_notification_is_passed_on_once() {
-        let mut last = None;
-        let line = b"@scan result BenchNet wpa2 ch=6 -54dBm".to_vec();
+    /// A management response header, the way the bridge frames one: `LK`,
+    /// version 1, response type 2, the request it answers, its payload length
+    /// and the flags word. Written by hand because `protocol` only encodes
+    /// requests — a host never sends a response.
+    fn response_header(request_id: u32, expected: u16, finished: bool) -> Vec<u8> {
+        let mut frame = vec![0x4c, 0x4b, 1, 2];
+        frame.extend_from_slice(&request_id.to_le_bytes());
+        frame.extend_from_slice(&expected.to_le_bytes());
+        frame.extend_from_slice(&(if finished { 1u16 } else { 0 }).to_le_bytes());
+        frame
+    }
 
-        for copy in 0..4 {
-            let kept = keep_once(&mut last, line.clone());
-            if copy == 0 {
-                assert_eq!(kept.as_ref(), Some(&line), "the first copy is the event");
-            } else {
-                assert!(kept.is_none(), "copy {copy} is the daemon talking twice");
-            }
+    /// One whole management response in a single notification.
+    fn response_frame(request_id: u32, payload: &[u8], finished: bool) -> Vec<u8> {
+        let mut frame = response_header(request_id, payload.len() as u16, finished);
+        frame.extend_from_slice(payload);
+        frame
+    }
+
+    /// A fragment stream can carry two identical fragments in a row — uniform
+    /// padding, a repeated status string, any payload that happens to repeat.
+    /// Both are payload, and a message split across them only reassembles if
+    /// both are kept.
+    ///
+    /// This is the H4 regression: the old byte-level filter compared each
+    /// notification with the one before it and dropped this third fragment,
+    /// leaving the message one fragment short for good.
+    #[test]
+    fn two_identical_fragments_are_both_delivered() {
+        let mut messages = ManagementMessages::new();
+        let now = Instant::now();
+        let head = response_header(7, 8, true);
+        let padding = [0u8; 4].to_vec();
+
+        assert_eq!(
+            messages.push(head, now),
+            None,
+            "a header alone is no message"
+        );
+        assert_eq!(
+            messages.push(padding.clone(), now),
+            None,
+            "half the payload is no message either"
+        );
+        let whole = messages
+            .push(padding.clone(), now)
+            .expect("the message reassembles");
+        assert_eq!(&whole[..12], response_header(7, 8, true).as_slice());
+        assert_eq!(
+            &whole[12..],
+            [padding.clone(), padding].concat().as_slice(),
+            "both identical fragments are in the message"
+        );
+    }
+
+    /// The daemon's re-broadcast: one whole management response is handed over
+    /// once, however many times the stack delivers it inside the window.
+    #[test]
+    fn a_repeated_management_message_is_delivered_once() {
+        let mut messages = ManagementMessages::new();
+        let started = Instant::now();
+        let reply = response_frame(9, b"OK", true);
+
+        assert_eq!(messages.push(reply.clone(), started), Some(reply.clone()));
+        for copy in 1..4 {
+            assert_eq!(
+                messages.push(reply.clone(), started + Duration::from_millis(50 * copy)),
+                None,
+                "copy {copy} is the daemon talking twice"
+            );
         }
 
-        // A different notification in between makes the same value new again.
-        assert!(keep_once(&mut last, b"@scan done".to_vec()).is_some());
-        assert!(
-            keep_once(&mut last, line.clone()).is_some(),
-            "after a different notification the same value is a new one"
+        // After the window the same answer is a new one: a bridge that
+        // publishes the same state twice is heard twice, not silenced for
+        // having repeated itself.
+        assert_eq!(
+            messages.push(
+                reply.clone(),
+                started + MANAGEMENT_REPEAT_WINDOW + Duration::from_millis(1)
+            ),
+            Some(reply),
+            "the same message after the window is a new one"
         );
+    }
+
+    /// A repeat is only a repeat next to its original: another message in
+    /// between makes the same bytes new again.
+    #[test]
+    fn a_message_in_between_makes_the_same_answer_new() {
+        let mut messages = ManagementMessages::new();
+        let started = Instant::now();
+        let reply = response_frame(9, b"OK", true);
+        let other = response_frame(9, b"OK\n", true);
+
+        assert_eq!(messages.push(reply.clone(), started), Some(reply.clone()));
+        assert_eq!(messages.push(other.clone(), started), Some(other));
+        assert_eq!(
+            messages.push(reply.clone(), started),
+            Some(reply),
+            "after a different message the same bytes are a new answer"
+        );
+    }
+
+    /// A value that does not parse as a header is passed on untouched: the
+    /// application's reassembler has words for an orphaned fragment, and
+    /// replacing them with silence would hide the break.
+    #[test]
+    fn a_fragment_that_is_not_a_header_is_passed_through() {
+        let mut messages = ManagementMessages::new();
+        let orphan = b"\x00\x01orphan".to_vec();
+        assert_eq!(messages.push(orphan.clone(), Instant::now()), Some(orphan));
+    }
+
+    /// A fragment stream that runs past the length its header declared cannot
+    /// be that message. The half-assembled copy goes and the fragment that
+    /// broke it is reported, so the caller sees a break in the stream instead
+    /// of waiting forever for a message that will never arrive.
+    #[test]
+    fn a_message_that_overruns_its_header_is_dropped_and_the_fragment_reported() {
+        let mut messages = ManagementMessages::new();
+        let now = Instant::now();
+        assert_eq!(messages.push(response_header(3, 4, true), now), None);
+        let extra = [0u8; 6].to_vec();
+        assert_eq!(
+            messages.push(extra.clone(), now),
+            Some(extra),
+            "the fragment is reported, not swallowed"
+        );
+
+        // The next header starts from a clean slate.
+        let reply = response_frame(4, b"OK", true);
+        assert_eq!(messages.push(reply.clone(), now), Some(reply));
     }
 
     /// A second client holding the adapter is an answer BlueZ gives in more
