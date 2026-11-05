@@ -38,6 +38,12 @@ if (args.includes('--scan')) {
       emit({event:'end',id:request.id,code:255});
       return;
     }
+    if(config.scenario==='lost-exec'&&request.op==='exec'){
+      emit({event:'output',id:request.id,data:'SIDE_EFFECT_DONE\n'});
+      emit({event:'error',id:request.id,code:'link_lost',message:'the link went away mid-command',still_running:false});
+      emit({event:'end',id:request.id,code:255});
+      return;
+    }
     if(config.scenario==='drop-exec'&&request.op==='exec')process.exit(1);
     if(config.scenario==='drop-send'&&request.op==='send')process.exit(1);
     if(config.scenario==='presentation'&&request.op==='exec') {
@@ -85,7 +91,7 @@ if (args.includes('--scan')) {
 async function fixture(t, scenario = 'ok', extra = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'linkr-plugin-session-'));
   const executable = join(dir, 'bee-cli.cjs');
-  const { cli = {}, ...configExtra } = extra;
+  const { cli = {}, editor, fiberEntry, ...configExtra } = extra;
   await writeFile(executable, fakeCli, { mode: 0o755 });
   await writeFile(join(dir, 'config.json'), JSON.stringify({ scenario, ...cli }));
   await writeFile(join(dir, 'calls.jsonl'), '');
@@ -99,6 +105,8 @@ async function fixture(t, scenario = 'ok', extra = {}) {
     tools: { register(tool) { tools.set(tool.name, tool); return () => {}; } },
     webServer: { register(options) { handler = options.handler; return () => {}; } },
   };
+  if (editor !== undefined) ctx.get = name => (name === 'configEditor' ? editor : undefined);
+  if (fiberEntry !== undefined) ctx.fiber = { entry: fiberEntry };
   const config = { cliPath: executable, transport: 'loopback', sendCaptureMs: 0, ...configExtra };
   apply(ctx, config);
   const dispose = () => {
@@ -474,6 +482,22 @@ test('a not_connected exec says nothing was dispatched and the next call rescans
   await f.route('/watch', {on:false});
 });
 
+test('a lost exec after dispatch is never reported as safe to resend', async t => {
+  // The CLI emits `link_lost` with `still_running: false` after the command
+  // was sent and the link died holding the answer. That flag is not proof
+  // that nothing was dispatched, so the tool must not offer a resend.
+  const f = await fixture(t, 'lost-exec', {transport:'ble',bleName:'Mock'});
+  await assert.rejects(
+    f.call('linkr_bee_exec', {cmd:'touch /tmp/already-ran'}),
+    /bee-cli exec failed \(link_lost\).*do not resend automatically/,
+  );
+  const calls = await f.calls();
+  assert.equal(calls.filter(c => c.mode === 'request' && c.op === 'exec').length, 1,
+    'the command was dispatched exactly once');
+  assert.equal(calls.filter(c => c.mode === 'one-shot').length, 0,
+    'a post-dispatch failure must not fall back to a one-shot replay');
+});
+
 test('an inherited property is not a named key', async t => {
   const f = await fixture(t, 'ok');
   await assert.rejects(
@@ -590,6 +614,46 @@ test('a connection change cannot redirect an active or queued command', async t 
   const calls = await f.calls();
   const current = calls.find(c => c.mode === 'serve' && c.args.includes('Board-B'));
   assert.equal(calls.find(c => c.cmd === 'new-board').pid, current.pid);
+});
+
+test('a command accepted during an async settings write waits for the new board', async t => {
+  let releaseEdit;
+  const gate = new Promise(resolve => { releaseEdit = resolve; });
+  let markStarted;
+  const started = new Promise(resolve => { markStarted = resolve; });
+  const editor = {
+    async edit() {
+      markStarted();
+      await gate;
+    },
+  };
+  const f = await fixture(t, 'ok', {
+    transport: 'ble',
+    bleName: 'Board-A',
+    editor,
+    fiberEntry: { config: { transport: 'ble', bleName: 'Board-A' } },
+  });
+  const saving = f.route('/config', { bleName: 'Board-B' });
+  await started;
+  const exec = f.call('linkr_bee_exec', { cmd: 'only-on-B' });
+  await pause(120);
+  const during = await f.calls();
+  assert.equal(during.filter(c => c.mode === 'serve').length, 0,
+    'a command accepted during the write must not be dialled to the old board');
+  assert.equal(during.filter(c => c.op === 'exec').length, 0,
+    'nothing reaches the resident session while the write is pending');
+  releaseEdit();
+  const saved = await saving;
+  assert.equal(saved.ok, true);
+  const answer = await exec;
+  assert.match(answer, /result/);
+  const calls = await f.calls();
+  const serves = calls.filter(c => c.mode === 'serve');
+  assert.equal(serves.length, 1, 'the command was dialled once, after the write');
+  const name = serves[0].args[serves[0].args.indexOf('--ble-name') + 1];
+  assert.equal(name, 'Board-B');
+  assert.equal(calls.find(c => c.cmd === 'only-on-B').pid, serves[0].pid,
+    'the accepted command belongs to the new connection, not the stopped one');
 });
 
 test('legacy UART replies expose the confirmed baud without inventing other fields', async t => {

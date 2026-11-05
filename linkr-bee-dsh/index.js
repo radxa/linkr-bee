@@ -242,7 +242,7 @@ async function runBee(config, args, { stdinText, keepStdinOpenMs, signal, onEven
     try {
       while (true) {
         signal.throwIfAborted();
-        if (streamBorrows === 0 && sessionBorrows === 0 && sessionStarting === null && !session?.busy) {
+        if (streamBorrows === 0 && sessionBorrows === 0 && sessionStarting === null && configSaving === 0 && !session?.busy) {
           // Reserve synchronously: two waiters must not both observe an idle
           // link before either actually owns it.
           streamBorrows += 1;
@@ -906,6 +906,8 @@ let sessionStarting = null;
 let sessionRetiring = Promise.resolve();
 let sessionBorrows = 0;
 let oneShotWaiters = 0;
+/** A settings write is between its busy check and its connection swap. */
+let configSaving = 0;
 /** The panel wants the target's bytes: pushed by `watch`, or polled on an old CLI. */
 let watchWanted = false;
 /** The session that currently has `watch` on (so it can be told `off`). */
@@ -1131,7 +1133,7 @@ function makeSession(child, ready, config) {
 async function ensureSession(config, signal) {
   signal = operationSignal(signal);
   signal.throwIfAborted();
-  while (streamBorrows > 0) {
+  while (streamBorrows > 0 || configSaving > 0) {
     await waitWithSignal(sleep(10), signal);
     signal.throwIfAborted();
   }
@@ -1240,7 +1242,7 @@ async function withSessionLease(signal, work) {
   const current = operationSignal(signal);
   while (true) {
     current.throwIfAborted();
-    if (streamBorrows === 0 && oneShotWaiters === 0) {
+    if (streamBorrows === 0 && oneShotWaiters === 0 && configSaving === 0) {
       sessionBorrows += 1;
       break;
     }
@@ -1554,13 +1556,14 @@ async function runExec(config, options, signal) {
       const failure = answer.events.find(event => event.event === 'error');
       if (failure) {
         const detail = typeof failure.message === 'string' && failure.message ? failure.message : 'no reason given';
-        // `not_connected`/`bad_request` are refused before anything reaches
-        // the board, so retrying is safe and the caller should be told so.
-        const notSent = failure.still_running === false ||
-          failure.code === 'not_connected' || failure.code === 'bad_request';
+        // Only a refusal that happened before the request reached the board
+        // means "nothing was dispatched". `still_running` is not that signal:
+        // the CLI reports `link_lost` with `still_running: false` after the
+        // command was sent and the link died holding the answer.
+        const notSent = failure.code === 'not_connected' || failure.code === 'bad_request';
         throw new Error(notSent
           ? `bee-cli exec was not dispatched (${failure.code}): ${detail}`
-          : `bee-cli exec failed (${failure.code}): ${detail}`);
+          : `bee-cli exec failed (${failure.code}): ${detail}. The command may have run; do not resend automatically.`);
       }
       throw new Error(`bee-cli exec failed (exit ${answer.code}); completion is unknown. Do not resend automatically.`);
     }
@@ -1713,7 +1716,7 @@ async function saveConfig(ctx, config, body, signal) {
   const changed = connectionKeys.some((key) => (config?.[key] ?? '') !== (next?.[key] ?? ''));
   // A connection change must not redirect work that is already in flight (or
   // queued behind it): those commands were accepted for the old board.
-  if (changed && (sessionBorrows > 0 || streamBorrows > 0 || oneShotWaiters > 0 || sessionStarting || session?.busy)) {
+  if (changed && (configSaving > 0 || sessionBorrows > 0 || streamBorrows > 0 || oneShotWaiters > 0 || sessionStarting || session?.busy)) {
     return { ok: false, error: 'The console is busy. Wait for the active operation before changing the connection.' };
   }
   const applyLocally = () => {
@@ -1736,13 +1739,21 @@ async function saveConfig(ctx, config, body, signal) {
     // An open panel should follow the new settings without a reload.
     if (watchWanted) resumeStreaming(config);
   };
-  if (editor !== undefined && typeof editor.edit === 'function' && entry !== undefined) {
-    await editor.edit(entry, (current) => ({ ...(current ?? config), ...patch }));
+  // Hold the link across the whole edit, not just the busy check above: a
+  // command accepted while the editor is awaiting would otherwise be dialled
+  // to the old board and then stopped by applyLocally().
+  configSaving += 1;
+  try {
+    if (editor !== undefined && typeof editor.edit === 'function' && entry !== undefined) {
+      await editor.edit(entry, (current) => ({ ...(current ?? config), ...patch }));
+      applyLocally();
+      return { ok: true, applied: 'profile', config: { ...next, lanToken: next.lanToken ? '\u2022\u2022\u2022\u2022\u2022\u2022' : '' } };
+    }
     applyLocally();
-    return { ok: true, applied: 'profile', config: { ...next, lanToken: next.lanToken ? '\u2022\u2022\u2022\u2022\u2022\u2022' : '' } };
+    return { ok: true, applied: 'memory', config: { ...next, lanToken: next.lanToken ? '\u2022\u2022\u2022\u2022\u2022\u2022' : '' } };
+  } finally {
+    configSaving -= 1;
   }
-  applyLocally();
-  return { ok: true, applied: 'memory', config: { ...next, lanToken: next.lanToken ? '\u2022\u2022\u2022\u2022\u2022\u2022' : '' } };
 }
 
 function normalizeConfig(raw, issues) {
