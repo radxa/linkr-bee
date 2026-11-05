@@ -62,7 +62,7 @@ endif
 
 config LINKR_BLE_BRIDGE_FIRMWARE_VERSION
 	string "Firmware version"
-	default "1.1.4"
+	default "1.1.5"
 	help
 	  Human-readable application version returned by the diagnostic command
 	  and included in release metadata.

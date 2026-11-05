@@ -13,7 +13,7 @@ this build has no interface and exits with status 2.
 ## Check the build
 
 ```sh
-./bee-cli --version          # bee-cli 1.1.4
+./bee-cli --version          # bee-cli 1.1.5
 ./bee-cli --capabilities     # operations, defaults and exit codes
 ./bee-cli --licenses         # third-party notice (also in THIRD_PARTY_LICENSES.md)
 ```
@@ -117,7 +117,7 @@ input ends or a request says `quit`:
 
 ```sh
 bee-cli --ble-name "Linkr Bee" --serve
-{"event":"ready","program":"bee-cli","version":"1.1.4","link":"ble:name:Linkr Bee","ops":[…]}
+{"event":"ready","program":"bee-cli","version":"1.1.5","link":"ble:name:Linkr Bee","ops":[…]}
 {"id":1,"op":"state"}
 {"event":"begin","id":1,"op":"state"}
 {"event":"result","what":"state","live":false,…}

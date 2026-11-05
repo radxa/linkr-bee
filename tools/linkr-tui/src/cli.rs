@@ -2384,9 +2384,11 @@ mod tests {
 
     #[test]
     fn uart_query_returns_the_full_confirmed_format() {
-        let mut app = App::default();
-        app.baud = Some(230400);
-        app.uart_settings = crate::accessory::parse_uart_settings("OK uart=230400,7,E,2,rtscts");
+        let app = App {
+            baud: Some(230400),
+            uart_settings: crate::accessory::parse_uart_settings("OK uart=230400,7,E,2,rtscts"),
+            ..App::default()
+        };
         assert_eq!(
             answer_of(&app, crate::device::Query::Uart).unwrap(),
             "uart=230400,7,e,2,rtscts"

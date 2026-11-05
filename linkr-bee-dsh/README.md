@@ -18,7 +18,7 @@ on the target board — the person and the agent share one board and one link.
 ## Requirements
 
 - DeepSeek Harness `>=0.2.0-rc.1 <0.3.0` (`engines.dsh`).
-- **`bee-cli`**, the Linkr Bee command-line client, version **1.1.4 or newer with
+- **`bee-cli`**, the Linkr Bee command-line client, version **1.1.5 or newer with
   the `watch` and `resize` operations** (this plugin's streaming depends on
   them; a build without them falls back to one dial per command and shows no
   unsolicited output). Install it from npm — the package fetches, verifies and

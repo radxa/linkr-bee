@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased (not published; version stays 1.1.4 until confirmed)
+## 1.1.5
+
+The published cut of the Harness plugin after the 1.1.4 baseline. Versions
+continue to follow the Linkr Bee main line.
 
 - Connection changes retire the old process before dialing the new target;
   active and queued work must finish before an in-memory target change.
