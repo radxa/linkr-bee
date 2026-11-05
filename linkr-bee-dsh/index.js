@@ -468,8 +468,25 @@ function ringReadFrom(store, since) {
   return sliceFromBytes(store.text, since - first);
 }
 
-const RC_MARKER = /^LINKR_RC_[A-Za-z0-9_]+:([0-9]{1,3})\r?\n?$/;
-const WRAPPER = /^sh -c '(?:[^']|'[^']*')*'; printf .*'LINKR_RC_[A-Za-z0-9_]+' .*\r?\n?$/;
+// A real terminal wraps long echoes: the CLI's own `sh -c ... 'LINKR_RC_x'
+// "$?"` line can be split by readline (`LINKR_ \rRC_...`) at narrow widths.
+// Normalise CR/ANSI/whitespace before matching so a wrapped echo is still
+// recognised; never hide a line that does not carry the registered marker.
+function normaliseEcho(line) {
+  // A readline wrap inserts `\r` (sometimes followed by spaces) inside the
+  // echoed token; drop those, and ANSI styling, but keep ordinary spaces so
+  // the `sh -c '` prefix is still recognisable.
+  return line.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '').replace(/[ ]*\r[ ]*/g, '');
+}
+function isWrapperLine(line) {
+  const flat = normaliseEcho(line);
+  return flat.startsWith("sh -c '") && flat.includes("printf") && flat.includes('LINKR_RC_');
+}
+function markerCode(line) {
+  const flat = normaliseEcho(line);
+  const match = /^LINKR_RC_[A-Za-z0-9_]+:([0-9]{1,3})$/.exec(flat);
+  return match ? match[1] : null;
+}
 
 /** Carry an unfinished line between stream chunks; never hold device output. */
 const readingState = { pending: '', pendingIsHidden: false, timer: null };
@@ -485,13 +502,13 @@ function presentForReading(text) {
     const line = buffer.slice(start, i + 1);
     start = i + 1;
     const body = line.replace(/\r?\n$/, '');
-    if (RC_MARKER.test(body)) {
-      const code = RC_MARKER.exec(body)[1];
+    const code = markerCode(body);
+    if (code !== null) {
       out += `[Agent] exit=${code}\r\n`;
       readingState.pendingIsHidden = false;
       continue;
     }
-    if (WRAPPER.test(body)) {
+    if (isWrapperLine(body)) {
       // The wrapper echo is plumbing. The command itself is already visible as
       // a `cmd` record on the panel, so drop the whole echoed line.
       readingState.pendingIsHidden = true;

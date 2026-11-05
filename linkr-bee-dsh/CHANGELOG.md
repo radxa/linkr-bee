@@ -21,6 +21,12 @@
 - Diagnostics: the terminal reports, once per mount, the element chain that
   receives a pointerdown when it is not the xterm screen — evidence for a
   pane overlay that swallows drag selection in some environments.
+- Reading filter hardened on a real board: at narrow terminal widths the
+  exec wrapper echo is wrapped by readline (`LINKR_ \rRC_...`), which the
+  line-based matcher missed. Echo matching now normalises ANSI, CR and the
+  spaces around a wrap before recognising the registered wrapper/marker, so
+  a `fastfetch` run on the live BLE board hides the plumbing and keeps the
+  colour logo and OS output.
 - View switch contrast: the unselected Reading/Raw button used the same
   secondary label colour as normal text, so it read as almost black. It now
   uses the tertiary label token at 75% opacity, while the selected one keeps
