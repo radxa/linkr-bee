@@ -21,6 +21,12 @@
 - Diagnostics: the terminal reports, once per mount, the element chain that
   receives a pointerdown when it is not the xterm screen — evidence for a
   pane overlay that swallows drag selection in some environments.
+- Reading / Raw console views: matching the Web terminal, the panel now has
+  a Reading view (default) that hides agent probe/setup echoes and replaces
+  `LINKR_RC_<nonce>:<code>` completion markers with `[Agent] exit=N`, while
+  keeping all device output; Raw shows every byte. The Host keeps two separate
+  64 KiB histories, streams both texts, and the view switch replays the chosen
+  history without sending serial input. The filter is best-effort and fail-open.
 - UART card compacted: the settings card was ~241px tall (a 2-column grid of
   tall controls plus a separate button row). The five fields now sit in one
   row, with the Read/Apply buttons and the current spec sharing the title row,

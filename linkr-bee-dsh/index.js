@@ -425,6 +425,110 @@ function ringRead(since) {
 /** Forget the text; the counter keeps counting, so old cursors stay old. */
 function ringClear() {
   ring.text = '';
+  readingRing.text = '';
+  readingState.pending = '';
+  readingState.pendingIsHidden = false;
+  if (readingState.timer !== null) clearTimeout(readingState.timer);
+  readingState.timer = null;
+}
+
+/* The reading view is display-only. An agent command goes to the board wrapped
+ * in `sh -c '<cmd>'; printf ... 'LINKR_RC_<nonce>' "$?"`; the console echoes
+ * that wrapper and prints the completion marker. Those are plumbing, not what
+ * the board said, so the reading view hides them and replaces the marker with
+ * one short `[Agent] exit=N` line — exactly what the Web terminal's reading
+ * view does. The raw view keeps every byte. Both histories are independent;
+ * switching views is local and never sends serial input.
+ *
+ * This is a best-effort, fail-open filter: it only recognises markers this
+ * plugin's own exec path emits, and any byte it cannot classify is passed
+ * through untouched so device output is never lost. */
+const readingRing = { text: '', told: 0 };
+
+function ringAppendTo(store, text) {
+  if (text === '') return;
+  store.text += text;
+  store.told += Buffer.byteLength(text, 'utf8');
+  let size = Buffer.byteLength(store.text, 'utf8');
+  if (size <= RING_LIMIT_BYTES) return;
+  let cut = 0;
+  while (size > RING_LIMIT_BYTES && cut < store.text.length) {
+    const step = Math.max(1, Math.ceil((size - RING_LIMIT_BYTES) / 4));
+    cut += Math.min(step, store.text.length - cut);
+    size = Buffer.byteLength(store.text.slice(cut), 'utf8');
+  }
+  store.text = store.text.slice(cut);
+}
+
+function ringReadFrom(store, since) {
+  if (!Number.isFinite(since)) return store.text;
+  const first = store.told - Buffer.byteLength(store.text, 'utf8');
+  if (since <= first) return store.text;
+  if (since >= store.told) return '';
+  return sliceFromBytes(store.text, since - first);
+}
+
+const RC_MARKER = /^LINKR_RC_[A-Za-z0-9_]+:([0-9]{1,3})\r?\n?$/;
+const WRAPPER = /^sh -c '(?:[^']|'[^']*')*'; printf .*'LINKR_RC_[A-Za-z0-9_]+' .*\r?\n?$/;
+
+/** Carry an unfinished line between stream chunks; never hold device output. */
+const readingState = { pending: '', pendingIsHidden: false, timer: null };
+
+function presentForReading(text) {
+  if (typeof text !== 'string' || text === '') return '';
+  let out = '';
+  let buffer = readingState.pending + text;
+  readingState.pending = '';
+  let start = 0;
+  for (let i = 0; i < buffer.length; i += 1) {
+    if (buffer[i] !== '\n') continue;
+    const line = buffer.slice(start, i + 1);
+    start = i + 1;
+    const body = line.replace(/\r?\n$/, '');
+    if (RC_MARKER.test(body)) {
+      const code = RC_MARKER.exec(body)[1];
+      out += `[Agent] exit=${code}\r\n`;
+      readingState.pendingIsHidden = false;
+      continue;
+    }
+    if (WRAPPER.test(body)) {
+      // The wrapper echo is plumbing. The command itself is already visible as
+      // a `cmd` record on the panel, so drop the whole echoed line.
+      readingState.pendingIsHidden = true;
+      continue;
+    }
+    if (readingState.pendingIsHidden && /^\s*$/.test(body)) continue;
+    readingState.pendingIsHidden = false;
+    out += line;
+  }
+  const tail = buffer.slice(start);
+  // Only hold back a tail that could still become a registered echo/marker.
+  // A prompt such as `linkr@bee:~$ ` is device output and must not be kept
+  // from the reader until the next newline arrives (that can be seconds).
+  if (tail.length && (tail.startsWith('LINKR_RC_') || tail.startsWith("sh -c '") || tail.includes('LINKR_RC_'))) {
+    readingState.pending = tail;
+    // A fragment can also be the end of a burst. Flush it unchanged after a
+    // short idle so the reading view never withholds bytes from the reader.
+    if (readingState.timer !== null) clearTimeout(readingState.timer);
+    readingState.timer = setTimeout(() => {
+      if (readingState.pending === '') return;
+      const held = readingState.pending;
+      readingState.pending = '';
+      readingState.pendingIsHidden = false;
+      ringAppendTo(readingRing, held);
+    }, 300);
+    readingState.timer?.unref?.();
+  } else {
+    readingState.pending = '';
+    out += tail;
+  }
+  return out;
+}
+
+/** What one stream record looks like in the reading view. */
+function readingTextOf(record) {
+  if (record.type !== 'stream' || typeof record.text !== 'string') return null;
+  return presentForReading(record.text);
 }
 
 /** Publish one console record to the backlog and every open SSE stream. */
@@ -433,7 +537,16 @@ function publishConsole(event) {
   // Every byte the target said passes through here, whichever door brought it
   // (push stream, poll fallback, exec frame): the ring is filled here so the
   // panel, the reader route and the agent's tool all see one console.
-  if (record.type === 'stream' && typeof record.text === 'string') ringAppend(record.text);
+  if (record.type === 'stream' && typeof record.text === 'string') {
+    ringAppend(record.text);
+    const reading = readingTextOf(record);
+    if (reading !== null) {
+      ringAppendTo(readingRing, reading);
+      // Optional field: old panels keep drawing `text`, new panels pick the
+      // view they are in without a second request.
+      record.reading = reading;
+    }
+  }
   consoleState.events.push(record);
   if (consoleState.events.length > CONSOLE_LIMIT) {
     consoleState.events.splice(0, consoleState.events.length - CONSOLE_LIMIT);
@@ -459,7 +572,8 @@ function openConsoleStream(req, res) {
   res.write(': linkr-bee console stream\n\n');
   res.write(`data: ${JSON.stringify({ type: 'snapshot', epoch: consoleState.epoch, seq: consoleState.seq,
     firstSeq: consoleState.events[0]?.seq ?? (consoleState.seq + 1),
-    ts: Date.now(), text: ringRead(), bytes: ring.told, link: linkState, session: sessionInfo() })}\n\n`);
+    ts: Date.now(), text: ringRead(), reading: ringReadFrom(readingRing),
+    bytes: ring.told, link: linkState, session: sessionInfo() })}\n\n`);
   for (const event of consoleState.events) res.write(`data: ${JSON.stringify(event)}\n\n`);
   consoleState.subscribers.add(res);
   const ping = setInterval(() => {
@@ -1521,10 +1635,13 @@ export function apply(ctx, rawConfig) {
           if (req.method === 'GET' && path === '/console/read') {
             const raw = url.searchParams.get('since');
             const since = raw === null || raw.trim() === '' ? undefined : Number(raw);
+            const view = url.searchParams.get('view') === 'raw' ? 'raw' : 'reading';
+            const store = view === 'raw' ? ring : readingRing;
             sendJson(res, 200, {
               ok: true,
-              text: ringRead(since),
-              bytes: ring.told,
+              view,
+              text: ringReadFrom(store, since),
+              bytes: store.told,
               epoch: consoleState.epoch,
               seq: consoleState.seq,
               firstSeq: consoleState.events[0]?.seq ?? (consoleState.seq + 1),

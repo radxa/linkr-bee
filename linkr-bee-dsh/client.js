@@ -13356,6 +13356,7 @@ window.__ModuleLoader__.load({
     const BUILD = '1.0.0';
     const DIAG_URL = '/linkr-bee/diag';
     const STREAM_URL = '/linkr-bee/console/stream';
+    const READ_URL = '/linkr-bee/console/read';
     const INPUT_URL = '/linkr-bee/input';
     const CONFIG_URL = '/linkr-bee/config';
     const SCAN_URL = '/linkr-bee/scan';
@@ -13378,6 +13379,9 @@ window.__ModuleLoader__.load({
       copy: '复制',
       copied: '已复制',
       copyNone: '未选中内容',
+      viewReading: '阅读',
+      viewRaw: '原始',
+      viewHint: '阅读视图隐藏 Agent 内部探测与初始化脚本回显，保留设备输出；原始视图显示全部字节。切换不发送串口输入。',
       statusLive: '实时',
       statusOffline: '离线',
       ttySize: '终端尺寸',
@@ -13433,6 +13437,9 @@ window.__ModuleLoader__.load({
       copy: 'Copy',
       copied: 'Copied',
       copyNone: 'Nothing selected',
+      viewReading: 'Reading',
+      viewRaw: 'Raw',
+      viewHint: 'Reading hides agent probe and setup echoes, keeping device output; Raw shows every byte. Switching never sends serial input.',
       statusLive: 'Live',
       statusOffline: 'Offline',
       ttySize: 'Terminal size',
@@ -14090,10 +14097,15 @@ window.__ModuleLoader__.load({
     }
 
     /** One console record as the bytes the terminal draws, live or replayed. */
-    function consoleText(event) {
+    function consoleText(event, view = 'reading') {
       if (event.type === 'cmd' || event.type === 'user') return `\u001b[36m$ ${event.text}\u001b[0m\r\n`;
       if (event.type === 'meta') return `\u001b[33m${String(event.text)}\u001b[0m\r\n`;
-      if (event.type === 'stream' || event.type === 'output') return String(event.text || '');
+      if (event.type === 'stream' || event.type === 'output') {
+        // The Host attaches the reading-view text to every stream record; the
+        // raw view keeps the original bytes. Fail open: an older Host that
+        // sends no `reading` field simply shows the raw text.
+        return String((view === 'reading' ? (event.reading ?? event.text) : event.text) || '');
+      }
       return '';
     }
 
@@ -14151,6 +14163,14 @@ window.__ModuleLoader__.load({
       const copiedTimer = useRef(null);
       const [settled, setSettled] = useState(false);
       const [known, setKnown] = useState(false);
+      // Two views of one console, like the Web terminal: reading (default)
+      // hides the agent's internal probe echoes, raw keeps every byte.
+      const [logView, setLogView] = useState(() => {
+        try { return localStorage.getItem('linkr-log-view') === 'raw' ? 'raw' : 'reading'; }
+        catch { return 'reading'; }
+      });
+      const logViewRef = useRef(logView);
+      logViewRef.current = logView;
       const lastSize = useRef('');
       const resizeTimer = useRef(null);
 
@@ -14188,6 +14208,30 @@ window.__ModuleLoader__.load({
           fallback();
         }
       }, [selectionText]);
+
+      /** Switch between the two console views without sending serial input. */
+      const switchView = useCallback((nextView) => {
+        const view = nextView === 'raw' ? 'raw' : 'reading';
+        if (view === logViewRef.current) return;
+        logViewRef.current = view;
+        setLogView(view);
+        try { localStorage.setItem('linkr-log-view', view); } catch { /* private mode */ }
+        // Replay the chosen history: the terminal is a live stream, so a
+        // switch cannot retroactively reinterpret bytes already drawn.
+        fetch(`${READ_URL}?view=${view}`)
+          .then((response) => response.json().catch(() => ({})))
+          .then((payload) => {
+            const text = typeof payload.text === 'string' ? seedText(payload.text) : '';
+            if (termApi.current !== null) {
+              termApi.current.reset();
+              if (text !== '') termApi.current.write(text);
+            }
+            screen.text = text;
+            dirtyRef.current = true;
+            setDrew(text !== '');
+          })
+          .catch(() => {});
+      }, []);
 
       /** Empty the screen: the panel's clear button and the agent's "clear". */
       const clearScreen = useCallback(({ reset = false } = {}) => {
@@ -14571,7 +14615,7 @@ window.__ModuleLoader__.load({
               return;
             }
           }
-          const text = consoleText(event);
+          const text = consoleText(event, logViewRef.current);
           const at = Number(event.ts) || Date.now();
           if (text !== '') {
             rememberScreen(text, at);
@@ -14671,8 +14715,9 @@ window.__ModuleLoader__.load({
           const decision = consoleCursor.seed(record);
           if (decision.accepted) {
             if (decision.reset || gap) clearScreen({ reset: true });
-            const text = typeof record.text === 'string' ? record.text : '';
-            if (text !== '') { rememberScreen(text, 0); seedScreen(); }
+            const view = logViewRef.current;
+            const text = String((view === 'reading' ? (record.reading ?? record.text) : record.text) || '');
+            if (text !== '') { screen.text = text; rememberScreen(text, 0); seedScreen(); }
             if (record.link) setLink(record.link);
             if (record.session) setSession(record.session);
           }
@@ -14778,6 +14823,28 @@ window.__ModuleLoader__.load({
           h('span', { className: 'lb-spacer' }),
           tty !== null && h('span', { className: 'lb-tty', title: t('ttySize') }, `${tty.cols}\u00d7${tty.rows}`),
           h(
+            'span',
+            { className: 'lb-view', title: t('viewHint') },
+            h(
+              'button',
+              {
+                className: 'lb-view-btn' + (logView === 'reading' ? ' on' : ''),
+                'aria-pressed': logView === 'reading' ? 'true' : 'false',
+                onClick: () => switchView('reading'),
+              },
+              t('viewReading'),
+            ),
+            h(
+              'button',
+              {
+                className: 'lb-view-btn' + (logView === 'raw' ? ' on' : ''),
+                'aria-pressed': logView === 'raw' ? 'true' : 'false',
+                onClick: () => switchView('raw'),
+              },
+              t('viewRaw'),
+            ),
+          ),
+          h(
             'button',
             {
               className: 'lb-ghost',
@@ -14869,6 +14936,10 @@ window.__ModuleLoader__.load({
 .lb-dot.on { background: var(--dsw-alias-state-success-primary); }
 .lb-dot.warn { background: var(--dsw-alias-state-warn-primary); }
 .lb-spacer { flex: 1 1 auto; min-width: 4px; }
+.lb-view { display: inline-flex; align-items: center; gap: 2px; padding: 2px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 999px; flex: 0 0 auto; }
+.lb-view-btn { position: relative; border: none; background: transparent; color: var(--dsw-alias-label-secondary); font-size: 11px; padding: 3px 9px; border-radius: 999px; cursor: pointer; min-height: 24px; }
+.lb-view-btn::after { content: ''; position: absolute; inset: -4px -2px; }
+.lb-view-btn.on { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); }
 .lb-tty { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-secondary); border: 1px solid var(--dsw-alias-border-l1); border-radius: 999px; padding: 1px 8px; flex: 0 0 auto; }
 .lb-ghost { position: relative; display: inline-flex; align-items: center; justify-content: center; min-height: 28px; padding: 0 8px; background: transparent; border: none; color: var(--dsw-alias-label-secondary); font-size: 12px; border-radius: 7px; cursor: pointer; flex: 0 0 auto; }
 /* The shell's own strip controls are 28 px; the 36 px touch target is the hit

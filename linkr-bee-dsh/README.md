@@ -9,6 +9,7 @@ on the target board — the person and the agent share one board and one link.
 
 | Part | What it does |
 | --- | --- |
+| **Reading / Raw views** | Like the Web terminal, the panel has a *Reading* view (default) that hides the agent's internal probe and setup echoes and turns `LINKR_RC_*` completion markers into one `[Agent] exit=N` line, while keeping every byte of device output; *Raw* shows the complete stream. Switching views is local, never sends serial input, and each view keeps its own history (persisted under `linkr-log-view`). |
 | **Serial console panel** | A real terminal (xterm.js) in the right column: click it and type, exactly like a local terminal. ANSI colour, cursor movement, `\r` progress and bracketed paste all work; dragging selects text and ⌘C/Ctrl+C copies it. It appears as a card next to *Workspace files* / *New terminal* on the start page, and as a tab in the right column. The agent can open, focus and clear it (`POST /linkr-bee/panel`), and the tab puts its last screen back after a remount or a page reload. |
 | **Live link** | While the panel is open, one resident `bee-cli --serve` session holds the bridge and streams the target's own bytes (`watch`) — a boot log, a prompt, a service printing on its own — with no polling. The panel's size is sent with `resize`, so full-screen programs get the right tty. |
 | **Agent tools** | `linkr_bee_console` (drive this console: `open`, `focus`, `clear`, `type` text, press a named `key`, `read` what the board said, `state`, `resize` — the same pane the person is looking at), `linkr_bee_exec` (run a shell command on the target console and return its output and exit code), `linkr_bee_query` (bridge diagnostics, UART/WiFi/WebDAV/BLE-name/LAN settings, link state, doctor, scans), `linkr_bee_send` (deliver input and capture the reply window), `linkr_bee_set` (change bridge settings over the BLE management channel). |
@@ -93,6 +94,7 @@ concurrent WebSocket clients and one Bluetooth connection.
 
 - **The panel holds the Bluetooth link while it is open.** Close the panel (or
   switch the tab away) to release it for your phone app or another tool.
+- **Two views of one console.** `GET /linkr-bee/console/read?view=reading|raw` and the SSE `snapshot`/`stream` records both carry the reading-filtered text alongside the raw bytes; the panel's Reading/Raw switch picks one. The filter is display-only and fail-open: it recognises only the `sh -c … LINKR_RC_<nonce>` wrapper this plugin's own exec path emits, and passes through anything it cannot classify so device output is never lost.
 - **The agent shares the console you are typing in.** A tool call injects its
   command into the same shell; a half-typed line can be disturbed. That is the
   cost of one board and one link. An agent can also open the pane itself
