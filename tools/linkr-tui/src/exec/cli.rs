@@ -265,6 +265,18 @@ fn attempt_once(app: &mut App, run: &Run, format: Format, quiet: bool) -> Attemp
     app.take_output();
     let token = completion_marker();
     let wire = wire_with_marker(&run.command, run.ending, &token);
+    // Host presentation registers only metadata from this CLI, never a token
+    // inferred from untrusted UART output. Older clients may ignore this event.
+    if !quiet && format == Format::Json && run.ending == Ending::RcMarker {
+        println!(
+            "{}",
+            cli::json_event(&[
+                ("event", cli::Json::Text("dispatch")),
+                ("marker", cli::Json::Text(&token)),
+                ("wire", cli::Json::Text(&String::from_utf8_lossy(&wire))),
+            ])
+        );
+    }
     if !app.send_bytes(&wire) {
         return Attempt {
             outcome: Outcome::Refused(app.strings().not_connected.to_string()),

@@ -13165,9 +13165,9 @@ window.__ModuleLoader__.load({
       container.addEventListener('contextmenu', onContextMenu);
       focus();
       return {
-        write(text) {
+        write(text, done) {
           try {
-            terminal.write(text);
+            terminal.write(text, done);
           } catch {
             /* a disposed terminal swallows the rest of the stream */
           }
@@ -13356,7 +13356,6 @@ window.__ModuleLoader__.load({
     const BUILD = '1.0.0';
     const DIAG_URL = '/linkr-bee/diag';
     const STREAM_URL = '/linkr-bee/console/stream';
-    const READ_URL = '/linkr-bee/console/read';
     const INPUT_URL = '/linkr-bee/input';
     const CONFIG_URL = '/linkr-bee/config';
     const SCAN_URL = '/linkr-bee/scan';
@@ -13622,36 +13621,16 @@ window.__ModuleLoader__.load({
       return lines;
     }
 
-    /**
-     * `--exec` output carries the command wrapper bee-cli sends and the rc
-     * marker it adds, plus the target's prompt. Keep only the real output.
-     */
+    /** The Host owns provenance filtering; fallback rendering keeps all text. */
     function cleanExecText(text) {
-      const kept = [];
-      for (const raw of String(text).replace(/\r/g, '').split('\n')) {
-        const line = raw.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
-        if (/^sh -c /.test(line)) continue;
-        if (/^\s*printf '/.test(line)) continue;
-        if (/LINKR_RC_[0-9a-f]{8,}/.test(line)) continue;
-        if (/→\s*$/.test(line) && /@[\w.-]+\s/.test(line)) continue;
-        kept.push(line);
-      }
-      return kept.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+      return cleanStreamText(text);
     }
 
-    /** Drop the wrapper bee-cli adds around an exec run, per streamed line. */
     function cleanStreamText(text) {
-      const kept = [];
-      for (const raw of String(text).replace(/\r\n/g, '\n').split('\n')) {
-        const line = raw.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
-        if (/^sh -c /.test(line)) continue;
-        if (/^\s*printf '/.test(line)) continue;
-        if (/LINKR_RC_[0-9a-f]{8,}/.test(line)) continue;
-        if (/→\s*$/.test(line) && /@[\w.-]+\s/.test(line)) continue;
-        kept.push(line);
-      }
-      const joined = kept.join('\n');
-      return joined.trim() ? joined : '';
+      // Keep ANSI for parseChunk's colour handling, but remove the other
+      // nonprinting controls. Never infer command ownership from device text.
+      return String(text).replace(/\r\n/g, '\n')
+        .replace(/[\x00-\x08\x0b\x0c\x0e-\x1a\x1c-\x1f\x7f]/g, '');
     }
 
     /* ---------------- Terminal ---------------- */
@@ -13701,6 +13680,11 @@ window.__ModuleLoader__.load({
             setKnown(true);
             return;
           }
+        }
+        if (!match && Number.isFinite(payload?.baud)) {
+          setBaud(String(payload.baud));
+          setCustomBaud(!BAUD_RATES.includes(payload.baud));
+          setKnown(false);
         }
         if (match) {
           setBaud(match[1]);
@@ -14031,7 +14015,7 @@ window.__ModuleLoader__.load({
      * re-seeds the screen from it, and records at or before that moment are
      * already on screen and are not drawn twice.
      */
-    const screen = { text: '', at: 0, conn: '', drew: false, epoch: null, seq: 0 };
+    const screen = { text: '', views: { raw: '', reading: '' }, view: 'reading', at: 0, conn: '', drew: false, epoch: null, seq: 0 };
 
     /** Event identity survives reconnects, remounts and millisecond collisions. */
     function createConsoleCursor(state) {
@@ -14070,22 +14054,19 @@ window.__ModuleLoader__.load({
     const consoleCursor = createConsoleCursor(screen);
 
     /** Keep the tail of the text drawn so far, and the time of its last record. */
-    function rememberScreen(text, at) {
-      if (!text) return;
-      screen.drew = true;
-      screen.text += text;
-      if (screen.text.length > SCREEN_KEEP) {
-        // Cut on a line boundary: half an escape sequence would garble the
-        // restored screen, and the oldest line is the one worth losing.
-        const cut = screen.text.indexOf('\n', screen.text.length - SCREEN_KEEP);
-        screen.text = screen.text.slice(cut < 0 ? screen.text.length - SCREEN_KEEP : cut + 1);
-      }
+    function rememberScreen(text, at, views = { raw: text, reading: text }) {
+      screen.views ??= { raw: screen.text, reading: screen.text };
+      for (const view of ['raw', 'reading']) screen.views[view] = seedText(screen.views[view] + views[view]);
+      screen.text = screen.views[screen.view || 'reading'];
+      if (screen.text) screen.drew = true;
       if (at > screen.at) screen.at = at;
     }
 
     /** Forget the screen, but not the console position: a clear is not a replay. */
     function forgetScreen(at) {
       screen.text = '';
+      screen.views = { raw: '', reading: '' };
+      screen.drew = false;
       if (at > screen.at) screen.at = at;
     }
 
@@ -14171,8 +14152,12 @@ window.__ModuleLoader__.load({
       });
       const logViewRef = useRef(logView);
       logViewRef.current = logView;
+      screen.view = logView;
+      screen.text = screen.views[logView];
       const lastSize = useRef('');
       const resizeTimer = useRef(null);
+      const replaying = useRef(false);
+      const replayRevision = useRef(0);
 
       /** Put the painted selection on the system clipboard. */
       const copySelection = useCallback(() => {
@@ -14214,23 +14199,29 @@ window.__ModuleLoader__.load({
         const view = nextView === 'raw' ? 'raw' : 'reading';
         if (view === logViewRef.current) return;
         logViewRef.current = view;
+        screen.view = view;
         setLogView(view);
         try { localStorage.setItem('linkr-log-view', view); } catch { /* private mode */ }
-        // Replay the chosen history: the terminal is a live stream, so a
-        // switch cannot retroactively reinterpret bytes already drawn.
-        fetch(`${READ_URL}?view=${view}`)
-          .then((response) => response.json().catch(() => ({})))
-          .then((payload) => {
-            const text = typeof payload.text === 'string' ? seedText(payload.text) : '';
-            if (termApi.current !== null) {
-              termApi.current.reset();
-              if (text !== '') termApi.current.write(text);
-            }
-            screen.text = text;
-            dirtyRef.current = true;
-            setDrew(text !== '');
-          })
-          .catch(() => {});
+        // Both histories advance on the same SSE cursor. A local repaint has
+        // no HTTP response that can overwrite later output or revive a clear.
+        const text = screen.views[view];
+        screen.text = text;
+        linesRef.current = [];
+        streamBuf.current = '';
+        if (termApi.current !== null) {
+          const revision = ++replayRevision.current;
+          replaying.current = true;
+          // Queue the reset with the repaint. A synchronous reset would let
+          // older writes still waiting inside xterm appear a second time.
+          termApi.current.write('\u001bc' + text, () => {
+            if (revision === replayRevision.current) replaying.current = false;
+          });
+        } else {
+          for (const segs of parseChunk(cleanStreamText(text))) linesRef.current.push({ kind: 'out', segs });
+        }
+        dirtyRef.current = true;
+        screen.drew = text !== '';
+        setDrew(screen.drew);
       }, []);
 
       /** Empty the screen: the panel's clear button and the agent's "clear". */
@@ -14247,6 +14238,7 @@ window.__ModuleLoader__.load({
         // Everything drawn so far is gone on purpose: a remount must not put it
         // back, so the console position moves past what is already known.
         forgetScreen(lastTs.current);
+        setDrew(false);
       }, []);
 
       /**
@@ -14283,8 +14275,8 @@ window.__ModuleLoader__.load({
             const api = mountTerminal(host, {
               fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
               fontSize: 12.5,
-              onData: (data) => postInput(data),
-              onResize: postResize,
+              onData: (data) => { if (!replaying.current) postInput(data); },
+              onResize: (cols, rows) => { if (!replaying.current) postResize(cols, rows); },
               onSelectionChange: (text) => {
                 setSelectionText(text || '');
                 setCopied(false);
@@ -14617,8 +14609,8 @@ window.__ModuleLoader__.load({
           }
           const text = consoleText(event, logViewRef.current);
           const at = Number(event.ts) || Date.now();
+          rememberScreen(text, at, { raw: consoleText(event, 'raw'), reading: consoleText(event, 'reading') });
           if (text !== '') {
-            rememberScreen(text, at);
             if (event.type === 'stream' || event.type === 'output') {
               // The target spoke: whatever the link said about itself is stale.
               if (screen.conn !== '') {
@@ -14640,7 +14632,7 @@ window.__ModuleLoader__.load({
             next.push({ kind: 'meta', segs: [{ t: String(event.text), k: 'c-warn' }] });
           } else if (event.type === 'stream') {
             streamAt.current = Date.now();
-            const buffer = streamBuf.current + String(event.text || '');
+            const buffer = streamBuf.current + consoleText(event, logViewRef.current);
             const cut = buffer.lastIndexOf('\n');
             if (cut < 0) {
               streamBuf.current = buffer;
@@ -14652,12 +14644,9 @@ window.__ModuleLoader__.load({
               }
             }
           } else if (event.type === 'output') {
-            const raw = String(event.text || '');
+            const raw = consoleText(event, logViewRef.current);
             const kept = cleanExecText(raw);
-            const rcMatch = /LINKR_RC_[0-9a-f]{8,}:(-?\d+)/.exec(raw);
-            if (!kept) {
-              if (rcMatch) next.push({ kind: 'meta', segs: [{ t: `(无输出，rc=${rcMatch[1]})`, k: 'c-sec' }] });
-            } else {
+            if (kept) {
               for (const segs of parseChunk(kept)) next.push({ kind: 'out', segs });
             }
           }
@@ -14717,7 +14706,10 @@ window.__ModuleLoader__.load({
             if (decision.reset || gap) clearScreen({ reset: true });
             const view = logViewRef.current;
             const text = String((view === 'reading' ? (record.reading ?? record.text) : record.text) || '');
-            if (text !== '') { screen.text = text; rememberScreen(text, 0); seedScreen(); }
+            forgetScreen(0);
+            screen.view = view;
+            rememberScreen(text, 0, { raw: String(record.text || ''), reading: String(record.reading ?? record.text ?? '') });
+            seedScreen();
             if (record.link) setLink(record.link);
             if (record.session) setSession(record.session);
           }
@@ -14817,55 +14809,59 @@ window.__ModuleLoader__.load({
         h(
           'div',
           { className: 'lb-head' },
-          h('span', { className: 'lb-dot' + dot, title: dotState, role: 'img', 'aria-label': dotState }),
-          h('span', { className: 'lb-title' }, t('title')),
-          h('span', { className: 'lb-sub', title: where }, where),
-          h('span', { className: 'lb-spacer' }),
-          tty !== null && h('span', { className: 'lb-tty', title: t('ttySize') }, `${tty.cols}\u00d7${tty.rows}`),
-          h(
-            'span',
-            { className: 'lb-view', title: t('viewHint') },
+          h('div', { className: 'lb-identity' },
+            h('span', { className: 'lb-dot' + dot, title: dotState, role: 'img', 'aria-label': dotState }),
+            h('span', { className: 'lb-title' }, t('title')),
+            h('span', { className: 'lb-sub', title: where }, where),
+            h('span', { className: 'lb-spacer' }),
+            tty !== null && h('span', { className: 'lb-tty', title: t('ttySize') }, `${tty.cols}\u00d7${tty.rows}`),
+          ),
+          h('div', { className: 'lb-actions' },
             h(
-              'button',
-              {
-                className: 'lb-view-btn' + (logView === 'reading' ? ' on' : ''),
-                'aria-pressed': logView === 'reading' ? 'true' : 'false',
-                onClick: () => switchView('reading'),
-              },
-              t('viewReading'),
+              'span',
+              { className: 'lb-view', title: t('viewHint') },
+              h(
+                'button',
+                {
+                  className: 'lb-view-btn' + (logView === 'reading' ? ' on' : ''),
+                  'aria-pressed': logView === 'reading' ? 'true' : 'false',
+                  onClick: () => switchView('reading'),
+                },
+                t('viewReading'),
+              ),
+              h(
+                'button',
+                {
+                  className: 'lb-view-btn' + (logView === 'raw' ? ' on' : ''),
+                  'aria-pressed': logView === 'raw' ? 'true' : 'false',
+                  onClick: () => switchView('raw'),
+                },
+                t('viewRaw'),
+              ),
             ),
             h(
               'button',
               {
-                className: 'lb-view-btn' + (logView === 'raw' ? ' on' : ''),
-                'aria-pressed': logView === 'raw' ? 'true' : 'false',
-                onClick: () => switchView('raw'),
+                className: 'lb-ghost',
+                onClick: copySelection,
+                disabled: !selectionText.trim(),
+                title: selectionText.trim() ? t('copy') : t('copyNone'),
+                'aria-label': t('copy'),
               },
-              t('viewRaw'),
+              copied ? t('copied') : t('copy'),
             ),
-          ),
-          h(
-            'button',
-            {
-              className: 'lb-ghost',
-              onClick: copySelection,
-              disabled: !selectionText.trim(),
-              title: selectionText.trim() ? t('copy') : t('copyNone'),
-              'aria-label': t('copy'),
-            },
-            copied ? t('copied') : t('copy'),
-          ),
-          h('button', { className: 'lb-ghost', onClick: clearAll }, t('clear')),
-          h(
-            'button',
-            {
-              className: 'lb-ghost lb-ghost-icon' + (settingsOpen ? ' on' : ''),
-              title: t('settings'),
-              'aria-label': t('settings'),
-              'aria-expanded': settingsOpen ? 'true' : 'false',
-              onClick: () => setSettingsOpen(!settingsOpen),
-            },
-            '\u2699',
+            h('button', { className: 'lb-ghost', onClick: clearAll }, t('clear')),
+            h(
+              'button',
+              {
+                className: 'lb-ghost lb-ghost-icon' + (settingsOpen ? ' on' : ''),
+                title: t('settings'),
+                'aria-label': t('settings'),
+                'aria-expanded': settingsOpen ? 'true' : 'false',
+                onClick: () => setSettingsOpen(!settingsOpen),
+              },
+              '\u2699',
+            ),
           ),
         ),
         banner !== null &&
@@ -14929,7 +14925,9 @@ window.__ModuleLoader__.load({
    a few pixels apart with different colours. Our header therefore draws no
    rule of its own and shares the column's background — the shell's own tab
    strip is the only horizontal divider, continuous across both sides. */
-.lb-head { display: flex; align-items: center; gap: 8px; padding: 4px 8px 4px 12px; flex: 0 0 auto; min-height: 40px; box-sizing: border-box; background: var(--dsw-alias-bg-base); }
+.lb-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 4px 8px 4px 12px; flex: 0 0 auto; min-height: 40px; box-sizing: border-box; background: var(--dsw-alias-bg-base); }
+.lb-identity { display: flex; align-items: center; gap: 8px; flex: 1 1 220px; min-width: 0; }
+.lb-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
 .lb-title { font-weight: 600; font-size: 13px; white-space: nowrap; flex: 0 0 auto; }
 .lb-sub { font-size: 11.5px; color: var(--dsw-alias-label-secondary); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lb-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dsw-alias-state-idle-primary); display: inline-block; flex: 0 0 auto; }
@@ -14937,16 +14935,16 @@ window.__ModuleLoader__.load({
 .lb-dot.warn { background: var(--dsw-alias-state-warn-primary); }
 .lb-spacer { flex: 1 1 auto; min-width: 4px; }
 .lb-view { display: inline-flex; align-items: center; gap: 2px; padding: 2px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 999px; flex: 0 0 auto; }
-.lb-view-btn { position: relative; border: none; background: transparent; color: var(--dsw-alias-label-tertiary); font-size: 11px; padding: 3px 9px; border-radius: 999px; cursor: pointer; min-height: 24px; opacity: 0.75; transition: color .12s, opacity .12s, background .12s; }
+.lb-view-btn { position: relative; border: none; background: transparent; color: var(--dsw-alias-label-tertiary); font-size: 11px; padding: 3px 9px; border-radius: 999px; cursor: pointer; min-height: 36px; opacity: 0.75; transition: color .12s, opacity .12s, background .12s; }
 .lb-view-btn::after { content: ''; position: absolute; inset: -4px -2px; }
+.lb-view-btn:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px; }
 .lb-view-btn:hover { opacity: 1; color: var(--dsw-alias-label-secondary); }
 .lb-view-btn.on { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); opacity: 1; font-weight: 600; }
 .lb-tty { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-secondary); border: 1px solid var(--dsw-alias-border-l1); border-radius: 999px; padding: 1px 8px; flex: 0 0 auto; }
-.lb-ghost { position: relative; display: inline-flex; align-items: center; justify-content: center; min-height: 28px; padding: 0 8px; background: transparent; border: none; color: var(--dsw-alias-label-secondary); font-size: 12px; border-radius: 7px; cursor: pointer; flex: 0 0 auto; }
-/* The shell's own strip controls are 28 px; the 36 px touch target is the hit
-   area, grown past the visible pill so the header keeps its row height. */
+.lb-ghost { position: relative; display: inline-flex; align-items: center; justify-content: center; min-height: 36px; padding: 0 8px; background: transparent; border: none; color: var(--dsw-alias-label-secondary); font-size: 12px; border-radius: 7px; cursor: pointer; flex: 0 0 auto; }
+/* Match the existing controls while keeping visible 36 px hit targets. */
 .lb-ghost::after { content: ''; position: absolute; inset: -4px -2px; }
-.lb-ghost-icon { min-width: 28px; padding: 0; font-size: 13px; }
+.lb-ghost-icon { min-width: 36px; padding: 0; font-size: 13px; }
 .lb-ghost:hover { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); }
 .lb-ghost:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px; }
 .lb-ghost:disabled { color: var(--dsw-alias-label-tertiary); opacity: 0.55; cursor: default; }
@@ -14977,11 +14975,11 @@ window.__ModuleLoader__.load({
 .c-brand { color: var(--dsw-alias-brand-primary); }
 .c-sec { color: var(--dsw-alias-label-secondary); }
 .c-pri { color: var(--dsw-alias-label-primary); }
-.lb-cmd, .lb-mode { background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); border: 1px solid var(--dsw-alias-border-l2); border-radius: 7px; padding: 6px 9px; font-size: 12.5px; outline: none; }
+.lb-cmd, .lb-mode { min-height: 36px; box-sizing: border-box; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); border: 1px solid var(--dsw-alias-border-l2); border-radius: 7px; padding: 6px 9px; font-size: 12.5px; outline: none; }
 .lb-cmd { flex: 1; min-width: 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .lb-mode { flex: 0 0 84px; }
 .lb-cmd:focus, .lb-mode:focus { border-color: var(--dsw-alias-brand-primary); }
-.lb-btn { background: var(--dsw-alias-brand-primary); border: 1px solid var(--dsw-alias-brand-primary); color: var(--dsw-alias-bg-base); border-radius: 7px; padding: 6px 12px; font-size: 12.5px; cursor: pointer; }
+.lb-btn { min-height: 36px; background: var(--dsw-alias-brand-primary); border: 1px solid var(--dsw-alias-brand-primary); color: var(--dsw-alias-bg-base); border-radius: 7px; padding: 6px 12px; font-size: 12.5px; cursor: pointer; }
 .lb-btn:disabled { opacity: 0.55; cursor: default; }
 .lb-btn:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px; }
 .lb-settings { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1); flex: 0 0 auto; }
@@ -14994,20 +14992,24 @@ window.__ModuleLoader__.load({
 .lb-chip:hover { border-color: var(--dsw-alias-brand-primary); }
 .lb-chip:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px; }
 .lb-note { color: var(--dsw-alias-label-secondary); font-size: 11.5px; }
-.lb-btn-ghost { background: transparent; border: 1px solid var(--dsw-alias-border-l2); color: var(--dsw-alias-label-primary); border-radius: 7px; padding: 6px 10px; font-size: 12.5px; cursor: pointer; flex: 0 0 auto; }
+.lb-btn-ghost { min-height: 36px; background: transparent; border: 1px solid var(--dsw-alias-border-l2); color: var(--dsw-alias-label-primary); border-radius: 7px; padding: 6px 10px; font-size: 12.5px; cursor: pointer; flex: 0 0 auto; }
 .lb-btn-ghost:hover { border-color: var(--dsw-alias-brand-primary); }
 .lb-btn-ghost:disabled { opacity: 0.55; cursor: default; }
 .lb-uart { padding: 2px 0 2px; display: flex; flex-direction: column; gap: 6px; }
 .lb-uart-head { display: flex; align-items: center; gap: 6px; min-height: 28px; }
 .lb-uart-title { font-size: 12px; font-weight: 600; color: var(--dsw-alias-label-secondary); flex: 0 0 auto; }
 .lb-uart-state { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--dsw-alias-label-secondary); }
-.lb-uart-btn { flex: 0 0 auto; min-height: 28px; }
-.lb-uart-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; }
+.lb-uart-btn { flex: 0 0 auto; min-height: 36px; }
+.lb-uart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 6px; }
 .lb-uart-grid .lb-field { min-width: 0; gap: 2px; }
 .lb-uart-grid .lb-field-label { font-size: 10.5px; line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .lb-uart-select { flex: 0 0 auto; width: 100%; min-height: 36px; height: 36px; box-sizing: border-box; padding: 4px 8px; font-size: 12.5px; }
 .lb-settings-foot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .lb-settings-foot .lb-note { flex: 1 1 140px; }
+@media (pointer: coarse) {
+  .lb-col button, .lb-col .lb-cmd, .lb-col .lb-mode { min-height: 44px; }
+  .lb-col .lb-ghost-icon { min-width: 44px; }
+}
 `;
 
     /** One line to the Host, so a "nothing shows up" report can be checked. */

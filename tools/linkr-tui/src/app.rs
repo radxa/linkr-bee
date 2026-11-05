@@ -734,6 +734,8 @@ pub struct App {
     pub traffic: crate::traffic::Traffic,
     /// The link speed once the device has reported one.
     pub baud: Option<u32>,
+    /// The full format reported by the bridge, for management clients.
+    pub uart_settings: Option<accessory::UartSettings>,
     /// The signal the link is carrying, in dBm. Unknown until connected.
     pub signal_dbm: Option<i32>,
     pub autoscroll: bool,
@@ -1006,6 +1008,7 @@ impl Default for App {
             tx: 0,
             traffic: crate::traffic::Traffic::default(),
             baud: None,
+            uart_settings: None,
             signal_dbm: None,
             autoscroll: true,
             clock: "00:00:00".to_string(),
@@ -4038,6 +4041,7 @@ impl App {
             Query::Uart => {
                 if let Some(settings) = accessory::parse_uart_settings(&text) {
                     self.baud = Some(settings.baud);
+                    self.uart_settings = Some(settings);
                 }
                 // The UART window, when it is the one that asked, shows the
                 // bridge's own answer and takes the rate from it.
@@ -6649,6 +6653,10 @@ mod tests {
         // on-connect reads, and the one after this is still in flight. What
         // this read itself left behind is the baud, and that is what landed.
         assert_eq!(app.baud, Some(230400));
+        assert_eq!(
+            app.uart_settings.as_ref().unwrap().spec(),
+            "230400,8,n,1,none"
+        );
     }
 
     /// A WiFi read lands in the network view rather than in a toast nobody

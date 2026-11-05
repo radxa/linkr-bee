@@ -21,6 +21,7 @@ function fixture(state = { text: '', at: 0, epoch: null, seq: 0 }, cursor = crea
   let cleanup, rendered = '', nextTimer = 0, resets = 0;
   const clearScreen = ({ reset = false } = {}) => {
     state.text = '';
+    state.views = { raw: '', reading: '' };
     rendered = '';
     if (reset) resets++;
   };
@@ -28,19 +29,28 @@ function fixture(state = { text: '', at: 0, epoch: null, seq: 0 }, cursor = crea
     constructor() { sources.push(this); }
     close() { this.closed = true; }
   }
-  vm.runInNewContext(effectCode, {
-    screen: state, consoleCursor: cursor, clearScreen,
-    appendEvent: record => { drawn.push(record); state.text += record.text || ''; rendered += record.text || ''; },
-    seedText: text => text, rememberScreen: text => { state.text += text; },
-    termApi: { current: { write: text => { rendered += text; } } },
+  const context = vm.createContext({
+    screen: state, consoleCursor: cursor, clearScreen, logViewRef: {current: state.view || 'reading'}, SCREEN_KEEP: 96 * 1024,
+    appendEvent: record => { drawn.push(record); const reading = record.reading ?? record.text ?? ''; const text = context.logViewRef.current === 'raw' ? (record.text || '') : reading; context.rememberScreen(text, record.ts, {raw:record.text || '',reading}); rendered += text; },
+    termApi: { current: { reset() { rendered = ''; }, write(text, done) { if (text.startsWith('\u001bc')) { rendered = ''; text = text.slice(2); } rendered += text; done?.(); } } },
     dirtyRef: { current: false }, linesRef: { current: [] },
     setDrew() {}, setLink() {}, setSession() {}, setLive() {}, setEverLive() {},
     STREAM_URL: '/linkr-bee/console/stream', EventSource,
     setTimeout: callback => { const id = ++nextTimer; timers.set(id, callback); return id; },
     clearTimeout: id => timers.delete(id),
     useEffect: callback => { cleanup = callback(); },
+    useCallback: callback => callback,
+    replaying: {current:false}, replayRevision: {current:0}, streamBuf: {current:''},
+    setLogView() {}, localStorage: {setItem() {}},
+    fetch() { throw new Error('switching views must not fetch a snapshot'); },
   });
+  vm.runInContext(source.slice(source.indexOf('    function rememberScreen('), source.indexOf('    /** One console record as the bytes')), context);
+  vm.runInContext(effectCode, context);
+  const switchStart = source.indexOf('      const switchView = useCallback(');
+  const switchEnd = source.indexOf('\n      }, []);', switchStart) + '\n      }, []);'.length;
+  const switchView = vm.runInContext(source.slice(switchStart, switchEnd) + ';switchView', context);
   return {
+    switchView, context,
     state, cursor, sources, drawn, timers,
     get rendered() { return rendered; }, get resets() { return resets; },
     emit: record => sources.at(-1).onmessage({ data: JSON.stringify(record) }),
@@ -175,4 +185,42 @@ test('late panel-channel callbacks neither execute actions nor detach a replacem
   const lateMessage = sources[1].onmessage;
   cleanup(); lateMessage({ data: JSON.stringify({ type: 'panel', action: 'open' }) });
   assert.deepEqual(actions, ['focus']); assert.equal(timers.size, 0);
+});
+
+test('view switching repaints both local histories without losing or repeating live output', () => {
+  const f = fixture();
+  f.emit({...snapshot(1, 'RAW_OLD'), reading:'READ_OLD'});
+  f.emit({...event(2, 'RAW_NEW'),reading:'READ_NEW'});
+  assert.equal(f.rendered, 'READ_OLDREAD_NEW');
+  f.switchView('raw');
+  assert.equal(f.rendered, 'RAW_OLDRAW_NEW');
+  f.emit({...event(3, 'RAW_LAST'),reading:'READ_LAST'});
+  assert.equal(f.rendered, 'RAW_OLDRAW_NEWRAW_LAST');
+  f.switchView('reading');f.switchView('raw');f.switchView('reading');
+  assert.equal(f.rendered, 'READ_OLDREAD_NEWREAD_LAST');
+  assert.equal(f.state.seq, 3);
+  assert.equal(f.context.replaying.current, false);
+  f.unmount();
+});
+
+test('hidden raw records and reading-only flushes survive switching and clear in both views', () => {
+  const f = fixture();
+  f.emit({...snapshot(0,''),reading:''});
+  f.emit({...event(1, 'hidden'),reading:''});
+  f.emit({...event(2, ''),reading:'flushed'});
+  assert.equal(f.rendered, 'flushed');
+  f.switchView('raw');assert.equal(f.rendered, 'hidden');
+  f.emit({type:'clear',epoch:'host-a',seq:3});
+  f.switchView('reading');assert.equal(f.rendered, '');
+  f.switchView('raw');assert.equal(f.rendered, '');
+  f.unmount();
+});
+
+test('plain-renderer fallback never removes device markers or shell-looking output', () => {
+  const start=source.indexOf('    function cleanExecText(');
+  const end=source.indexOf('    /* ---------------- Terminal',start);
+  const clean=vm.runInNewContext(source.slice(start,end)+';({exec:cleanExecText,stream:cleanStreamText})');
+  const text="sh -c 'user command'\nLINKR_RC_0123456789abcdef0123456789abcdef:7\n";
+  assert.equal(clean.exec(text),text);
+  assert.equal(clean.stream(text),text);
 });

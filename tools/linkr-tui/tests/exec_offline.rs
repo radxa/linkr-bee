@@ -30,6 +30,33 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+#[test]
+fn exec_registers_its_marker_before_any_target_output() {
+    let output = bee(&["--bridge", "-", "--exec", "echo hi", "--json", "--quiet"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    let lines: Vec<_> = text.lines().collect();
+    let dispatch = lines
+        .iter()
+        .position(|line| line.contains("\"event\":\"dispatch\""))
+        .unwrap();
+    let start = lines
+        .iter()
+        .position(|line| line.contains("\"event\":\"start\""))
+        .unwrap();
+    // Connection greetings may precede the command's start; command output
+    // itself must always follow the registration.
+    let first_output = lines
+        .iter()
+        .enumerate()
+        .find(|(index, line)| *index > start && line.contains("\"event\":\"output\""))
+        .unwrap()
+        .0;
+    assert!(start < dispatch && dispatch < first_output);
+    assert!(lines[dispatch].contains("\"marker\":\"LINKR_RC_"));
+    assert!(lines[dispatch].contains("\"wire\":\"sh -c"));
+}
+
 #[cfg(unix)]
 fn real_shell(command: &str) -> Output {
     // The bridge argument parser escapes characters, rather than parsing

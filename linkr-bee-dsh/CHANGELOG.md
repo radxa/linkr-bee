@@ -2,6 +2,15 @@
 
 ## Unreleased (not published; version stays 1.1.4 until confirmed)
 
+- Connection changes retire the old process before dialing the new target;
+  active and queued work must finish before an in-memory target change.
+- Reading/Raw views keep both histories locally, restore snapshots once, and
+  publish idle reading flushes in stream order. Only CLI-registered exact
+  echoes and markers are filtered; legacy CLI output passes through unchanged.
+- CLI UART reads retain all five confirmed fields. Exec guards honour longer
+  per-attempt budgets, and line sends start their capture window after framing
+  the input. Both CLI output field spellings reach the shared console.
+
 - Execution safety: cancellation covers connection startup and queued requests.
   An operation whose delivery or result is uncertain is never automatically
   replayed, and a failed send is reported as a failure rather than as delivery.

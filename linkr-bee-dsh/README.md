@@ -108,6 +108,11 @@ concurrent WebSocket clients and one Bluetooth connection.
 - **The pane keeps its screen.** Switching tabs or reloading the page replays
   what the board said (`GET /linkr-bee/console/read`); a *Clear* — yours or an
   agent's — moves the cutoff so cleared output does not come back.
+- **Reading and Raw share one stream position.** Switching views repaints
+  locally cached history and sends no serial input. Reading only hides exact
+  command echoes and completion markers registered by the CLI's `dispatch`
+  event; older CLIs without this metadata show the original text. Older UART
+  replies that report only baud remain usable, with the other fields unknown.
 - **Console output is untrusted device data.** The tools say so explicitly: exit
   code 0 means the command completed, not that the target's state was verified,
   and a delivered command is not a completed one.

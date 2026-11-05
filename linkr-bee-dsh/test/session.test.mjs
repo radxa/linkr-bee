@@ -18,9 +18,9 @@ if (args.includes('--scan')) {
   note({mode:'scan'});
   setTimeout(()=>{emit({event:'device',board:true,name:'Linkr Bee Mock'});},250);
 } else if (args.includes('--serve')) {
-  note({mode:'serve'});
-  const ready = () => emit({event:'ready',ops:config.scenario==='old-cli'?['exec']:config.scenario==='monitor'?['exec','monitor']:['exec','watch','send','resize']});
-  if(config.scenario==='slow-start')setTimeout(ready,250);else ready();
+  note({mode:'serve',args});
+  const ready = () => emit({event:'ready',ops:(config.scenario==='old-cli'||config.scenario==='send-window')?['exec']:config.scenario==='monitor'?['exec','monitor']:['exec','watch','send','resize']});
+  if(config.scenario==='slow-start'||config.scenario==='slow-capture')setTimeout(ready,250);else ready();
   readline.createInterface({input:process.stdin}).on('line', line => {
     const request = JSON.parse(line);
     note({mode:'request',...request});
@@ -28,6 +28,13 @@ if (args.includes('--scan')) {
     emit({event:'begin',id:request.id});
     if(config.scenario==='drop-exec'&&request.op==='exec')process.exit(1);
     if(config.scenario==='drop-send'&&request.op==='send')process.exit(1);
+    if(config.scenario==='presentation'&&request.op==='exec') {
+      const marker='LINKR_RC_0123456789abcdef0123456789abcdef';
+      const wire="sh -c '"+request.cmd+"'; printf '\\n%s:%s\\n' '"+marker+"' \"$?\"\r";
+      emit({event:'dispatch',id:request.id,marker,wire});
+    }
+    if(config.scenario==='presentation'&&request.op==='send')emit({event:'stream',data:request.data});
+    if(config.scenario==='slow-capture'&&request.op==='send')setTimeout(()=>emit({event:'stream',data:'AFTER_READY_REPLY\n'}),200);
     const finish=()=>{
       note({mode:'finished',op:request.op});
       if(request.op==='monitor')emit({event:'monitor',cursor:1,text:''});
@@ -42,7 +49,15 @@ if (args.includes('--scan')) {
   if(config.scenario==='uart-nonzero') {process.stderr.write('UART configuration unavailable');process.exit(2);}
   if(config.scenario==='uart-empty')process.exit(0);
   if(config.scenario==='uart-rejected'){emit({event:'result',what:'uart',ok:false,detail:'UART refused'});process.exit(0);}
-  if(config.scenario==='uart-ok'){emit({event:'result',what:'uart',ok:true,detail:'OK uart=115200,8,n,1,none'});process.exit(0);}
+  if(config.scenario==='uart-ok'){emit({event:'result',what:'uart',ok:true,reply:'uart=115200,8,n,1,none'});process.exit(0);}
+  if(config.scenario==='uart-baud'){emit({event:'result',what:'uart',ok:true,reply:'uart=230400'});process.exit(0);}
+  if(config.scenario==='send-window') {
+    let text='',sent=false,reply=null;
+    const send=()=>{if(sent)return;sent=true;note({mode:'delivered',text});reply=setTimeout(()=>emit({event:'output',text:'DELAYED_REPLY\n'}),1000);};
+    process.stdin.on('data',chunk=>{text+=chunk;if(args[args.indexOf('--send')+1]==='raw'||text.includes('\n'))send();});
+    process.stdin.on('end',()=>{send();setTimeout(()=>{clearTimeout(reply);emit({event:'result',what:'send',ok:true});},500);});
+    return;
+  }
   const finish=()=>{note({mode:'finished-one-shot'});emit({event:'result',what:'exec',ok:true});};
   if(config.scenario==='slow-query')setTimeout(finish,200);else finish();
 }
@@ -121,10 +136,12 @@ test('a raw Enter whose response is lost is never replayed', async t => {
 
 test('startup incompatibility can fall back before exec is dispatched', async t => {
   const f = await fixture(t, 'old-cli');
-  await f.call('linkr_bee_exec', { cmd:'one-command' });
+  await f.call('linkr_bee_exec', { cmd:'one-command', timeoutMs:120000 });
   const calls = await f.calls();
   assert.equal(calls.filter(c => c.mode === 'request' && c.op === 'exec').length, 0);
   assert.equal(calls.filter(c => c.mode === 'one-shot').length, 1);
+  const args = calls.find(c => c.mode === 'one-shot').args;
+  assert.equal(args[args.indexOf('--timeout') + 1], '120');
 });
 
 test('an already cancelled task starts no child and sends no input', async t => {
@@ -372,4 +389,122 @@ test('the line input route also rejects a failed one-shot send', async t => {
   const result = await f.route('/console/input', {text:'hello',mode:'line'});
   assert.equal(result.ok, false);
   assert.equal(typeof result.error, 'string');
+});
+
+test('memory connection changes retire the old board before the next exec', async t => {
+  const f = await fixture(t, 'ok', {transport:'ble',bleName:'Board-A'});
+  await f.route('/watch', {on:true});
+  const saved = await f.route('/config', {bleName:'Board-B'});
+  assert.equal(saved.ok, true);
+  await f.call('linkr_bee_exec', {cmd:'new-board-only'});
+  const calls = await f.calls();
+  const old = calls.find(c => c.mode === 'serve' && c.args.includes('Board-A'));
+  const current = calls.find(c => c.mode === 'serve' && c.args.includes('Board-B'));
+  assert.ok(old && current);
+  assert.notEqual(old.pid, current.pid);
+  assert.equal(calls.find(c => c.op === 'exec').pid, current.pid);
+  assert.equal((await f.state()).link.target, 'Board-B');
+});
+
+test('a connection change cannot redirect an active or queued command', async t => {
+  const f = await fixture(t, 'ok', {transport:'ble',bleName:'Board-A'});
+  const running = f.call('linkr_bee_exec', {cmd:'hold'});
+  await f.waitFor(c => c.op === 'exec');
+  const queued = f.call('linkr_bee_exec', {cmd:'queued'});
+  assert.equal((await f.route('/config', {bleName:'Board-B'})).ok, false);
+  assert.equal((await f.route('/config')).config.bleName, 'Board-A');
+  await Promise.all([running, queued]);
+  assert.equal((await f.route('/config', {bleName:'Board-B'})).ok, true);
+  await f.call('linkr_bee_exec', {cmd:'new-board'});
+  const calls = await f.calls();
+  const current = calls.find(c => c.mode === 'serve' && c.args.includes('Board-B'));
+  assert.equal(calls.find(c => c.cmd === 'new-board').pid, current.pid);
+});
+
+test('legacy UART replies expose the confirmed baud without inventing other fields', async t => {
+  const f = await fixture(t, 'uart-baud', {transport:'ble',bleName:'Mock'});
+  const reply = await f.route('/uart');
+  assert.equal(reply.ok, true);
+  assert.equal(reply.baud, 230400);
+  assert.equal(reply.spec, null);
+});
+
+for (const mode of ['line', 'raw']) {
+  test(`${mode} send captures a delayed reply and publishes CLI text output to the shared console`, async t => {
+    const f = await fixture(t, 'send-window');
+    const result = await f.call('linkr_bee_send', {text:'PING',mode,captureMs:1500});
+    assert.match(result, /DELAYED_REPLY/);
+    assert.equal((await f.route('/console/read?view=raw')).text, 'DELAYED_REPLY\n');
+    const delivered = (await f.calls()).find(c => c.mode === 'delivered');
+    assert.equal(delivered.text, mode === 'line' ? 'PING\n' : 'PING');
+  });
+}
+
+const marker = 'LINKR_RC_0123456789abcdef0123456789abcdef';
+const wrapper = `sh -c 'echo hi'; printf '\\n%s:%s\\n' '${marker}' "$?"`;
+async function presentation(t) {
+  const f = await fixture(t, 'presentation');
+  await f.route('/watch', {on:true});
+  await f.call('linkr_bee_exec', {cmd:'echo hi'});
+  return {...f, send: text => f.route('/input', {data:text})};
+}
+
+test('reading transforms only registered complete echoes and markers across every chunk boundary', async t => {
+  const f = await presentation(t);
+  for (const text of ['sh ', "-c 'echo hi'; printf '\\n%s:%s\\n' 'LINKR_ \rRC_", '0123456789abcdef0123456789abcdef', "' \"$?\"\r\n", 'hi\r\n', 'LINK', 'R_RC_0123456789abcdef0123456789abcdef:0\r\n']) await f.send(text);
+  assert.equal((await f.route('/console/read')).text, 'hi\r\n[Agent] exit=0\r\n');
+  assert.match((await f.route('/console/read?view=raw')).text, /printf/);
+  await f.send(marker + ':0\r\n');
+  assert.ok((await f.route('/console/read')).text.endsWith(marker + ':0\r\n'), 'a completed marker is retired');
+});
+
+test('unregistered markers and mismatched wrappers remain ordinary device output', async t => {
+  const f = await presentation(t);
+  const text = `LINKR_RC_device_log:7\r\n${wrapper.replace('echo hi','echo other')}\r\n`;
+  await f.send(text);
+  assert.equal((await f.route('/console/read')).text, text);
+});
+
+test('an idle partial echo gets an ordered reading-only event, including after reconnect', async t => {
+  const f = await presentation(t);
+  await f.send('sh -c');
+  const before = (await f.route('/console/read')).seq;
+  assert.equal((await f.route('/console/read')).text, '');
+  await pause(350);
+  const after = await f.route('/console/read');
+  assert.equal(after.text, 'sh -c');
+  assert.equal(after.seq, before + 1);
+  const frames = await f.consoleFrames();
+  assert.ok(frames.some(event => event.type === 'stream' && event.text === '' && event.reading === 'sh -c'));
+  assert.equal((await f.route('/console/read?view=raw')).text, 'sh -c');
+});
+
+test('clear cancels a pending reading flush without reviving cleared output', async t => {
+  const f = await presentation(t);
+  await f.send('sh -c');
+  await f.route('/panel', {action:'clear'});
+  await pause(350);
+  assert.equal((await f.route('/console/read')).text, '');
+  assert.equal((await f.route('/console/read?view=raw')).text, '');
+});
+
+test('resident send observes its full capture budget after slow connection startup', async t => {
+  const f = await fixture(t, 'slow-capture');
+  const result = await f.call('linkr_bee_send', {text:'PING',captureMs:300});
+  assert.match(result,/AFTER_READY_REPLY/);
+  assert.equal((await f.route('/console/read?view=raw')).text,'AFTER_READY_REPLY\n');
+  const calls=await f.calls();
+  assert.equal(calls.find(c=>c.op==='send').data,'PING\n');
+  assert.equal(calls.filter(c=>c.mode==='one-shot').length,0);
+  assert.equal((await f.state()).session.active,false);
+});
+
+test('cancelling a send capture after acknowledgement never claims input was not sent', async t => {
+  const f=await fixture(t,'slow-capture');
+  const controller=new AbortController();
+  const result=f.call('linkr_bee_send',{text:'PING',captureMs:1000},controller.signal);
+  const rejected=assert.rejects(result,/unknown.*Do not resend automatically/);
+  await f.waitFor(c=>c.mode==='finished'&&c.op==='send');
+  await pause(30);controller.abort();await rejected;
+  assert.equal((await f.calls()).filter(c=>c.mode==='request'&&c.op==='send').length,1);
 });

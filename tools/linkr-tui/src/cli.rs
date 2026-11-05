@@ -2182,8 +2182,10 @@ fn answer_of(app: &App, query: crate::device::Query) -> Result<String, String> {
     Ok(match query {
         crate::device::Query::Diagnostics => app.diagnostics.raw.join("\n"),
         crate::device::Query::Uart => app
-            .baud
-            .map(|baud| format!("uart={baud}"))
+            .uart_settings
+            .as_ref()
+            .map(|settings| format!("uart={}", settings.spec()))
+            .or_else(|| app.baud.map(|baud| format!("uart={baud}")))
             .unwrap_or_default(),
         crate::device::Query::Wifi => match &app.network.wifi {
             Some(wifi) => format!("wifi={},ssid={},ip={}", wifi.state, wifi.ssid, wifi.ip),
@@ -2379,6 +2381,17 @@ pub fn lossy(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uart_query_returns_the_full_confirmed_format() {
+        let mut app = App::default();
+        app.baud = Some(230400);
+        app.uart_settings = crate::accessory::parse_uart_settings("OK uart=230400,7,E,2,rtscts");
+        assert_eq!(
+            answer_of(&app, crate::device::Query::Uart).unwrap(),
+            "uart=230400,7,e,2,rtscts"
+        );
+    }
 
     /// A completion that offers a flag the parser has never heard of completes
     /// a command line into an error, and a flag the parser knows but the
