@@ -74,12 +74,14 @@ export function createSerialPresentation({ onIdle = () => {}, idleMs = 300, maxR
   const tokens = new Map();
   const oscRecords = new Map();
   let echo = null, pending = [], kind = null, lineStart = true, timer = null;
+  let hiddenEchoCR = false;
   function cancelTimer() {
     clearTimeout(timer);
     timer = null;
   }
   function flush() {
     cancelTimer();
+    hiddenEchoCR = false;
     const output = Uint8Array.from(pending);
     if (kind === "echo") echo = null;
     pending = [];
@@ -94,6 +96,7 @@ export function createSerialPresentation({ onIdle = () => {}, idleMs = 300, maxR
     if (osc ? oscRecords.has(key) : tokens.has(key)) return;
     // A new operation must never reinterpret a held prefix from an older one.
     if (pending.length) onIdle(flush());
+    hiddenEchoCR = false;
     if (osc) {
       oscRecords.set(key, {phase:tracking.phase, started:false});
       while (oscRecords.size > maxRecords) oscRecords.delete(oscRecords.keys().next().value);
@@ -107,7 +110,10 @@ export function createSerialPresentation({ onIdle = () => {}, idleMs = 300, maxR
         bytes: encoder.encode(value),
         ending: value.endsWith("\r\n") ? "\r\n" : value.endsWith("\n") ? "\n" : "\r",
       })).filter(pattern => pattern.bytes.length <= 8192),
-      command: record.command,
+      // Hide only an exact registered echo, never the following device output.
+      // Older shell-setup records also contain an internal initialization script.
+      command: record.terminalEcho === "hidden" || tracking?.phase === "setup"
+        ? null : record.command,
     };
   }
   function push(bytes) {
@@ -122,6 +128,12 @@ export function createSerialPresentation({ onIdle = () => {}, idleMs = 300, maxR
     for (let i = 0; i < bytes.length; i++) {
       const byte = bytes[i], atStart = lineStart;
       lineStart = byte === 10;
+      // The CR variant matches before CRLF is complete, including when the
+      // LF arrives in the next notification. Hide the whole echo line ending.
+      if (hiddenEchoCR) {
+        hiddenEchoCR = false;
+        if (byte === 10) { start = i + 1; continue; }
+      }
       if (!kind) {
         if (echo?.patterns.some(pattern => pattern.bytes[0] === byte)) kind = "echo";
         else if (byte === 27 && oscRecords.size) kind = "osc";
@@ -141,7 +153,9 @@ export function createSerialPresentation({ onIdle = () => {}, idleMs = 300, maxR
         if (echo) echo.patterns = patterns;
         const complete = patterns.find(pattern => pattern.bytes.length === pending.length);
         if (complete) {
-          output.push(encoder.encode(echo.command.replace(/\r\n|\r|\n/g, "\r\n") + complete.ending));
+          if (echo.command !== null) {
+            output.push(encoder.encode(echo.command.replace(/\r\n|\r|\n/g, "\r\n") + complete.ending));
+          } else hiddenEchoCR = complete.ending === "\r";
           echo = null;
           pending = [];
           kind = null;
@@ -204,6 +218,7 @@ export function createSerialPresentation({ onIdle = () => {}, idleMs = 300, maxR
       pending = [];
       kind = null;
       lineStart = true;
+      hiddenEchoCR = false;
     },
     get pendingBytes() { return pending.length; },
   };

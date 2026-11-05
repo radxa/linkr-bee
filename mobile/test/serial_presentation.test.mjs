@@ -91,3 +91,35 @@ test('ByteHistory retains the exact tail and snapshots do not alias', () => {
   }
   assert.throws(() => new ByteHistory(0), RangeError);
 });
+
+
+test('internal probe echo is hidden across fragments while device output and errors remain visible', () => {
+  for (const ending of ['\r', '\n', '\r\n']) {
+    for (const size of [1, 2, 7, 20, 244, 1000]) {
+      const filter = createSerialPresentation();
+      const internal = { ...record, terminalEcho: 'hidden' };
+      filter.register(internal);
+      const output = '\r\nTOOL:curl:available\r\nKernel panic - not syncing: diagnostic\r\n';
+      const raw = record.payload.replace(/\r$/, ending) + output + token + ':1\r\nroot@bee:~# ';
+      assert.equal(stream(filter, raw, size), output + '[Agent] exit=1\r\nroot@bee:~# ');
+      assert.equal(internal.command, record.command);
+      assert.equal(internal.payload, record.payload);
+      filter.reset();
+    }
+  }
+});
+
+test('hidden echoes still fail open on ambiguous, unregistered or unrelated output', () => {
+  for (const raw of [record.payload.replace('sh -c', 'sh \x1b[K-c'), 'sh -c truncated',
+    'UNRELATED\r\n' + record.payload, 'ordinary data\r\n']) {
+    const filter = createSerialPresentation();
+    filter.register({ ...record, terminalEcho: 'hidden' });
+    assert.equal(stream(filter, raw), raw);
+  }
+  const filter = createSerialPresentation();
+  filter.register({ command:record.command, payload:record.payload, terminalEcho:'hidden' });
+  assert.equal(stream(filter, record.payload), record.payload);
+  filter.register({ ...record, terminalEcho:'hidden' });
+  filter.reset();
+  assert.equal(stream(filter, record.payload), record.payload);
+});

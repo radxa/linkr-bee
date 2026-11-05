@@ -1242,7 +1242,8 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
         const candidate = crypto.randomUUID();
         const command = targetIdentityCommand(action, candidate, marker);
         if (automatic && getStatus().inputRevision !== initial.inputRevision) throw new Error("Terminal changed before identity verification.");
-        const record = await device.execute({text:command,appendEnter:true,trackExit:true}, controller.signal, {userApproved:true});
+        const record = await device.execute({text:command,appendEnter:true,trackExit:true}, controller.signal,
+          {userApproved:true, hideTerminalEcho:action === "verify"});
         const observed = await monitorSerialExecution({inspect:()=>device.inspectExecution(record.id),signal:controller.signal,check,timeoutMs:30000});
         if (observed.waitStatus === "awaiting-input" || observed.observation === "interrupted") {
           const error = new Error("Complete sudo in the terminal, then bind again to verify the ID.");

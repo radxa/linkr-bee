@@ -134,3 +134,29 @@ for (const width of [338, 834, 1440]) {
     expect(metrics.overflow).toBeLessThanOrEqual(1); expect(metrics.width).toBeGreaterThan(200);
   });
 }
+
+
+test('internal probe commands stay on the execution card and in Raw while Reading keeps device output', async ({ page }, testInfo) => {
+  const record = await page.evaluate(async () => {
+    const c = window.__logView, device = c.getDevice(); device.setMode('full-auto');
+    const record = await device.execute({text:'command -v curl',appendEnter:true,trackExit:true,applicationReadOnly:true});
+    const raw = record.payload.replace(/\r\n|\r|\n/g,'\r\n') + '\r\n/usr/bin/curl\r\n' + record.completionToken + ':0\r\nroot@bee:~# ';
+    const bytes = new TextEncoder().encode(raw);
+    for (let i=0;i<bytes.length;i+=7) c.handleIncomingBytes(bytes.subarray(i,i+7));
+    c.flushTerminalWrites();
+    return { ...device.inspectExecution(record.id), rawJournal:c.readRaw() };
+  });
+  await expect.poll(() => terminalText(page)).toContain('/usr/bin/curl');
+  const reading = await terminalText(page);
+  expect(reading).not.toContain('command -v'); expect(reading).not.toContain('sh -c');
+  expect(record.executionStatus).toBe('completed'); expect(record.exitCode).toBe(0);
+  expect(record.rawJournal).toContain(record.command); expect(record.rawJournal).toContain(record.completionToken);
+  const card = page.locator(`[data-execution="${record.id}"]`);
+  expect(await card.locator(':scope > pre').first().textContent()).toBe(record.command);
+  expect(await card.locator('.agent-wire-payload pre').textContent()).toContain(record.completionToken);
+  await page.screenshot({path:testInfo.outputPath('probe-reading.png')});
+  await page.evaluate(() => window.__logView.setLogView('raw')); await settled(page);
+  expect(await terminalText(page)).toContain('command -v curl');
+  await page.evaluate(() => window.__logView.setLogView('reading')); await settled(page);
+  expect(await terminalText(page)).not.toContain('command -v curl');
+});

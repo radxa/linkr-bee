@@ -345,7 +345,7 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
      * never covered. That is the shard bypass. A caller that classified the
      * joined line itself may assert coverage with `sensitiveApproved`
      * (web/mcp_server.js does, from the same console line this executor sees). */
-    async execute(args, signal, { userApproved = false, sensitiveApproved = false, approvalInputState = null, shellSetup = null } = {}) {
+    async execute(args, signal, { userApproved = false, sensitiveApproved = false, approvalInputState = null, shellSetup = null, hideTerminalEcho = false } = {}) {
       signal?.throwIfAborted();
       if (active) throw new Error("Another serial action is still active.");
       if (typeof args?.text !== "string" || !args.text.length || args.text.length > 2048 || typeof args.appendEnter !== "boolean") {
@@ -387,6 +387,11 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
        * them. Read the marker before the tracked wrapper replaces `args`. */
       const appComposed = shellSetup !== null || args.applicationReadOnly === true ||
         Boolean(profileProbe) || Boolean(toolProbe) || Boolean(download);
+      // Keep application-owned housekeeping on its execution card. This is
+      // display metadata only: approvals, wire bytes and evidence stay intact.
+      // A model/user command is never hidden just because it is read-only.
+      const terminalEcho = hideTerminalEcho || shellSetup !== null || args.applicationReadOnly === true ||
+        Boolean(profileProbe) || Boolean(toolProbe) ? "hidden" : "command";
       let completionToken, shellTracking;
       shellStatus();
       if (args.trackExit || shellSetup) {
@@ -407,7 +412,7 @@ export function createDeviceExecutor({ getStatus, readLog, prepareInput, sendInp
         if (args.text.length > 2048) throw new Error("Tracked command is too long after shell quoting.");
       }
       const record = { executorId, profileProbe, toolProbe:toolProbe?.slice(), download, completionToken, shellTracking, id: `serial-${++nextId}`, sessionId: status.sessionId, inputRevision: status.inputRevision,
-        command: requestedInput.text, payload: prepareInput(args), mode, console: consoleState(), state: "proposed", delivery: "not-sent",
+        command: requestedInput.text, terminalEcho, payload: prepareInput(args), mode, console: consoleState(), state: "proposed", delivery: "not-sent",
         executionStatus: "unknown", createdAt: new Date().toISOString(), evidence: "", observation: "no-output" };
       const controller = new AbortController();
       const operation = { record, controller };
