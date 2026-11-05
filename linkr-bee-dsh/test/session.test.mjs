@@ -16,9 +16,15 @@ const emit = item => process.stdout.write(JSON.stringify(item)+'\n');
 const args = process.argv.slice(2);
 if (args.includes('--scan')) {
   note({mode:'scan'});
-  setTimeout(()=>{emit({event:'device',board:true,name:'Linkr Bee Mock'});},250);
+  if(config.scenario==='scan-fail') {process.stderr.write('bluetooth adapter unavailable\n');process.exit(2);}
+  if(config.scenario==='scan-empty') process.exit(0);
+  setTimeout(()=>{emit({event:'device',board:true,name:config.scanName||'Linkr Bee Mock'});},250);
 } else if (args.includes('--serve')) {
   note({mode:'serve',args});
+  if(config.scenario==='serve-fail-once'&&!fs.existsSync(__dirname+'/attempted')){
+    fs.writeFileSync(__dirname+'/attempted','1');
+    process.exit(1);
+  }
   const ready = () => emit({event:'ready',ops:(config.scenario==='old-cli'||config.scenario==='send-window')?['exec']:config.scenario==='monitor'?['exec','monitor']:['exec','watch','send','resize']});
   if(config.scenario==='slow-start'||config.scenario==='slow-capture')setTimeout(ready,250);else ready();
   readline.createInterface({input:process.stdin}).on('line', line => {
@@ -26,6 +32,12 @@ if (args.includes('--scan')) {
     note({mode:'request',...request});
     if(request.op==='quit')process.exit(0);
     emit({event:'begin',id:request.id});
+    if(config.scenario==='not-connected-once'&&request.op==='exec'&&!fs.existsSync(__dirname+'/nc-used')){
+      fs.writeFileSync(__dirname+'/nc-used','1');
+      emit({event:'error',id:request.id,code:'not_connected',message:'the board is not reachable'});
+      emit({event:'end',id:request.id,code:255});
+      return;
+    }
     if(config.scenario==='drop-exec'&&request.op==='exec')process.exit(1);
     if(config.scenario==='drop-send'&&request.op==='send')process.exit(1);
     if(config.scenario==='presentation'&&request.op==='exec') {
@@ -59,6 +71,13 @@ if (args.includes('--scan')) {
     return;
   }
   const finish=()=>{note({mode:'finished-one-shot'});emit({event:'result',what:'exec',ok:true});};
+  if(args.includes('--send')){
+    let stdin='';
+    process.stdin.on('data',chunk=>{stdin+=chunk;});
+    process.stdin.on('end',()=>{note({mode:'send-stdin',stdin});finish();});
+    process.stdin.resume();
+    return;
+  }
   if(config.scenario==='slow-query')setTimeout(finish,200);else finish();
 }
 `;
@@ -66,8 +85,9 @@ if (args.includes('--scan')) {
 async function fixture(t, scenario = 'ok', extra = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'linkr-plugin-session-'));
   const executable = join(dir, 'bee-cli.cjs');
+  const { cli = {}, ...configExtra } = extra;
   await writeFile(executable, fakeCli, { mode: 0o755 });
-  await writeFile(join(dir, 'config.json'), JSON.stringify({ scenario }));
+  await writeFile(join(dir, 'config.json'), JSON.stringify({ scenario, ...cli }));
   await writeFile(join(dir, 'calls.jsonl'), '');
   const { apply } = await import(`../index.js?session-test=${++nextImport}`);
   const tools = new Map();
@@ -79,7 +99,7 @@ async function fixture(t, scenario = 'ok', extra = {}) {
     tools: { register(tool) { tools.set(tool.name, tool); return () => {}; } },
     webServer: { register(options) { handler = options.handler; return () => {}; } },
   };
-  const config = { cliPath: executable, transport: 'loopback', sendCaptureMs: 0, ...extra };
+  const config = { cliPath: executable, transport: 'loopback', sendCaptureMs: 0, ...configExtra };
   apply(ctx, config);
   const dispose = () => {
     if (disposed) return;
@@ -389,6 +409,144 @@ test('the line input route also rejects a failed one-shot send', async t => {
   const result = await f.route('/console/input', {text:'hello',mode:'line'});
   assert.equal(result.ok, false);
   assert.equal(typeof result.error, 'string');
+});
+
+test('auto-discovery is reused while fresh and scanned again once it expires', async t => {
+  const f = await fixture(t, 'ok', {transport:'ble',bleName:'',bleAddress:''});
+  const scans = async () => (await f.calls()).filter(c => c.mode === 'scan').length;
+
+  await f.call('linkr_bee_query', {target:'state'});
+  assert.equal(await scans(), 1);
+  const dialled = (await f.calls()).find(c => c.mode === 'one-shot' && c.args.includes('--ble-name'));
+  assert.ok(dialled, 'the board found by the scan is dialled by name');
+  assert.equal(dialled.args[dialled.args.indexOf('--ble-name') + 1], 'Linkr Bee Mock');
+
+  // Inside the TTL the remembered name is used without touching the radio.
+  await f.call('linkr_bee_query', {target:'state'});
+  assert.equal(await scans(), 1, 'a fresh discovery is reused, not rescanned');
+
+  // Past the TTL it is a hint only: scan again, so a renamed or swapped board
+  // is found instead of dialling the old name forever.
+  const realNow = Date.now;
+  Date.now = () => realNow() + 6 * 60_000;
+  try {
+    await f.call('linkr_bee_query', {target:'state'});
+  } finally {
+    Date.now = realNow;
+  }
+  assert.equal(await scans(), 2, 'a discovery older than the TTL is rescanned');
+});
+
+test('a failed dial forgets the discovered name and scans again', async t => {
+  const f = await fixture(t, 'serve-fail-once', {transport:'ble',bleName:'',bleAddress:''});
+  await f.call('linkr_bee_exec', {cmd:'true'});
+  const calls = await f.calls();
+  assert.equal(calls.filter(c => c.mode === 'scan').length, 2,
+    'the start that never became a session must not pin the old name');
+  assert.equal(calls.filter(c => c.mode === 'serve').length, 1);
+  assert.equal(calls.filter(c => c.mode === 'one-shot').length, 1,
+    'the exec falls back to the one-shot path after the failed session start');
+});
+
+test('the Host half carries no hard-coded Chinese UI text', async () => {
+  const source = await readFile(new URL('../index.js', import.meta.url), 'utf8');
+  assert.equal(/[\u3400-\u9fff]/.test(source), false,
+    'Host messages are language-neutral; the panel localises its own labels');
+});
+
+test('a not_connected exec says nothing was dispatched and the next call rescans', async t => {
+  const f = await fixture(t, 'not-connected-once', {transport:'ble',bleName:'',bleAddress:''});
+  // Watching keeps the session alive between calls, so the recovery below is
+  // the stale-session path rather than "the lease closed the session".
+  const watched = await f.route('/watch', {on:true});
+  assert.equal(watched.ok, true);
+  await assert.rejects(
+    f.call('linkr_bee_exec', {cmd:'echo hi'}),
+    /not dispatched.*not reachable/,
+  );
+  // The failed dial marked the session dirty: the next call stops it and scans
+  // again instead of reusing the board name that just failed.
+  const answer = await f.call('linkr_bee_exec', {cmd:'echo hi'});
+  assert.match(answer, /result/);
+  const calls = await f.calls();
+  assert.equal(calls.filter(c => c.mode === 'scan').length, 2);
+  assert.equal(calls.filter(c => c.mode === 'serve').length, 2);
+  await f.route('/watch', {on:false});
+});
+
+test('an inherited property is not a named key', async t => {
+  const f = await fixture(t, 'ok');
+  await assert.rejects(
+    f.call('linkr_bee_console', {action:'key', key:'constructor'}),
+    /unknown key "constructor"/,
+  );
+});
+
+test('LAN transport without a host says so instead of falling back to BLE', async t => {
+  const f = await fixture(t, 'ok', {transport:'lan', lanHost:''});
+  await assert.rejects(
+    f.call('linkr_bee_query', {target:'state'}),
+    /LAN transport needs lanHost/,
+  );
+});
+
+test('a failed scan is an error, not an empty result', async t => {
+  const f = await fixture(t, 'scan-fail', {transport:'ble', bleName:'', bleAddress:''});
+  const result = await f.route('/scan', {});
+  assert.equal(result.ok, false);
+  assert.match(result.error, /adapter unavailable/);
+});
+
+test('the scan tool does not require a board to already connect to', async t => {
+  const f = await fixture(t, 'scan-empty', {transport:'ble', bleName:'', bleAddress:''});
+  const answer = await f.call('linkr_bee_query', {target:'scan'});
+  assert.equal(answer, 'No Linkr Bee boards found nearby.');
+  assert.equal((await f.calls()).filter(c => c.mode === 'scan').length, 1);
+});
+
+test('linkr_bee_set validates before it dials', async t => {
+  const f = await fixture(t, 'ok', {transport:'ble', bleName:'Mock'});
+  await assert.rejects(f.call('linkr_bee_set', {target:'uart', value:'not-a-format'}),
+    /baud,data,parity,stop,flow/);
+  await assert.rejects(f.call('linkr_bee_set', {target:'rename-ble', value:'x'.repeat(30)}),
+    /1-29 UTF-8 bytes/);
+  await assert.rejects(f.call('linkr_bee_set', {target:'wifi'}),
+    /wifi needs a value/);
+  assert.deepEqual(await f.calls(), []);
+});
+
+test('a saved config is what the next read and dial use', async t => {
+  const f = await fixture(t, 'ok');
+  const saved = await f.route('/config', {transport:'loopback', bleName:'New Name', timeoutMs:12000});
+  assert.equal(saved.ok, true);
+  assert.equal(saved.applied, 'memory');
+  const read = await f.route('/config');
+  assert.equal(read.config.bleName, 'New Name');
+  assert.equal(read.config.timeoutMs, 12000);
+});
+
+test('a spawn that cannot start gives the link back instead of wedging every caller', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'linkr-cmd-'));
+  t.after(() => rm(dir, {recursive:true, force:true}));
+  const shim = join(dir, 'bee-cli.cmd');
+  await writeFile(shim, '');
+  const f = await fixture(t, 'ok', {cliPath: shim, transport:'loopback'});
+  const real = Object.getOwnPropertyDescriptor(process, 'platform');
+  Object.defineProperty(process, 'platform', {value:'win32', configurable:true});
+  try {
+    await assert.rejects(f.call('linkr_bee_exec', {cmd:'x'}), /\.cmd shim/);
+    // A leaked borrow would park this call until its timeout; rejecting with
+    // the same message quickly is what proves the link was released.
+    await assert.rejects(
+      Promise.race([
+        f.call('linkr_bee_exec', {cmd:'x'}),
+        pause(3000).then(() => { throw new Error('the second call was wedged'); }),
+      ]),
+      /\.cmd shim/,
+    );
+  } finally {
+    Object.defineProperty(process, 'platform', real);
+  }
 });
 
 test('memory connection changes retire the old board before the next exec', async t => {

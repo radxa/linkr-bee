@@ -5,6 +5,55 @@
 The published cut of the Harness plugin after the 1.1.4 baseline. Versions
 continue to follow the Linkr Bee main line.
 
+- BLE auto-discovery is a hint, not a binding. The name found by the scan used
+  to be cached for the whole process lifetime, so a renamed board, a swapped
+  board or a board that came back after being out of range kept being dialled
+  by the old name until the plugin restarted. It is now reused only while the
+  connection settings are unchanged and it is younger than five minutes, and
+  any failed dial (a start that never became a session, or reconnect giving
+  up) forgets it so the next attempt scans again. A missing config no longer
+  crashes the dial either (`config?.transport`).
+- Windows `cliPath`: pointing it at the npm `bee-cli.cmd` shim now says why
+  Node cannot spawn it and what to use instead (a real `bee-cli.exe`, or an
+  empty `cliPath` so the bundled launcher runs), rather than failing later
+  with a bare `spawn EINVAL`.
+- A dial that fails inside the resident session is now visible and recoverable.
+  A request that answers `not_connected` reports that nothing was dispatched
+  (with the reason), marks the session stale, tells an open panel the link is
+  lost, and the next call stops the session and scans again — instead of
+  reusing the same board name until the process restarts. The request budget
+  also follows `timeoutMs`/the per-call override instead of a fixed 60 s.
+- A run that cannot even start (a rejected `.cmd` `cliPath`, a bad argument)
+  now returns the link it borrowed. Previously that counter stayed raised and
+  every later call waited for a link nobody held.
+- Replies that the CLI prints as `text` (rather than `data`) now reach the
+  shared console too.
+- Discovery/transport errors are explicit: a scan that finds nothing says so
+  (and `--serve`'s own stderr is surfaced instead of "exited before ready"),
+  `POST /linkr-bee/scan` reports a failed scan instead of an empty list, the
+  scan tool no longer needs an existing connection first, and `transport: lan`
+  without `lanHost` is refused rather than silently dialling BLE.
+- Argument validation: dry runs pass the same normalised `cmd`/`idle`/`retry`
+  values as real runs; named console keys only resolve own properties (so
+  `constructor` is not a key); `linkr_bee_set` validates the UART spec, requires
+  a value for wifi/webdav/uart/rename-ble and enforces 1-29 UTF-8 bytes for a
+  BLE name before dialling.
+- A saved config now applies to the running plugin: the new values are used by
+  `GET /config` and the next dial, and an open panel follows a connection change
+  without a reload. A connection change is refused while a command is active or
+  queued, so it cannot redirect work accepted for the old board. Captured output
+  is bounded (1 MiB per run/request) so a runaway command cannot grow the
+  plugin's heap; a console stream whose peer stopped reading is dropped (the
+  panel reconnects from its cursor) instead of buffered without bound, and the
+  panel's control backlog is only replayed while it is fresh (60 s), not on
+  every page reload.
+- The panel recognises the Host's English lost-link notices (`link to the board
+  lost` / `auto-reconnect gave up`) as a link state, not just the older Chinese
+  ones, so the banner still replaces the raw sentence.
+- Host messages are language-neutral English. The console's meta lines mixed
+  hard-coded Chinese (`已发送`, `退出码`, `agent: 读取 …`) into an otherwise
+  English terminal, including for users running the English UI; the panel's
+  own labels stay localised through its `en`/`zh` dictionaries.
 - Connection changes retire the old process before dialing the new target;
   active and queued work must finish before an in-memory target change.
 - Reading/Raw views keep both histories locally, restore snapshots once, and
@@ -13,7 +62,6 @@ continue to follow the Linkr Bee main line.
 - CLI UART reads retain all five confirmed fields. Exec guards honour longer
   per-attempt budgets, and line sends start their capture window after framing
   the input. Both CLI output field spellings reach the shared console.
-
 - Execution safety: cancellation covers connection startup and queued requests.
   An operation whose delivery or result is uncertain is never automatically
   replayed, and a failed send is reported as a failure rather than as delivery.
