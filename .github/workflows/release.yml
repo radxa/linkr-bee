@@ -84,7 +84,14 @@ jobs:
       - name: Download the firmware bundles
         uses: actions/download-artifact@v4
         with:
-          pattern: linkr-bee-esp32*
+          # Every board's bundle is named `linkr-bee-<slug>`, and one slug is
+          # `x1-0` — an `esp32*` pattern silently dropped that board, which the
+          # assembler then caught as "5 != 6 firmware". Match them all and
+          # exclude the two artifacts that are not firmware bundles.
+          pattern: |
+            linkr-bee-*
+            !linkr-bee-web
+            !linkr-bee-apk
           path: artifacts/firmware
 
       - name: Download the Android APK
