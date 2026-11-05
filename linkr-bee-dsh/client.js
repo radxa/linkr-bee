@@ -14227,8 +14227,11 @@ window.__ModuleLoader__.load({
       /** Empty the screen: the panel's clear button and the agent's "clear". */
       const clearScreen = useCallback(({ reset = false } = {}) => {
         try {
-          if (reset) termApi.current?.reset();
-          else termApi.current?.clear();
+          // xterm's clear() only empties the scrollback: the current line (the
+          // shell prompt) stays on screen. A panel clear is expected to leave
+          // an empty screen, so use reset(), which also drops that line while
+          // keeping options (theme, font) intact.
+          if (termApi.current !== null) termApi.current.reset();
         } catch {
           /* a terminal that never started has nothing to clear */
         }
