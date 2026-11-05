@@ -84,15 +84,21 @@ jobs:
       - name: Download the firmware bundles
         uses: actions/download-artifact@v4
         with:
-          # Every board's bundle is named `linkr-bee-<slug>`, and one slug is
-          # `x1-0` — an `esp32*` pattern silently dropped that board, which the
-          # assembler then caught as "5 != 6 firmware". Match them all and
-          # exclude the two artifacts that are not firmware bundles.
-          pattern: |
-            linkr-bee-*
-            !linkr-bee-web
-            !linkr-bee-apk
+          # Every board's bundle is named `linkr-bee-<slug>`, and the X1.0
+          # board's slug is itself `linkr-bee-x1-0`. An `esp32*` pattern
+          # silently dropped that board (the assembler then reported
+          # "firmware: 5 != 6"), and this action's `pattern` does not accept
+          # `!` exclusions, so take them all and drop the two non-firmware
+          # artifacts below.
+          pattern: linkr-bee-*
           path: artifacts/firmware
+
+      - name: Keep only the firmware bundles
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf artifacts/firmware/linkr-bee-web artifacts/firmware/linkr-bee-apk
+          ls -1 artifacts/firmware
 
       - name: Download the Android APK
         uses: actions/download-artifact@v4
