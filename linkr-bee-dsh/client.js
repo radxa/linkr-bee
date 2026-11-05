@@ -14937,9 +14937,10 @@ window.__ModuleLoader__.load({
 .lb-dot.warn { background: var(--dsw-alias-state-warn-primary); }
 .lb-spacer { flex: 1 1 auto; min-width: 4px; }
 .lb-view { display: inline-flex; align-items: center; gap: 2px; padding: 2px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 999px; flex: 0 0 auto; }
-.lb-view-btn { position: relative; border: none; background: transparent; color: var(--dsw-alias-label-secondary); font-size: 11px; padding: 3px 9px; border-radius: 999px; cursor: pointer; min-height: 24px; }
+.lb-view-btn { position: relative; border: none; background: transparent; color: var(--dsw-alias-label-tertiary); font-size: 11px; padding: 3px 9px; border-radius: 999px; cursor: pointer; min-height: 24px; opacity: 0.75; transition: color .12s, opacity .12s, background .12s; }
 .lb-view-btn::after { content: ''; position: absolute; inset: -4px -2px; }
-.lb-view-btn.on { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); }
+.lb-view-btn:hover { opacity: 1; color: var(--dsw-alias-label-secondary); }
+.lb-view-btn.on { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); opacity: 1; font-weight: 600; }
 .lb-tty { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-secondary); border: 1px solid var(--dsw-alias-border-l1); border-radius: 999px; padding: 1px 8px; flex: 0 0 auto; }
 .lb-ghost { position: relative; display: inline-flex; align-items: center; justify-content: center; min-height: 28px; padding: 0 8px; background: transparent; border: none; color: var(--dsw-alias-label-secondary); font-size: 12px; border-radius: 7px; cursor: pointer; flex: 0 0 auto; }
 /* The shell's own strip controls are 28 px; the 36 px touch target is the hit

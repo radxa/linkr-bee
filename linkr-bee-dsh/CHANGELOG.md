@@ -21,6 +21,11 @@
 - Diagnostics: the terminal reports, once per mount, the element chain that
   receives a pointerdown when it is not the xterm screen — evidence for a
   pane overlay that swallows drag selection in some environments.
+- View switch contrast: the unselected Reading/Raw button used the same
+  secondary label colour as normal text, so it read as almost black. It now
+  uses the tertiary label token at 75% opacity, while the selected one keeps
+  the primary colour, a layer-2 background and a 600 weight — measured in both
+  light and dark themes.
 - Reading / Raw console views: matching the Web terminal, the panel now has
   a Reading view (default) that hides agent probe/setup echoes and replaces
   `LINKR_RC_<nonce>:<code>` completion markers with `[Agent] exit=N`, while
