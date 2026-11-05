@@ -128,9 +128,10 @@ existing services and client limits with smaller bounded queues:
 Bee X1.0 additionally uses a 2 KiB main stack and a 1 KiB logging stack. Its
 Zephyr 4.5 diagnostic runs measured 1092 B and 732 B respectively during idle,
 BLE management/data traffic, WiFi scans and 1500000-baud UART loopback. The
-board enables `trng0` and uses the hardware entropy source. Together with the
-activity-LED bookkeeping, the production image's available libc arena grows
-from 13536 B to 15472 B. Other boards keep their existing stack budgets.
+board enables `trng0` and uses the hardware entropy source. Including the
+activity-LED bookkeeping and HTTP poll reservation below, the production
+image's available libc arena grows from 13536 B to 15456 B. Other boards keep
+their existing stack budgets.
 
 RGB activity updates coalesce into one frame when traffic starts and one frame
 after 40 ms without traffic. Each received UART chunk extends the deadline
@@ -147,6 +148,18 @@ UART input can exceed a host's BLE drain rate: a separate unpaced run counted
 9664576 dropped BLE output bytes while UART RX remained intact. Larger buffers
 only absorb bursts; sustained lossless traffic requires upstream pacing, flow
 control or a transport with sufficient throughput.
+
+The HTTP/WebSocket bridge defaults `CONFIG_ZVFS_POLL_MAX` to 5. HTTP/1 polling
+needs one wakeup eventfd, one listener per service and one event per client
+still in HTTP/upgrade processing: two clients and one service need four events.
+This budget is separate from the two-object `CONFIG_ZVFS_EVENTFD_MAX` pool.
+`ws_bridge.c` checks the HTTP fd capacity at build time, including additional
+HTTP/3 listeners/streams, so custom client or service counts must be accompanied
+by a sufficient poll budget. Otherwise simultaneous handshakes can make poll
+fail with `ENOMEM` and restart the listener, closing pending HTTP connections.
+On the 32-bit ESP32 targets, increasing this budget from three to five adds
+16 B to the socket-service poll table and two local `k_poll_event` objects
+(40 B before stack-frame alignment) per poll call; thread stack sizes stay fixed.
 
 C5 keeps the measured thread stack budgets, WiFi heap and network buffers in
 internal SRAM; application data alone uses PSRAM. Its optional WiFi IRAM speed

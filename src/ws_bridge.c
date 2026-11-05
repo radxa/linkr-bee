@@ -56,6 +56,19 @@ BUILD_ASSERT(sizeof(CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_AUTH_TOKEN) <=
 		     WS_RX_BUF_SIZE,
 	     "WebSocket auth token must fit in one receive buffer");
 
+/* Match Zephyr's HTTP_SERVER_SOCK_COUNT. poll() prepares an event for the
+ * wakeup fd, each listener and every client that has not upgraded yet. Its
+ * event array is independent of the HTTP server's own fd table. */
+#define WS_HTTP_SOCKETS_PER_SERVICE \
+	(1 + (IS_ENABLED(CONFIG_HTTP_SERVER_VERSION_3) && \
+	      (IS_ENABLED(CONFIG_HTTP_SERVER_VERSION_1) || \
+	       IS_ENABLED(CONFIG_HTTP_SERVER_VERSION_2))))
+#define WS_HTTP_POLL_REQUIRED \
+	(1 + WS_HTTP_SOCKETS_PER_SERVICE * CONFIG_HTTP_SERVER_NUM_SERVICES + \
+	 CONFIG_HTTP_SERVER_MAX_CLIENTS + HTTP3_SERVER_MAX_STREAMS)
+BUILD_ASSERT(CONFIG_ZVFS_POLL_MAX >= WS_HTTP_POLL_REQUIRED,
+	     "Increase CONFIG_ZVFS_POLL_MAX for HTTP listeners, clients and streams");
+
 /* CLAIMED means the socket is registered but not yet authenticated: UART
  * fan-out only targets ACTIVE clients, and the handshake frame is written
  * before a client is promoted from CLAIMED to ACTIVE. */

@@ -674,6 +674,12 @@ config LINKR_BLE_BRIDGE_MGMT_REQUEST_STACK
 config HTTP_SERVER_MAX_CLIENTS
 	default LINKR_BLE_BRIDGE_WS_BRIDGE_MAX_CLIENTS if LINKR_BLE_BRIDGE_WS_BRIDGE
 
+# HTTP/1 polling needs an eventfd, a listener and every unupgraded client.
+# Two clients need four events; keep a spare. ws_bridge.c rejects larger
+# custom service/client counts unless the poll budget is raised with them.
+config ZVFS_POLL_MAX
+	default 5 if LINKR_BLE_BRIDGE_WS_BRIDGE
+
 config WEBSOCKET_MAX_CONTEXTS
 	default LINKR_BLE_BRIDGE_WS_BRIDGE_MAX_CLIENTS if LINKR_BLE_BRIDGE_WS_BRIDGE
 

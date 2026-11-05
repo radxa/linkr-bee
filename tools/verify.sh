@@ -39,6 +39,7 @@ for board in $boards; do
   grep -qx '# CONFIG_HTTP_SERVER_VERSION_2 is not set' "$config"
   grep -qx 'CONFIG_HTTP_SERVER_WEBSOCKET=y' "$config"
   grep -qx 'CONFIG_ZVFS_EVENTFD_MAX=2' "$config"
+  grep -qx 'CONFIG_ZVFS_POLL_MAX=5' "$config"
   grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE=y' "$config"
   grep -qx 'CONFIG_LINKR_BLE_BRIDGE_UART_RX_DROP_NO_CONN=y' "$config"
   grep -qx 'CONFIG_BT_SMP=y' "$config"
