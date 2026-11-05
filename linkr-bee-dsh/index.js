@@ -1730,7 +1730,8 @@ async function saveConfig(ctx, config, body, signal) {
     readingCommands.clear();
     forgetDiscoveredName();
     linkState.transport = config.transport;
-    linkState.target = config.bleAddress || config.bleName || config.lanHost || '';
+    linkState.target = config.bleAddress || config.bleName || config.lanHost ||
+      (config.transport === 'loopback' ? 'loopback' : '');
     linkState.connected = false;
     // An open panel should follow the new settings without a reload.
     if (watchWanted) resumeStreaming(config);
@@ -2166,9 +2167,11 @@ export function apply(ctx, rawConfig) {
           const retry = args.retry === undefined ? undefined : Math.max(0, Math.round(Number(args.retry) || 0));
           if (args.dryRun) {
             // A dry run is a question to bee-cli, not a command on the target:
-            // it prints the bytes that would have gone out, and dials nothing.
+            // it prints the bytes that would have gone out and dials nothing.
+            // Asking dialArgs() first would scan for (or refuse to find) a
+            // board just to answer a question the CLI can answer offline.
             publishConsole({ type: 'cmd', text: cmd, source: 'agent' });
-            const argv = [...(await baseArgs(taskSignal(exec))), '--exec', cmd, '--dry-run'];
+            const argv = ['--json', '--exec', cmd, '--dry-run'];
             if (idleSec !== undefined) argv.push('--idle', String(idleSec));
             if (retry !== undefined) argv.push('--retry', String(retry));
             const callConfig =

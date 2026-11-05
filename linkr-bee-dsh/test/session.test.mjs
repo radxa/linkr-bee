@@ -504,6 +504,19 @@ test('the scan tool does not require a board to already connect to', async t => 
   assert.equal((await f.calls()).filter(c => c.mode === 'scan').length, 1);
 });
 
+test('a dry run answers without scanning for or dialling a board', async t => {
+  const f = await fixture(t, 'scan-empty', {transport:'ble', bleName:'', bleAddress:''});
+  const answer = await f.call('linkr_bee_exec', {cmd:'echo hi', dryRun:true});
+  assert.match(answer, /result/);
+  const calls = await f.calls();
+  assert.equal(calls.filter(c => c.mode === 'scan').length, 0,
+    'the dry run is a CLI question, not a dial');
+  const dry = calls.find(c => c.mode === 'one-shot');
+  assert.ok(dry, 'the CLI answered the dry run');
+  assert.ok(dry.args.includes('--dry-run'));
+  assert.equal(dry.args.some(a => a === '--ble-name' || a === '--ble-address' || a === '--lan-host'), false);
+});
+
 test('linkr_bee_set validates before it dials', async t => {
   const f = await fixture(t, 'ok', {transport:'ble', bleName:'Mock'});
   await assert.rejects(f.call('linkr_bee_set', {target:'uart', value:'not-a-format'}),

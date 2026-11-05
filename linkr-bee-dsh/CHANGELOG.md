@@ -34,10 +34,10 @@ continue to follow the Linkr Bee main line.
   scan tool no longer needs an existing connection first, and `transport: lan`
   without `lanHost` is refused rather than silently dialling BLE.
 - Argument validation: dry runs pass the same normalised `cmd`/`idle`/`retry`
-  values as real runs; named console keys only resolve own properties (so
-  `constructor` is not a key); `linkr_bee_set` validates the UART spec, requires
-  a value for wifi/webdav/uart/rename-ble and enforces 1-29 UTF-8 bytes for a
-  BLE name before dialling.
+  values as real runs and answer offline (no scan or dial); named console keys
+  only resolve own properties (so `constructor` is not a key); `linkr_bee_set`
+  validates the UART spec, requires a value for wifi/webdav/uart/rename-ble and
+  enforces 1-29 UTF-8 bytes for a BLE name before dialling.
 - A saved config now applies to the running plugin: the new values are used by
   `GET /config` and the next dial, and an open panel follows a connection change
   without a reload. A connection change is refused while a command is active or
