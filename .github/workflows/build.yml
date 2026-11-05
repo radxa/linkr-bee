@@ -328,6 +328,7 @@ jobs:
           grep -qx 'CONFIG_LINKR_BLE_BRIDGE_UART_RX_DROP_NO_CONN=y' "${config}"
           grep -qx 'CONFIG_WIFI=y' "${config}"
           grep -qx 'CONFIG_NETWORKING=y' "${config}"
+          grep -qx '# CONFIG_WIFI_STA_AUTO_DHCPV4 is not set' "${config}"
           grep -qx 'CONFIG_NET_TCP=y' "${config}"
           grep -qx '# CONFIG_NET_IPV6 is not set' "${config}"
           grep -qx 'CONFIG_HTTP_SERVER=y' "${config}"

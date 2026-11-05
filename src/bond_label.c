@@ -60,8 +60,7 @@ static int migrate_legacy(void)
 		if (slot[0] > 1u || slot[BT_ADDR_STR_LEN] != 0u ||
 		    len == 0u || len > LEGACY_NAME_MAX || name[len] != '\0' ||
 		    memchr(name, '\0', len) != NULL ||
-		    bt_addr_le_from_str((const char *)(slot + 1u),
-				    slot[0] == 0u ? "public" : "random", &addr)) {
+		    bt_addr_from_str((const char *)(slot + 1u), &addr.a)) {
 			return 0;
 		}
 	}
@@ -74,8 +73,8 @@ static int migrate_legacy(void)
 		char existing[CONFIG_LINKR_BLE_BRIDGE_BOND_LABEL_MAX];
 		int err;
 
-		bt_addr_le_from_str((const char *)(slot + 1u),
-				    slot[0] == 0u ? "public" : "random", &addr);
+		addr.type = slot[0];
+		bt_addr_from_str((const char *)(slot + 1u), &addr.a);
 		label_key(&addr, key, sizeof(key));
 		size = settings_load_one(key, existing, sizeof(existing));
 		if (size >= 0 || size == -ENOSPC) {

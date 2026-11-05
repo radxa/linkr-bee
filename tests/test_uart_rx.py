@@ -47,3 +47,17 @@ class UartRxTests(unittest.TestCase):
 
     def test_transient_forward_failures_preserve_the_backlog(self):
         self.assert_drained(14000, retries=3)
+
+    def test_irq_updates_status_and_accounts_for_overflow(self):
+        directory = Path(self.tmp.name)
+        main = (ROOT / "src/main.c").read_text()
+        start = main.index("static void uart_rx_irq_callback(")
+        end = main.index("\n}\n", start) + 3
+        (directory / "uart_irq_functions.inc").write_text(main[start:end])
+        binary = directory / "uart-irq-tests"
+        subprocess.run([
+            *shlex.split(os.environ.get("CC", "cc")), "-std=c11",
+            "-Wall", "-Wextra", "-Werror", "-I", str(directory),
+            str(ROOT / "tests/uart_irq_harness.c"), "-o", str(binary),
+        ], check=True)
+        subprocess.run([str(binary)], check=True, timeout=5)

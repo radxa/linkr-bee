@@ -71,8 +71,8 @@ static bool parse_address(const char *value, bt_addr_le_t *out)
 	}
 	memcpy(text, value + 2, 17u);
 	text[17] = '\0';
-	return bt_addr_le_from_str(text, value[0] == '0' ? "public" : "random",
-				   out) == 0;
+	out->type = value[0] == '0' ? BT_ADDR_LE_PUBLIC : BT_ADDR_LE_RANDOM;
+	return bt_addr_from_str(text, &out->a) == 0;
 }
 
 #if IS_ENABLED(CONFIG_SETTINGS)

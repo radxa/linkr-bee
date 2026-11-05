@@ -11,6 +11,8 @@
 #define K_MSEC(x) (x)
 #define BT_SECURITY_L2 2
 #define BT_ADDR_STR_LEN 18
+#define BT_ADDR_LE_PUBLIC 0
+#define BT_ADDR_LE_RANDOM 1
 #define snprintk snprintf
 #define CONFIG_LINKR_BLE_BRIDGE_BOND_LABEL_MAX 48
 #define CONFIG_SETTINGS 1
@@ -36,7 +38,7 @@ static const bt_addr_le_t *bt_conn_get_dst(struct bt_conn*c){(void)c;return &sel
 static bool bt_addr_le_eq(const bt_addr_le_t*a,const bt_addr_le_t*b){return a->type==b->type&&!strcmp(a->a.text,b->a.text);}
 static void bt_addr_le_copy(bt_addr_le_t*a,const bt_addr_le_t*b){*a=*b;}
 static int bt_addr_to_str(const bt_addr_t*a,char*b,size_t n){return snprintf(b,n,"%s",a->text);}
-static int bt_addr_le_from_str(const char*s,const char*t,bt_addr_le_t*a){if(strcmp(s,self.a.text))return -EINVAL;a->type=!strcmp(t,"random");snprintf(a->a.text,18,"%s",s);return 0;}
+static int bt_addr_from_str(const char*s,bt_addr_t*a){if(strcmp(s,self.a.text))return -EINVAL;snprintf(a->text,18,"%s",s);return 0;}
 static bool bt_le_bond_exists(uint8_t id,const bt_addr_le_t*a){assert(id==0);return exists&&bt_addr_le_eq(a,&self);}
 static int bt_unpair(uint8_t id,const bt_addr_le_t*a){assert(id==0&&bt_addr_le_eq(a,&self));exists=false;removals++;return 0;}
 static void bt_foreach_bond(uint8_t id,void(*cb)(const struct bt_bond_info*,void*),void*data){assert(id==0);if(exists){struct bt_bond_info b={self};cb(&b,data);}}

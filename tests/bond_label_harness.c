@@ -16,6 +16,8 @@ typedef long ssize_t;
 #define K_MSEC(x) (x)
 #define BT_SECURITY_L2 2
 #define BT_ADDR_STR_LEN 18
+#define BT_ADDR_LE_PUBLIC 0
+#define BT_ADDR_LE_RANDOM 1
 #define CONFIG_LINKR_BLE_BRIDGE_BOND_LABEL_MAX 48
 #define CONFIG_SETTINGS 1
 #define IS_ENABLED(x) ((x) != 0)
@@ -74,11 +76,10 @@ static int bt_addr_to_str(const bt_addr_t *a, char *b, size_t n)
 {
 	return snprintf(b, n, "%s", a->text);
 }
-static int bt_addr_le_from_str(const char *s, const char *t, bt_addr_le_t *out)
+static int bt_addr_from_str(const char *s, bt_addr_t *out)
 {
-	if (parse_mac(s, out->a.val) != 0) return -EINVAL;
-	out->type = !strcmp(t, "random");
-	snprintf(out->a.text, sizeof(out->a.text), "%s", s);
+	if (parse_mac(s, out->val) != 0) return -EINVAL;
+	snprintf(out->text, sizeof(out->text), "%s", s);
 	return 0;
 }
 
@@ -184,7 +185,8 @@ static void test_legacy_migration(void)
 	char label[64];
 	bt_addr_le_t other;
 
-	assert(bt_addr_le_from_str("AA:BB:CC:DD:EE:02", "random", &other) == 0);
+	other.type = BT_ADDR_LE_RANDOM;
+	assert(bt_addr_from_str("AA:BB:CC:DD:EE:02", &other.a) == 0);
 	seed_legacy();
 	assert(linkr_bond_label_get(&self, label, sizeof(label)) == 11);
 	assert(!strcmp(label, "Custom Host"));

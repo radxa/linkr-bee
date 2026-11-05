@@ -27,19 +27,23 @@ LOG_MODULE_DECLARE(linkr_ble_bridge, LOG_LEVEL_INF);
 /* ---------------------------------------------------------------------- */
 
 static struct linkr_rgb led_base;
-static struct linkr_rgb led_activity_color = {
+static const struct linkr_rgb led_activity_color = {
 	.r = (CONFIG_LINKR_BLE_BRIDGE_RGB_ACTIVITY_COLOR >> 16) & 0xff,
 	.g = (CONFIG_LINKR_BLE_BRIDGE_RGB_ACTIVITY_COLOR >> 8) & 0xff,
 	.b = CONFIG_LINKR_BLE_BRIDGE_RGB_ACTIVITY_COLOR & 0xff,
 };
 static bool led_ready;
 static bool led_activity_active;
+static int64_t led_activity_deadline;
+static struct k_spinlock led_lock;
 static struct k_work_delayable led_apply_work;
 static struct k_work_delayable led_activity_end_work;
 
 static void led_apply(struct k_work *work)
 {
+	k_spinlock_key_t key = k_spin_lock(&led_lock);
 	struct linkr_rgb color = led_activity_active ? led_activity_color : led_base;
+	k_spin_unlock(&led_lock, key);
 
 	ARG_UNUSED(work);
 	(void)linkr_ws2812_write(&color, 1);
@@ -48,8 +52,17 @@ static void led_apply(struct k_work *work)
 static void led_activity_end(struct k_work *work)
 {
 	ARG_UNUSED(work);
-	led_activity_active = false;
-	(void)k_work_reschedule(&led_apply_work, K_NO_WAIT);
+	k_spinlock_key_t key = k_spin_lock(&led_lock);
+	int64_t remaining = led_activity_deadline - k_uptime_get();
+	if (remaining <= 0) {
+		led_activity_active = false;
+	}
+	k_spin_unlock(&led_lock, key);
+	if (remaining > 0) {
+		(void)k_work_reschedule(&led_activity_end_work, K_MSEC(remaining));
+	} else {
+		(void)k_work_reschedule(&led_apply_work, K_NO_WAIT);
+	}
 }
 
 bool linkr_status_led_available(void)
@@ -79,9 +92,19 @@ void linkr_status_led_activity(void)
 		return;
 	}
 
+	k_spinlock_key_t key = k_spin_lock(&led_lock);
+	bool start = !led_activity_active;
 	led_activity_active = true;
-	(void)k_work_reschedule(&led_apply_work, K_NO_WAIT);
-	(void)k_work_reschedule(&led_activity_end_work, K_MSEC(LINKR_ACTIVITY_MS));
+	led_activity_deadline = k_uptime_get() + LINKR_ACTIVITY_MS;
+	k_spin_unlock(&led_lock, key);
+
+	/* UART RX can call this thousands of times per second. While the flash
+	 * is already visible, only extend its deadline: repeated RGB writes
+	 * otherwise spend 300 us latching the same frame on the system workqueue. */
+	if (start) {
+		(void)k_work_reschedule(&led_apply_work, K_NO_WAIT);
+		(void)k_work_reschedule(&led_activity_end_work, K_MSEC(LINKR_ACTIVITY_MS));
+	}
 }
 
 int linkr_status_led_set_rgb(uint8_t r, uint8_t g, uint8_t b)
@@ -90,7 +113,9 @@ int linkr_status_led_set_rgb(uint8_t r, uint8_t g, uint8_t b)
 		return -ENODEV;
 	}
 
+	k_spinlock_key_t key = k_spin_lock(&led_lock);
 	led_base = (struct linkr_rgb){.r = r, .g = g, .b = b};
+	k_spin_unlock(&led_lock, key);
 	(void)k_work_reschedule(&led_apply_work, K_NO_WAIT);
 	return 0;
 }
@@ -102,14 +127,17 @@ void linkr_status_led_off(void)
 
 void linkr_status_led_get_rgb(uint8_t *r, uint8_t *g, uint8_t *b)
 {
+	k_spinlock_key_t key = k_spin_lock(&led_lock);
+	struct linkr_rgb color = led_base;
+	k_spin_unlock(&led_lock, key);
 	if (r != NULL) {
-		*r = led_base.r;
+		*r = color.r;
 	}
 	if (g != NULL) {
-		*g = led_base.g;
+		*g = color.g;
 	}
 	if (b != NULL) {
-		*b = led_base.b;
+		*b = color.b;
 	}
 }
 
@@ -122,7 +150,9 @@ void linkr_status_led_blink(int count, int delay_ms)
 	for (int i = 0; i < count; i++) {
 		(void)linkr_ws2812_write(&led_activity_color, 1);
 		k_sleep(K_MSEC(delay_ms));
-		(void)linkr_ws2812_write(&led_base, 1);
+		struct linkr_rgb color;
+		linkr_status_led_get_rgb(&color.r, &color.g, &color.b);
+		(void)linkr_ws2812_write(&color, 1);
 		k_sleep(K_MSEC(delay_ms));
 	}
 }

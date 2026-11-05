@@ -923,7 +923,8 @@ void linkr_ws_feed(const uint8_t *data, size_t len)
 		if (ring_buf_space_get(&client->tx_ring) < keep) {
 			uint32_t oldest = keep - ring_buf_space_get(&client->tx_ring);
 
-			discarded += ring_buf_get(&client->tx_ring, NULL, oldest);
+			ring_buf_consume(&client->tx_ring, oldest);
+			discarded += oldest;
 		}
 		written = ring_buf_put(&client->tx_ring, src, keep);
 		atomic_add(&client->tx_dropped, discarded + keep - written);

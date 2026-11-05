@@ -57,7 +57,7 @@ python3 -m pip install --user west
 # 1. 只建一次 west workspace；manifest 把应用仓库放在 `linkr-bee` 子目录
 mkdir linkr-workspace && cd linkr-workspace
 west init -m https://github.com/radxa/linkr-bee.git --mr main
-west update            # Zephyr v4.4.1、hal_espressif、mbedtls、tf-psa-crypto、hostap
+west update            # Zephyr v4.5.0、hal_espressif、mbedtls、tf-psa-crypto、hostap
 python3 -m pip install -r zephyr/scripts/requirements.txt
 
 # 2. 安装 Zephyr SDK 1.0.1：RISC-V 与 Xtensa 两套工具链
@@ -78,12 +78,14 @@ python3 tools/linkr_ble_terminal.py
 tools/serve_web.sh  # 打开 http://127.0.0.1:8765/
 ```
 
-> **注意**：需要 Zephyr v4.4.1 west workspace，且 manifest 中包含 Espressif HAL blobs。详见[构建](#构建)章节。
+> **注意**：需要 Zephyr v4.5.0 west workspace，且 manifest 中包含 Espressif HAL blobs。详见[构建](#构建)章节。
 
 ## 支持环境
 
 - 固件目标：ESP32-C3 DevKitM、DevKitC、Super Mini 与 ESP32-C5 DevKitC
-- Zephyr：**v4.4.1**
+- Zephyr：**v4.5.0**
+- Zephyr SDK：**1.0.1**（工具链单独编号，4.5.0 是 RTOS 版本）
+- 构建主机：Python **3.12+**、CMake **3.28+**
 - 同一份固件源码包含：BLE UART bridge、WiFi station 控制、匿名 HTTP WebDAV
   日志上传与 UART-over-WebSocket 局域网访问。WebDAV 在默认 C3/C5 构建中开启；
   ESP32-WROOM 因 DRAM 不足关闭（`CONFIG_LINKR_BLE_BRIDGE_WEBDAV=n`），主机端仍保留
@@ -91,7 +93,54 @@ tools/serve_web.sh  # 打开 http://127.0.0.1:8765/
 
 ## 构建
 
-请使用 Zephyr v4.4.1 的 west workspace。默认的 WiFi 构建还要求 west manifest
+### 更新已有工作区
+
+更新本应用后，在 west 工作区根目录执行：
+
+```sh
+west update
+python3 -m pip install -r zephyr/scripts/requirements.txt
+west blobs fetch hal_espressif
+west build -p always -b linkr_bee_x1_0 linkr-bee
+```
+
+其他硬件请选用下文对应的板型。从 4.4.1 升级时用 `-p always` 重建构建目录；
+Zephyr 4.5.0 仍使用 SDK 1.0.1。本次迁移将手动 DHCP 控制改为
+`CONFIG_WIFI_STA_AUTO_DHCPV4=n`，在 HCI 驱动公共数据中安装加密事件排序回调，
+并用 `ring_buf_consume()` 丢弃 WebSocket 队列旧数据。Bee X1.0 板级定义改为
+选择通用 ESP32-C3 SoC，并显式声明 4 MB flash。
+
+Zephyr 4.5 的射频与网络代码占用更多 SRAM。默认配置保留原有服务与客户端数量，
+通过缩小有界队列适配：
+
+| 目标 | 4.5 内存预算 |
+| --- | --- |
+| C3 / Bee X1.0 | WiFi 动态 RX/TX 各 8 个、WiFi 堆预留 40 KiB、每个 BLE peer 8 块、延迟日志 4 KiB、HTTP/系统/连接线程栈各 4 KiB |
+| C5 | WiFi 动态 RX/TX 各 6 个、WiFi 堆预留 36 KiB、Bluetooth 堆预留 44000 B、12 个 MSYS-2 块、8 个 255 B 控制器 ACL 缓冲、网络缓冲各 20 个、包描述符各 10 个 |
+| WROOM | 保持 52000 B 系统堆，UART 接收 4 KiB、每个 BLE peer 4 块、LAN 环形缓冲 1 KiB、HTTP 栈 4 KiB、LAN 客户端栈 3 KiB |
+
+Bee X1.0 另外将主线程栈设为 2 KiB、日志线程栈设为 1 KiB。Zephyr 4.5 诊断镜像在
+空闲、BLE 管理与数据收发、WiFi 扫描及 1500000 波特率 UART 回环中，分别测得
+1092 B 和 732 B 的栈峰值。板级定义启用 `trng0`，使用硬件熵源；计入活动灯状态开销后，
+正式镜像的 libc 可用堆区从 13536 B 增至 15472 B。其他板型保留现有栈预算。
+
+RGB 活动灯只在流量开始时和停止 40 ms 后各更新一帧。UART 每次收到数据只延长截止时间，
+不再重复写入同一颜色或提交工作，避免 WS2812 驱动的 300 微秒锁存等待反复占用系统
+工作队列。Bee X1.0 使用相同的 60 秒板端 FIFO 回环发压器，吞吐从 89278 B/s 提升到
+150034 B/s，9002240 字节全部接收，零误码、零 RX 环形缓冲丢失。名义
+1500000、8N1 配置的分频回读为 1500586 波特率；这是同板 TX/RX 回环，未使用外部仪器
+测量位时钟。发压器仅用于诊断，正式 C3 TX 仍使用 `uart_poll_out()`。
+
+Bee X1.0 保留 16 KiB UART 环形缓冲和每个 BLE peer 八块队列。持续 UART 输入可能超过
+主机 BLE 的接收速度：另一组不限速测试中，UART RX 校验正常，但 BLE 输出丢弃了
+9664576 字节。增大缓冲只能吸收突发，持续无损传输需要上游节流、流控或吞吐足够的传输链路。
+
+C5 保持已有实测线程栈预算，WiFi 堆与网络缓冲仍在内部 SRAM，仅应用数据使用 PSRAM。
+可选 WiFi IRAM 速度优化关闭，HAL 早期日志保留告警与错误；自定义增大射频池后会回退到
+上游堆预留值。较小的队列降低了突发承载能力，发布前需真机复测配对、扫描/连接、两个
+BLE peer、LAN 转发、WebDAV 上传、栈水位与丢包计数。
+
+请使用 Zephyr v4.5.0 的 west workspace。默认的 WiFi 构建还要求 west manifest
 内存在 Espressif HAL blobs（`modules/hal_espressif`）。
 
 刚克隆的仓库只是 workspace 的应用部分。先在 workspace 根目录完成一次性准备：
@@ -100,7 +149,7 @@ tools/serve_web.sh  # 打开 http://127.0.0.1:8765/
 python3 -m pip install --user west
 mkdir linkr-workspace && cd linkr-workspace
 west init -m https://github.com/radxa/linkr-bee.git --mr main
-west update            # Zephyr v4.4.1、hal_espressif、mbedtls、tf-psa-crypto、hostap
+west update            # Zephyr v4.5.0、hal_espressif、mbedtls、tf-psa-crypto、hostap
 west zephyr-export
 python3 -m pip install -r zephyr/scripts/requirements.txt
 
@@ -164,7 +213,7 @@ west build -b linkr_bee_x1_0 .
 `esp32c3_supermini`、`esp32c3_devkitm`、`esp32c3_devkitc`、`linkr_bee_x1_0`、
 `esp32c5_devkitc/esp32c5/hpcore` 与 `esp32_devkitc/esp32/procpu`
 （ESP32-WROOM-32）。它会在 `main` push、pull request 和手动触发时运行，
-使用 Zephyr v4.4.1 与 Zephyr SDK 1.0.1；每个 job 只安装该板需要的工具链
+使用 Zephyr v4.5.0 与 Zephyr SDK 1.0.1；每个 job 只安装该板需要的工具链
 （RISC-V 目标用 `riscv64-zephyr-elf`，WROOM 用
 `xtensa-espressif_esp32_zephyr-elf`），不拉取完整 CI 镜像。
 
@@ -552,7 +601,7 @@ ERR format: @u=115200,8,n,1,n
 rel 分组分别提供 UART 发送队列丢弃、BLE 输出队列丢弃和 BLE indication 耗时：
 
 ```text
-@info fw version=0.1.2 zephyr=4.4.1
+@info fw version=0.1.2 zephyr=4.5.0
 @info sys uptime_ms=123456 owner=0 security=1
 @info uart dropped=0 dropped_no_conn=0 buffer=0/16384
 @info wifi state=connected ip=ready error=0
@@ -731,7 +780,7 @@ coredump 扇区。
 ├─────────────────────────────────────────────────────────────┤
 │                    BLE GATT (ATT MTU 247)                    │
 ├─────────────────────────────────────────────────────────────┤
-│             ESP32-C3/C5 固件 (Zephyr v4.4.1)                 │
+│             ESP32-C3/C5 固件 (Zephyr v4.5.0)                 │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐ │
 │  │  BLE 协议栈  │  │  UART 桥接  │  │  WiFi/WebSocket     │ │
 │  └─────────────┘  └─────────────┘  └─────────────────────┘ │
@@ -1171,7 +1220,7 @@ BLE 身份、名称与配对记录保持不变。C5 在 60 秒任务通道触发
 因此该任务看门狗路径仍由上面的 C3 一轮覆盖。测试后已刷回正式镜像，稳定运行
 75 秒未再复位。WROOM 的复位行为仍需实机验证。
 
-simple-boot 镜像现已补齐 ROM 可见部分的 SHA-256 摘要。Zephyr v4.4.1 的
+simple-boot 镜像现已补齐 ROM 可见部分的 SHA-256 摘要。Zephyr v4.5.0 的
 `elf2image --ram-only-header` 输出没有这份摘要；项目构建模块会利用现有零填充
 补齐摘要，并让启动代码正确跳过摘要后继续扫描 Flash 段。文件大小和隐藏 Flash
 段的地址保持不变。构建时只复制并修正构建目录中的启动代码，不修改外部 Zephyr
@@ -1183,16 +1232,21 @@ simple-boot 镜像现已补齐 ROM 可见部分的 SHA-256 摘要。Zephyr v4.4.
 [ESP 镜像格式](https://docs.espressif.com/projects/esptool/en/latest/esp32c3/advanced-topics/firmware-image-format.html)，
 这份摘要覆盖 ROM 可见的 RAM 镜像，不包括隐藏的 Flash 映射段；整个文件仍由
 发布包 `SHA256SUMS` 和刷写回读检查。不能单独处理缺少配套启动代码的旧镜像。
-C3、C5 已验证启动和故障恢复时无此告警；其他支持板型目前仅完成构建及镜像格式验证。
+此前 C3、C5 的启动与故障恢复验收使用 4.4.1。Bee X1.0 此后已完成上述 4.5 启动、
+BLE 回环、WiFi 扫描和 UART 线速接收测试；其他板型，以及 WiFi 联网、LAN 和上传负载，
+仍需对新内存预算做真机验收。
 
 ## 验证状态
 
 各层次实际验证到什么程度。构建成功、主机测试通过或模拟器启动，都不等于目标硬件上
 的端到端验收。
 
+4.5 迁移已渲染板载与关于页面：338、390、834、1440 px，中英文与浅深双主题。
+关于页面正确显示 4.5.0，未见横向溢出；截图位于 `build-demo/ui-review/`。
+
 | 层次 | 本仓库已验证 | 仍需硬件验证 |
 | --- | --- | --- |
-| 固件构建 | `esp32c3_supermini`、`esp32c3_devkitm`、`esp32c3_devkitc`、`linkr_bee_x1_0` 与 `esp32c5_devkitc/esp32c5/hpcore` 在 CI 中以 Zephyr v4.4.1 构建，并断言各代控制器的安全符号 | — |
+| 固件构建 | 六个目标（含 `esp32_devkitc/esp32/procpu`）均通过 Zephyr v4.5.0 本地构建及控制器安全、PSRAM 段与 ROM 摘要检查；Bee X1.0 另通过启动、BLE 二进制回环、WiFi 扫描和 60 秒 UART 线速接收及栈水位检查 | 其他板型的 4.5 运行验收、WiFi 联网/LAN/上传，以及发布后对应提交的远程 CI |
 | 协议主机测试 | `tests/` 编译并驱动生产代码中的管理协议、安全配对门禁、目标绑定、WebDAV 与 HCI 顺序逻辑，含 C3/C5 构建约束 | 真实 SMP 配对、NVS 持久化、射频行为 |
 | BLE 终端 | Web、Python、C 三套客户端，以及浏览器回归套件覆盖 Reliable UART 序号、重组与会话边界 | 各平台的配对、MTU 协商与重连行为 |
 | WiFi、局域网桥、WebDAV | 主机测试与浏览器套件；WS 令牌握手两侧均有覆盖 | 关联过程、BLE/WiFi 共存、真实端点上传 |

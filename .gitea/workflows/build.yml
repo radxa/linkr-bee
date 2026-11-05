@@ -5,8 +5,9 @@ name: Build (Gitea / self-hosted container)
 #   - 沿用同一套 board 矩阵与 Kconfig 特性断言
 #   - 区别在运行环境:这里用自建的 Ubuntu 容器镜像
 #     (localhost/zephyr-build:4.4.1-ubuntu)
-#   - 该镜像已预置 zephyr v4.4.1 + allowlist 模块 + SDK 1.0.1
-#     + espressif blobs + esptool,故不再需要:
+#   - 该镜像提供 SDK 1.0.1、Python 和 esptool 作为构建工具。
+#     Zephyr、allowlist 模块与 blobs 必须按当前 app/west.yml 重新准备，
+#     不能使用镜像中预置的 v4.4.1 源码。故不再需要:
 #       apt-get install / actions/setup-python / action-zephyr-setup
 #   - 若日后想让 workflow 自己装环境(走原版逻辑),
 #     把 runs-on 换成 host-build 并加回上述步骤即可。
@@ -78,6 +79,20 @@ jobs:
         with:
           path: app
 
+      - name: Set up the pinned Zephyr workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Start outside the image's workspace so west init cannot select it.
+          unset ZEPHYR_BASE
+          cd /tmp
+          west init -l "${GITHUB_WORKSPACE}/app"
+          cd "${GITHUB_WORKSPACE}"
+          west update --narrow -o=--depth=1
+          python3 -m pip install -r zephyr/scripts/requirements.txt
+          west blobs fetch hal_espressif
+          echo "ZEPHYR_BASE=${GITHUB_WORKSPACE}/zephyr" >> "${GITHUB_ENV}"
+
       - name: Build firmware
         shell: bash
         run: |
@@ -101,6 +116,7 @@ jobs:
           grep -qx 'CONFIG_LINKR_BLE_BRIDGE_UART_RX_DROP_NO_CONN=y' "${config}"
           grep -qx 'CONFIG_WIFI=y' "${config}"
           grep -qx 'CONFIG_NETWORKING=y' "${config}"
+          grep -qx '# CONFIG_WIFI_STA_AUTO_DHCPV4 is not set' "${config}"
           grep -qx 'CONFIG_NET_TCP=y' "${config}"
           grep -qx '# CONFIG_NET_IPV6 is not set' "${config}"
           grep -qx 'CONFIG_HTTP_SERVER=y' "${config}"

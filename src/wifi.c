@@ -1976,7 +1976,7 @@ int linkr_wifi_init(void)
                        K_THREAD_STACK_SIZEOF(scan_wq_stack),
                        K_PRIO_PREEMPT(SCAN_WQ_PRIO), NULL);
     if (IS_ENABLED(CONFIG_THREAD_NAME)) {
-        (void)k_thread_name_set(&scan_wq.thread, "scan_watchdog");
+        (void)k_thread_name_set(k_work_queue_thread_get(&scan_wq), "scan_watchdog");
     }
 #endif
     atomic_set(&wifi_state, LINKR_WIFI_STATE_OFF);

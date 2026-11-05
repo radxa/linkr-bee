@@ -802,7 +802,11 @@ static void uart_rx_irq_callback(const struct device *dev, void *user_data)
 
 	ARG_UNUSED(user_data);
 
-	while (uart_irq_update(dev) && uart_irq_rx_ready(dev)) {
+	while (true) {
+		uart_irq_update(dev);
+		if (!uart_irq_rx_ready(dev)) {
+			break;
+		}
 		int rx_len = uart_fifo_read(dev, buf, sizeof(buf));
 
 		if (rx_len <= 0) {

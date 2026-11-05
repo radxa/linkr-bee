@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.20.0)
+cmake_minimum_required(VERSION 3.28.0)
 
 # The Linkr Bee X1.0 board definition lives in boards/radxa/linkr_bee_x1_0, so
 # the application root has to be searched as a board root for

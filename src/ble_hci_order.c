@@ -62,7 +62,11 @@ static int ordered_receive(const struct device *dev, struct net_buf *buf)
 			size_t count = pending_count;
 			pending_count = 0;
 			pending_handle = UINT16_MAX;
-			for (size_t i = 0; i < count; i++) host_receive(dev, pending[i]);
+			for (size_t i = 0; i < count; i++) {
+				/* The HCI caller retains ownership on callback error.
+				 * These retained packets bypass bt_hci_recv()'s cleanup. */
+				if (host_receive(dev, pending[i])) net_buf_unref(pending[i]);
+			}
 		} else clear_pending();
 	}
 	return result;

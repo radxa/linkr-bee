@@ -38,15 +38,15 @@ const VENDORED_WEB = [
  * Versions other than Zephyr's own are the ones that manifest pins, and the
  * allowlist says so. */
 const FIRMWARE = [
-  { name: "Zephyr RTOS", version: "4.4.1", license: "Apache-2.0",
+  { name: "Zephyr RTOS", version: "4.5.0", license: "Apache-2.0",
     url: "https://github.com/zephyrproject-rtos/zephyr" },
-  { name: "HAL for Espressif SoCs", version: "pinned by Zephyr 4.4.1", license: "Apache-2.0",
+  { name: "HAL for Espressif SoCs", version: "pinned by Zephyr 4.5.0", license: "Apache-2.0",
     url: "https://github.com/zephyrproject-rtos/hal_espressif" },
-  { name: "Mbed TLS", version: "pinned by Zephyr 4.4.1", license: "Apache-2.0",
+  { name: "Mbed TLS", version: "pinned by Zephyr 4.5.0", license: "Apache-2.0",
     url: "https://github.com/zephyrproject-rtos/mbedtls" },
-  { name: "TF-PSA-Crypto", version: "pinned by Zephyr 4.4.1", license: "Apache-2.0",
+  { name: "TF-PSA-Crypto", version: "pinned by Zephyr 4.5.0", license: "Apache-2.0",
     url: "https://github.com/zephyrproject-rtos/tf-psa-crypto" },
-  { name: "hostap", version: "pinned by Zephyr 4.4.1", license: "BSD-3-Clause",
+  { name: "hostap", version: "pinned by Zephyr 4.5.0", license: "BSD-3-Clause",
     url: "https://github.com/zephyrproject-rtos/hostap" },
 ];
 

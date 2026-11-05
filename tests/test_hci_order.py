@@ -32,8 +32,9 @@ static uint16_t sys_get_le16(const uint8_t *p) { return p[0] | (p[1] << 8); }
 static void net_buf_unref(struct net_buf *b) { assert(!b->freed); b->freed=1; }
 static struct net_buf *seen[32];
 static size_t seen_count;
+static struct net_buf *reject;
 static int receive(const struct device *d, struct net_buf *b) {
- (void)d; seen[seen_count++]=b; return 0;
+ (void)d; seen[seen_count++]=b; return b == reject ? -1 : 0;
 }
 ''' + source + '''
 int main(void) {
@@ -70,6 +71,18 @@ int main(void) {
  e[3]=0; e[4]=2; rx(0,&enc); assert(pending_count==4);
  rx(0,&disc); assert(pending_count==0);
  for(int i=0;i<5;i++) assert(acl[i].freed);
+ // A host callback error releases a retained ACL packet exactly once.
+ acl[0].freed=0; e[4]=1; reject=&acl[0];
+ rx(0,&ltk); rx(0,&acl[0]); rx(0,&enc);
+ assert(acl[0].freed && pending_count==0);
+ // Rejected encryption events discard the whole quarantine.
+ acl[0].freed=0; reject=&enc;
+ rx(0,&ltk); rx(0,&acl[0]); assert(rx(0,&enc)==-1);
+ assert(acl[0].freed && pending_count==0);
+ // Reopening the HCI transport cannot replay packets from its previous use.
+ reject=0; acl[0].freed=0;
+ rx(0,&ltk); rx(0,&acl[0]); rx=linkr_hci_order_init(receive);
+ assert(acl[0].freed && pending_count==0 && pending_handle==UINT16_MAX);
  return 0;
 }
 ''')

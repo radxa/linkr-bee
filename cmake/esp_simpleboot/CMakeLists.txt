@@ -8,7 +8,7 @@ get_filename_component(linkr_root "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
 set(formatter "${linkr_root}/tools/esp_simpleboot_image.py")
 set(loader "${ZEPHYR_BASE}/soc/espressif/common/loader.c")
 file(READ "${loader}" loader_source)
-# v4.4.1 skips the RAM checksum but assumes no digest precedes the hidden
+# v4.5.0 skips the RAM checksum but assumes no digest precedes the hidden
 # segments. Fail closed if upstream changes that traversal.
 set(needle "\t\t\toffset += (CHECKSUM_ALIGN - 1) - (offset % CHECKSUM_ALIGN) + 1;\n\t\t\tchecksum = true;")
 string(FIND "${loader_source}" "${needle}" location)
