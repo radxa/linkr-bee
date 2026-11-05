@@ -14096,14 +14096,17 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The Host's own notices about the link ("（与开发板的连接已断开，正在重连…）").
-     * They are a state, not console output: the panel turns them into the one
-     * compact banner above the terminal instead of printing the sentence too.
+     * The Host's own notices about the link ("(link to the board lost;
+     * reconnecting...)" / "（与开发板的连接已断开，正在重连…）"). They are a
+     * state, not console output: the panel turns them into the one compact
+     * banner above the terminal instead of printing the sentence too. Both
+     * languages are matched because the Host's copy is English while an older
+     * Host build may still emit Chinese.
      */
     function linkNotice(text) {
       const line = String(text);
-      if (/正在重连/.test(line)) return 'reconnecting';
-      if (/连接已断开|自动重连已放弃/.test(line)) return 'lost';
+      if (/正在重连|reconnecting\.\.\./i.test(line)) return 'reconnecting';
+      if (/连接已断开|自动重连已放弃|link to the board lost|auto-reconnect gave up/i.test(line)) return 'lost';
       return '';
     }
 
