@@ -30,11 +30,11 @@
 - Diagnostics: the terminal reports, once per mount, the element chain that
   receives a pointerdown when it is not the xterm screen — evidence for a
   pane overlay that swallows drag selection in some environments.
-- Clear leaves an empty screen: xterm's `clear()` only empties the scrollback
-  and keeps the current shell prompt line, so the panel's Clear (and the
-  agent's `clear`) left text visible. `clearScreen()` now uses `reset()` —
-  options such as theme and font are preserved — which also drops the current
-  line. The console/panel clear sequences still share one ordered cutoff.
+- Clear erases the active screen, prompt and scrollback through xterm's write
+  queue, preserving the target's negotiated modes and current buffer. Queued
+  old output cannot repaint the cleared screen, and incomplete control strings
+  cannot swallow the clear. Explicit Host resets still restore default modes,
+  ordered after old output. Console/panel clears share one ordered cutoff.
 - Reading filter hardened on a real board: at narrow terminal widths the
   exec wrapper echo is wrapped by readline (`LINKR_ \rRC_...`), which the
   line-based matcher missed. Echo matching now normalises ANSI, CR and the

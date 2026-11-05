@@ -13181,14 +13181,19 @@ window.__ModuleLoader__.load({
         },
         clear() {
           try {
-            terminal.clear();
+            // Cancel a partial control string, then erase the active screen
+            // and scrollback without changing modes negotiated by the target.
+            // Queue this after older writes so they cannot repaint the clear.
+            terminal.write('\x18\x1b[2J\x1b[3J\x1b[H');
+            terminal.clearSelection();
           } catch {
             /* already gone */
           }
         },
         reset() {
           try {
-            terminal.reset();
+            // A new Host needs default modes, ordered after old Host output.
+            terminal.write('\x18\x1bc');
           } catch {
             /* already gone */
           }
@@ -14227,11 +14232,8 @@ window.__ModuleLoader__.load({
       /** Empty the screen: the panel's clear button and the agent's "clear". */
       const clearScreen = useCallback(({ reset = false } = {}) => {
         try {
-          // xterm's clear() only empties the scrollback: the current line (the
-          // shell prompt) stays on screen. A panel clear is expected to leave
-          // an empty screen, so use reset(), which also drops that line while
-          // keeping options (theme, font) intact.
-          if (termApi.current !== null) termApi.current.reset();
+          if (reset) termApi.current?.reset();
+          else termApi.current?.clear();
         } catch {
           /* a terminal that never started has nothing to clear */
         }
