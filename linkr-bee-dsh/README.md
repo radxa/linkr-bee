@@ -79,12 +79,12 @@ The panel's ⚙ writes these fields; they can also be set by hand in the profile
 | Field | Meaning |
 | --- | --- |
 | `transport` | `ble` (a nearby board over Bluetooth), `lan` (the bridge's WebSocket), or `loopback` (offline simulator, no hardware) |
-| `bleName` | name fragment to dial; empty = the plugin scans once, then dials the one board it finds **by name** (macOS hides real MACs, so address redials do not connect) |
+| `bleName` | name fragment to dial; empty = the plugin scans, then dials the board it finds **by name** (macOS hides real MACs, so address redials do not connect). The name is remembered for five minutes and forgotten after a failed dial, so a renamed or swapped board is found again instead of being dialled forever |
 | `bleAddress` | board MAC, e.g. `EE:C7:42:34:48:CF`; empty = discover by name |
-| `lanHost` / `lanToken` | bridge WebSocket address (`host`, `host:port` or `ws://…`) and its 32-hex token, sent through `LINKR_LAN_TOKEN` |
-| `cliPath` | `bee-cli` binary; empty = auto-detect as described above |
+| `lanHost` / `lanToken` | bridge WebSocket address (`host`, `host:port` or `ws://…`) and its 32-hex token, sent through `LINKR_LAN_TOKEN`. Required when `transport` is `lan`: without it the plugin refuses the call instead of silently falling back to BLE |
+| `cliPath` | `bee-cli` binary (on Windows a real `.exe`, not the npm `.cmd` shim); empty = auto-detect as described above |
 | `timeoutMs` | per-call budget for one `bee-cli` request (default 30000) |
-| `sendCaptureMs` | how long `linkr_bee_send` keeps the link open to capture the reply (default 1500) |
+| `sendCaptureMs` | how long `linkr_bee_send` keeps the link open after the line has been delivered, to capture the reply (default 1500) |
 
 Bridge notes from the firmware: management queries and settings are
 Bluetooth-only; a LAN link carries serial bytes only; a board accepts two
@@ -92,6 +92,14 @@ concurrent WebSocket clients and one Bluetooth connection.
 
 ## Behaviour worth knowing
 
+- **Settings writes commit in order.** Commands wait for pending settings
+  writes before preparing connection arguments and retain that target until
+  they finish. A connection change is refused while work is active or queued;
+  later partial settings edits preserve values committed by earlier edits.
+- **Captured answers have limits.** One-shot and resident JSON event capture
+  retains at most 1 MiB and 4096 frames. Truncated answers are labelled, and
+  final result/error frames take precedence over older output. Diagnostic
+  stdout/stderr tails are separately bounded; live console output continues.
 - **The panel holds the Bluetooth link while it is open.** Close the panel (or
   switch the tab away) to release it for your phone app or another tool.
 - **Two views of one console.** `GET /linkr-bee/console/read?view=reading|raw` and the SSE `snapshot`/`stream` records both carry the reading-filtered text alongside the raw bytes; the panel's Reading/Raw switch picks one. The filter is display-only and fail-open: it recognises only the `sh -c … LINKR_RC_<nonce>` wrapper this plugin's own exec path emits, and passes through anything it cannot classify so device output is never lost.
