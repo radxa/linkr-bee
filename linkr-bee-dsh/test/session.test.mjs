@@ -25,7 +25,7 @@ if (args.includes('--scan')) {
     fs.writeFileSync(__dirname+'/attempted','1');
     process.exit(1);
   }
-  const ready = () => emit({event:'ready',ops:(config.scenario==='old-cli'||config.scenario==='send-window')?['exec']:config.scenario==='monitor'?['exec','monitor']:['exec','watch','send','resize']});
+  const ready = () => emit({event:'ready',ops:(config.scenario==='old-cli'||config.scenario==='send-window'||config.scenario==='large-output')?['exec']:config.scenario==='monitor'?['exec','monitor']:['exec','watch','send','resize']});
   if(config.scenario==='slow-start'||config.scenario==='slow-capture')setTimeout(ready,250);else ready();
   readline.createInterface({input:process.stdin}).on('line', line => {
     const request = JSON.parse(line);
@@ -41,6 +41,15 @@ if (args.includes('--scan')) {
     if(config.scenario==='lost-exec'&&request.op==='exec'){
       emit({event:'output',id:request.id,data:'SIDE_EFFECT_DONE\n'});
       emit({event:'error',id:request.id,code:'link_lost',message:'the link went away mid-command',still_running:false});
+      emit({event:'end',id:request.id,code:255});
+      return;
+    }
+    if(config.scenario==='large-resident-output'&&request.op==='exec') {
+      for(let i=0;i<80;i++) emit({event:'output',id:request.id,data:'界'.repeat(12000)});
+    }
+    if(config.scenario==='large-lost-exec'&&request.op==='exec') {
+      for(let i=0;i<80;i++) emit({event:'output',id:request.id,data:'x'.repeat(32768)});
+      emit({event:'error',id:request.id,code:'link_lost',message:'lost after a large response',still_running:false});
       emit({event:'end',id:request.id,code:255});
       return;
     }
@@ -64,6 +73,11 @@ if (args.includes('--scan')) {
   });
 } else {
   note({mode:'one-shot',args});
+  if(config.scenario==='large-output') {
+    for(let i=0;i<80;i++) emit({event:'output',data:'x'.repeat(32768)});
+    emit({event:'result',what:'exec',ok:true,exit:0});
+    return;
+  }
   if(config.scenario==='uart-nonzero') {process.stderr.write('UART configuration unavailable');process.exit(2);}
   if(config.scenario==='uart-empty')process.exit(0);
   if(config.scenario==='uart-rejected'){emit({event:'result',what:'uart',ok:false,detail:'UART refused'});process.exit(0);}
@@ -742,4 +756,142 @@ test('cancelling a send capture after acknowledgement never claims input was not
   await f.waitFor(c=>c.mode==='finished'&&c.op==='send');
   await pause(30);controller.abort();await rejected;
   assert.equal((await f.calls()).filter(c=>c.mode==='request'&&c.op==='send').length,1);
+});
+
+
+for (const kind of ['set', 'exec-timeout', 'http-exec', 'http-uart']) {
+  test(`${kind}: parameters are prepared after a pending connection save`, {timeout:5000}, async t => {
+    let release, entered;
+    const gate = new Promise(resolve => { release = resolve; });
+    const started = new Promise(resolve => { entered = resolve; });
+    t.after(() => release());
+    const f = await fixture(t, 'uart-ok', {
+      transport:'ble', bleName:'Board-A',
+      editor:{async edit() { entered(); await gate; }},
+      fiberEntry:{config:{transport:'ble',bleName:'Board-A'}},
+    });
+    const saving = f.route('/config', {bleName:'Board-B'});
+    await started;
+    const operation = kind === 'set'
+      ? f.call('linkr_bee_set', {target:'rename-ble',value:'Renamed'})
+      : kind === 'exec-timeout'
+        ? f.call('linkr_bee_exec', {cmd:'probe-target',timeoutMs:12000})
+        : kind === 'http-exec'
+          ? f.route('/exec', {cmd:'probe-target',timeoutMs:12000})
+          : f.route('/uart', {value:'115200,8,n,1,none'});
+    await pause(40);
+    assert.equal((await f.calls()).length,0,'nothing dials while the settings edit is pending');
+    release();
+    assert.equal((await saving).ok,true);
+    const answer=await operation;
+    if(kind.startsWith('http-')) assert.equal(answer.ok,true);
+    const runtime=(await f.route('/config')).config;
+    const dial=(await f.calls()).find(c=>c.mode==='one-shot'||c.mode==='serve');
+    assert.equal(runtime.bleName,'Board-B');
+    assert.equal(dial.args[dial.args.indexOf('--ble-name')+1],runtime.bleName);
+  });
+}
+
+test('overlapping settings patches preserve the new target and the later timeout', {timeout:5000}, async t => {
+  const releases=[];
+  let profile={transport:'ble',bleName:'Board-A',timeoutMs:30000};
+  const f=await fixture(t,'ok',{
+    transport:'ble',bleName:'Board-A',
+    editor:{async edit(_entry,update){
+      const gate=new Promise(resolve=>releases.push(resolve));
+      await gate;
+      profile=update(profile);
+    }},
+    fiberEntry:{config:profile},
+  });
+  t.after(()=>releases.forEach(release=>release()));
+  const first=f.route('/config',{bleName:'Board-B'});
+  while(releases.length<1) await pause(5);
+  const second=f.route('/config',{timeoutMs:12000});
+  await pause(30);
+  assert.equal(releases.length,1,'profile writes must be serialized');
+  releases[0]();
+  assert.equal((await first).ok,true);
+  while(releases.length<2) await pause(5);
+  const command=f.call('linkr_bee_exec',{cmd:'after-both-saves'});
+  await pause(30);
+  assert.equal((await f.calls()).length,0,'commands wait for every queued settings patch');
+  releases[1]();
+  assert.equal((await second).ok,true);
+  const runtime=(await f.route('/config')).config;
+  assert.equal(profile.bleName,'Board-B');
+  assert.equal(runtime.bleName,profile.bleName);
+  assert.equal(runtime.timeoutMs,12000);
+  assert.equal(profile.timeoutMs,12000);
+  await command;
+  const dial=(await f.calls()).find(c=>c.mode==='serve');
+  assert.equal(dial.args[dial.args.indexOf('--ble-name')+1],'Board-B');
+  assert.equal((await f.calls()).find(c=>c.op==='exec').timeout_ms,12000);
+});
+
+test('cancelling a command waiting for settings does not dial or retain its lease', {timeout:5000}, async t => {
+  let release, entered;
+  const gate=new Promise(resolve=>release=resolve);
+  const started=new Promise(resolve=>entered=resolve);
+  const f=await fixture(t,'ok',{
+    transport:'ble',bleName:'Board-A',
+    editor:{async edit(){entered();await gate;}},
+    fiberEntry:{config:{transport:'ble',bleName:'Board-A'}},
+  });
+  t.after(()=>release());
+  const saving=f.route('/config',{bleName:'Board-B'});
+  await started;
+  const controller=new AbortController();
+  const command=f.call('linkr_bee_exec',{cmd:'cancelled-before-settings-commit'},controller.signal);
+  const rejected=assert.rejects(command,{name:'AbortError'});
+  controller.abort();
+  await rejected;
+  assert.equal((await f.calls()).length,0);
+  release();
+  assert.equal((await saving).ok,true);
+  await f.call('linkr_bee_exec',{cmd:'next-command'});
+  const history=await f.calls();
+  assert.equal(history.filter(c=>c.mode==='request'&&c.op==='exec').length,1);
+  assert.equal(history.find(c=>c.mode==='request'&&c.op==='exec').cmd,'next-command');
+});
+
+test('a rejected profile edit releases queued settings and the next command', {timeout:5000}, async t => {
+  let release, entered;
+  const gate=new Promise(resolve=>release=resolve);
+  const started=new Promise(resolve=>entered=resolve);
+  let edits=0;
+  const f=await fixture(t,'ok',{
+    transport:'ble',bleName:'Board-A',
+    editor:{async edit(){ if(++edits===1){entered();await gate;throw new Error('profile write failed');} }},
+    fiberEntry:{config:{transport:'ble',bleName:'Board-A'}},
+  });
+  t.after(()=>release());
+  const first=f.route('/config',{bleName:'Board-B'});
+  await started;
+  const second=f.route('/config',{timeoutMs:12000});
+  release();
+  assert.equal((await first).ok,false);
+  assert.equal((await second).ok,true);
+  const runtime=(await f.route('/config')).config;
+  assert.equal(runtime.bleName,'Board-A');
+  assert.equal(runtime.timeoutMs,12000);
+  await f.call('linkr_bee_exec',{cmd:'after-failed-save'});
+});
+
+for(const scenario of ['large-output','large-resident-output']) {
+  test(`${scenario}: retained output is bounded and completion remains visible`, async t => {
+    const f=await fixture(t,scenario);
+    const result=await f.call('linkr_bee_exec',{cmd:'large-output'});
+    assert.ok(Buffer.byteLength(result)<=1024*1024+8192);
+    assert.match(result,/"event":"result"/);
+    assert.match(result,/captured output truncated/);
+  });
+}
+
+test('output truncation preserves a later lost-link error without replay', async t => {
+  const f=await fixture(t,'large-lost-exec');
+  await assert.rejects(f.call('linkr_bee_exec',{cmd:'large-output'}),/link_lost.*do not resend automatically/);
+  const history=await f.calls();
+  assert.equal(history.filter(c=>c.mode==='request'&&c.op==='exec').length,1);
+  assert.equal(history.some(c=>c.mode==='one-shot'),false);
 });

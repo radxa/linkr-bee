@@ -92,6 +92,14 @@ concurrent WebSocket clients and one Bluetooth connection.
 
 ## Behaviour worth knowing
 
+- **Settings writes commit in order.** Commands wait for pending settings
+  writes before preparing connection arguments and retain that target until
+  they finish. A connection change is refused while work is active or queued;
+  later partial settings edits preserve values committed by earlier edits.
+- **Captured answers have limits.** One-shot and resident JSON event capture
+  retains at most 1 MiB and 4096 frames. Truncated answers are labelled, and
+  final result/error frames take precedence over older output. Diagnostic
+  stdout/stderr tails are separately bounded; live console output continues.
 - **The panel holds the Bluetooth link while it is open.** Close the panel (or
   switch the tab away) to release it for your phone app or another tool.
 - **Two views of one console.** `GET /linkr-bee/console/read?view=reading|raw` and the SSE `snapshot`/`stream` records both carry the reading-filtered text alongside the raw bytes; the panel's Reading/Raw switch picks one. The filter is display-only and fail-open: it recognises only the `sh -c … LINKR_RC_<nonce>` wrapper this plugin's own exec path emits, and passes through anything it cannot classify so device output is never lost.

@@ -5,6 +5,15 @@
 The published cut of the Harness plugin after the 1.1.4 baseline. Versions
 continue to follow the Linkr Bee main line.
 
+- Follow-up review fixes: commands acquire their configuration before preparing
+  dial arguments or a timeout override, including one-shot management calls and
+  HTTP input routes. Settings patches are persisted and applied in order; a
+  later timeout-only edit retains the target selected by an earlier write.
+  A failed edit releases the queue for subsequent settings and commands.
+- One-shot and resident event capture now share a 1 MiB serialized-frame budget
+  and a 4096-frame limit. Final result/error frames can evict older output, and
+  truncated answers say so. Diagnostic stdout/stderr tails are separately
+  bounded; live console delivery continues while retained output is capped.
 - BLE auto-discovery is a hint, not a binding. The name found by the scan used
   to be cached for the whole process lifetime, so a renamed board, a swapped
   board or a board that came back after being out of range kept being dialled
@@ -41,8 +50,8 @@ continue to follow the Linkr Bee main line.
 - A saved config now applies to the running plugin: the new values are used by
   `GET /config` and the next dial, and an open panel follows a connection change
   without a reload. A connection change is refused while a command is active or
-  queued, so it cannot redirect work accepted for the old board. Captured output
-  is bounded (1 MiB per run/request) so a runaway command cannot grow the
+  queued, so it cannot redirect work accepted for the old board. Retained JSON
+  events are bounded (1 MiB per run/request) so a runaway command cannot grow the
   plugin's heap; a console stream whose peer stopped reading is dropped (the
   panel reconnects from its cursor) instead of buffered without bound, and the
   panel's control backlog is only replayed while it is fresh (60 s), not on
