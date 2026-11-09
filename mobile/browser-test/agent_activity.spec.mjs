@@ -149,15 +149,18 @@ test('resident AI tasks also notify takeover and completion', async ({page}) => 
   await expect.poll(() => page.evaluate(() => window.ledFrames.at(-1))).toBe('@control ai off 7');
 });
 
-test('resident Stop clears takeover before the pending model settles', async ({page}) => {
+for (const source of ['button', 'MCP']) test(`resident ${source} cancellation clears takeover before the pending model settles`, async ({page}) => {
   let release; const gate = new Promise(resolve => release = resolve);
   await setup(page, async (request, round) => { if (round === 2) await gate; return reply(request, round); }, {resident:true});
   await enableAgentLed(page);
   await page.evaluate(() => window.__activity.residentAgent.startTask({request:"Check the device status"}));
   await expect.poll(() => page.evaluate(() => window.ledFrames.includes('@control ai on 7'))).toBe(true);
   await expect(page.locator('#agentStop')).toBeEnabled();
-  await page.locator('#agentStop').click();
+  if (source === 'button') await page.locator('#agentStop').click();
+  else await page.evaluate(() => window.__activity.residentAgent.cancelAll());
   await expect.poll(() => page.evaluate(() => window.ledFrames.at(-1))).toBe('@control ai off 7');
+  await page.locator('#agentClose').click();
+  expect(await page.evaluate(() => window.ledFrames.at(-1))).toBe('@control ai off 7');
   release();
   await expect(page.locator('#agentAsk')).toBeEnabled();
 });
@@ -173,4 +176,34 @@ for (const error of ['not_owner', 'stale_epoch']) test(`rejected AI heartbeat ($
   await expect(page.locator('#agentAsk')).toBeEnabled();
   expect(await page.evaluate(() => window.__activity.state.serialControl.mode)).toBe('readonly');
   await expect.poll(() => page.evaluate(() => window.ledFrames.at(-1))).toBe('@control ?');
+});
+
+test('closing the assistant keeps the resident task takeover visible until completion', async ({page}) => {
+  let release; const gate = new Promise(resolve => release = resolve);
+  await setup(page, async (request, round) => { if (round === 2) await gate; return reply(request, round); }, {resident:true});
+  await enableAgentLed(page);
+  await page.evaluate(() => window.__activity.residentAgent.startTask({request:"Check the device status"}));
+  await expect.poll(() => page.evaluate(() => window.ledFrames.includes('@control ai on 7'))).toBe(true);
+  await page.locator('#agentClose').click();
+  expect(await page.evaluate(() => window.__activity.residentAgent.isBusy())).toBe(true);
+  await expect.poll(() => page.evaluate(() => window.ledFrames.at(-1))).toBe('@control ai on 7');
+  release();
+  await expect.poll(() => page.evaluate(() => window.ledFrames.at(-1))).toBe('@control ai off 7');
+});
+
+test('reclaiming ownership cannot reactivate a retired resident task indication', async ({page}) => {
+  let release; const gate = new Promise(resolve => release = resolve);
+  await setup(page, async (request, round) => { if (round === 2) await gate; return reply(request, round); }, {resident:true});
+  await enableAgentLed(page);
+  await page.evaluate(() => window.__activity.residentAgent.startTask({request:"Check the device status"}));
+  await expect.poll(() => page.evaluate(() => window.ledFrames.includes('@control ai on 7'))).toBe(true);
+  await page.evaluate(() => {
+    const app = window.__activity;
+    app.applySerialControl({self:1, owner:2, mode:"readonly", epoch:8, peers:2, capacity:2, agentLed:true});
+    app.applySerialControl({self:1, owner:1, mode:"control", epoch:9, peers:2, capacity:2, agentLed:true});
+  });
+  await expect.poll(() => page.evaluate(() => window.ledFrames.includes('@control ai off 9'))).toBe(true);
+  expect(await page.evaluate(() => window.ledFrames.includes('@control ai on 9'))).toBe(false);
+  release();
+  await expect(page.locator('#agentAsk')).toBeEnabled();
 });

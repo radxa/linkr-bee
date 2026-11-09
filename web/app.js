@@ -729,7 +729,7 @@ const I18N = {
     boardLed: "Status LED",
     boardLedAria: "Status LED",
     boardLedColors: "Status LED colours",
-    boardLedHint: "Blue: Bluetooth · white: WiFi · cyan: AI. UART traffic blinks. Manual colours preview for 5 seconds; AI takes priority.",
+    boardLedHint: "With automatic-status firmware: blue for Bluetooth, white for WiFi, cyan for AI. UART traffic blinks. Manual colours preview for 5 seconds; AI takes priority.",
     boardLedCustom: "Custom colour",
     boardApply: "Apply",
     refresh: "Refresh",
@@ -1038,7 +1038,7 @@ const I18N = {
     boardLed: "状态灯",
     boardLedAria: "状态灯",
     boardLedColors: "状态灯颜色",
-    boardLedHint: "蓝色：蓝牙 · 白色：WiFi · 蓝绿色：AI。串口有数据时闪烁。手动颜色预览 5 秒，AI 状态优先。",
+    boardLedHint: "支持自动状态的新固件：蓝牙为蓝色，WiFi 为白色，AI 为蓝绿色。串口有数据时闪烁。手动颜色预览 5 秒，AI 状态优先。",
     boardLedCustom: "自定义颜色",
     boardApply: "应用",
     refresh: "刷新",
@@ -7553,6 +7553,12 @@ function init() {
     onBusyChange: setAgentLedActive,
     resident: {
       isBusy: () => residentAgent?.isBusy() === true,
+      // A canceled runner can keep its resource lease until it settles. Its
+      // task state, rather than panel visibility or the lease, drives the LED.
+      getRunningTaskId: () => {
+        const status = residentAgent?.getStatus();
+        return status?.activeTaskState === "running" ? status.activeTaskId : null;
+      },
       cancelAll: () => residentAgent?.cancelAll(),
     },
     button: $("agentButton"), getLang: () => lang,
