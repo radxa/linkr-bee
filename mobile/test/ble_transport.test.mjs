@@ -337,3 +337,237 @@ test("a rejected GATT write releases the serialization chain", async () => {
     ["write:start", [5]],
   ]);
 });
+
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+async function until(predicate) {
+  for (let i = 0; i < 100 && !predicate(); i++) await Promise.resolve();
+  assert.ok(predicate(), "expected asynchronous operation to make progress");
+}
+
+async function lifecycleFixture() {
+  const calls = [];
+  const servers = [];
+  const devices = Object.fromEntries(["A", "B"].map((id) => {
+    const listeners = new Set();
+    const device = {
+      id,
+      addEventListener(type, listener) {
+        if (type === "gattserverdisconnected") listeners.add(listener);
+      },
+      removeEventListener(type, listener) {
+        if (type === "gattserverdisconnected") listeners.delete(listener);
+      },
+      drop() { this.gatt.disconnect(); },
+      gatt: {
+        connected: false,
+        async connect() {
+          const generation = servers.length;
+          const notifications = new Set();
+          const characteristic = {
+            notifications,
+            async readValue() {
+              calls.push(["read", id, generation]);
+              return new DataView(Uint8Array.of(generation).buffer);
+            },
+            async writeValueWithResponse(bytes) {
+              calls.push(["write", id, generation, ...bytes]);
+              if (this.writeGate) await this.writeGate.promise;
+            },
+            async startNotifications() {
+              calls.push(["subscribe", id, generation]);
+              if (this.subscribeGate) await this.subscribeGate.promise;
+              if (this.subscribeError) throw this.subscribeError;
+            },
+            async stopNotifications() { calls.push(["unsubscribe", id, generation]); },
+            addEventListener(_type, listener) { notifications.add(listener); },
+            removeEventListener(_type, listener) { notifications.delete(listener); },
+          };
+          const server = {
+            connected: false, characteristic, deviceId: id,
+            async getPrimaryService() {
+              calls.push(["service", id, generation]);
+              if (this.serviceGate) await this.serviceGate.promise;
+              return {
+                async getCharacteristic() {
+                  calls.push(["characteristic", id, generation]);
+                  if (server.characteristicGate) await server.characteristicGate.promise;
+                  return characteristic;
+                },
+              };
+            },
+          };
+          servers.push(server);
+          if (device.connectGate) await device.connectGate.promise;
+          this.connected = server.connected = true;
+          return server;
+        },
+        disconnect() {
+          this.connected = false;
+          for (const server of servers) {
+            if (server.deviceId === id) server.connected = false;
+          }
+          for (const listener of [...listeners]) listener();
+        },
+      },
+    };
+    return [id, device];
+  }));
+  const { transport } = installTransport({ navigator: { bluetooth: {
+    async getDevices() { return Object.values(devices); },
+  } } });
+  await transport.getDevices();
+  return { transport, devices, servers, calls };
+}
+
+for (const target of ["A", "B"]) {
+  test(`retired queued writes cannot reach a new connection to ${target}`, async () => {
+    const f = await lifecycleFixture();
+    await f.transport.connect("A");
+    const gate = f.servers[0].characteristic.writeGate = deferred();
+    const writing = f.transport.write("A", "svc", "char", [1]);
+    const writingRejected = assert.rejects(writing, { code: "BLE_SESSION_CHANGED" });
+    const queued = f.transport.write("A", "svc", "char", [2]);
+    const queuedRejected = assert.rejects(queued, { code: "BLE_SESSION_CHANGED" });
+    await until(() => f.calls.some(([kind]) => kind === "write"));
+    await f.transport.disconnect("A");
+    await f.transport.connect(target);
+    await Promise.all([writingRejected, queuedRejected]);
+    // The old browser promise is still unresolved; the new queue must run now.
+    const read = f.transport.read(target, "svc", "char");
+    await until(() => f.calls.some(([kind]) => kind === "read"));
+    assert.equal((await read).getUint8(0), 1);
+    gate.resolve();
+    await settle();
+    assert.deepEqual(f.calls.filter(([kind]) => kind === "write"), [["write", "A", 0, 1]]);
+    if (target === "B") {
+      await assert.rejects(f.transport.write("A", "svc", "char", [3]), { code: "BLE_SESSION_CHANGED" });
+      await f.transport.disconnect("A");
+      assert.equal(await f.transport.isConnected(), true);
+    }
+  });
+}
+
+for (const phase of ["service", "characteristic"]) {
+  test(`late ${phase} discovery cannot cache or use an old characteristic`, async () => {
+    const f = await lifecycleFixture();
+    await f.transport.connect("A");
+    const gate = f.servers[0][`${phase}Gate`] = deferred();
+    const reading = f.transport.read("A", "svc", "char");
+    const rejected = assert.rejects(reading, { code: "BLE_SESSION_CHANGED" });
+    await until(() => f.calls.some(([kind]) => kind === phase));
+    f.devices.A.drop();
+    await rejected;
+    await f.transport.connect("A");
+    gate.resolve();
+    await settle();
+    assert.equal((await f.transport.read("A", "svc", "char")).getUint8(0), 1);
+    assert.deepEqual(f.calls.filter(([kind]) => kind === "read"), [["read", "A", 1]]);
+    if (phase === "service") {
+      assert.equal(f.calls.some(([kind, , generation]) => kind === "characteristic" && generation === 0), false);
+    }
+  });
+}
+
+test("read and notification teardown share the write queue", async () => {
+  const f = await lifecycleFixture();
+  await f.transport.connect("A");
+  await f.transport.startNotifications("A", "svc", "char", () => {});
+  const gate = f.servers[0].characteristic.writeGate = deferred();
+  const writing = f.transport.write("A", "svc", "char", [1]);
+  const reading = f.transport.read("A", "svc", "char");
+  const stopping = f.transport.stopNotifications("A", "svc", "char");
+  await until(() => f.calls.some(([kind]) => kind === "write"));
+  assert.equal(f.calls.some(([kind]) => kind === "read" || kind === "unsubscribe"), false);
+  gate.resolve();
+  await Promise.all([writing, reading, stopping]);
+  assert.deepEqual(f.calls.slice(-3).map(([kind]) => kind), ["write", "read", "unsubscribe"]);
+});
+
+test("disconnect removes subscriptions and ignores already queued notification callbacks", async () => {
+  const f = await lifecycleFixture();
+  let disconnected = 0;
+  let notified = 0;
+  await f.transport.connect("A", () => { disconnected++; });
+  await f.transport.startNotifications("A", "svc", "char", () => { notified++; });
+  const old = f.servers[0].characteristic;
+  const listener = [...old.notifications][0];
+  listener({ target: { value: new DataView(Uint8Array.of(1).buffer) } });
+  assert.equal(notified, 1);
+  f.devices.A.drop();
+  assert.equal(disconnected, 1);
+  assert.equal(old.notifications.size, 0);
+  await f.transport.connect("B");
+  listener({ target: { value: new DataView(Uint8Array.of(2).buffer) } });
+  assert.equal(notified, 1);
+});
+
+test("failed notification setup rolls back its listener and releases the queue", async () => {
+  const f = await lifecycleFixture();
+  await f.transport.connect("A");
+  const characteristic = f.servers[0].characteristic;
+  characteristic.subscribeError = new Error("Subscribe failed");
+  await assert.rejects(f.transport.startNotifications("A", "svc", "char", () => {}), /Subscribe failed/);
+  assert.equal(characteristic.notifications.size, 0);
+  delete characteristic.subscribeError;
+  await f.transport.startNotifications("A", "svc", "char", () => {});
+  assert.equal(characteristic.notifications.size, 1);
+  await f.transport.disconnect("A");
+  assert.equal(characteristic.notifications.size, 0);
+});
+
+test("teardown releases a pending subscription and isolates late completion", async () => {
+  const f = await lifecycleFixture();
+  await f.transport.connect("A");
+  const old = f.servers[0].characteristic;
+  const gate = old.subscribeGate = deferred();
+  const subscribing = f.transport.startNotifications("A", "svc", "char", () => {});
+  const rejected = assert.rejects(subscribing, { code: "BLE_SESSION_CHANGED" });
+  await until(() => old.notifications.size === 1);
+  await f.transport.disconnect("A");
+  await rejected;
+  assert.equal(old.notifications.size, 0);
+  await f.transport.connect("A");
+  await f.transport.startNotifications("A", "svc", "char", () => {});
+  gate.resolve();
+  await settle();
+  assert.equal(f.servers[1].characteristic.notifications.size, 1);
+});
+
+for (const target of ["A", "B"]) {
+  test(`late connect to A cannot replace the new connection to ${target}`, async () => {
+    const f = await lifecycleFixture();
+    const gate = f.devices.A.connectGate = deferred();
+    const connecting = f.transport.connect("A");
+    const rejected = assert.rejects(connecting, { code: "BLE_SESSION_CHANGED" });
+    await until(() => f.servers.length === 1);
+    delete f.devices.A.connectGate;
+    await f.transport.connect(target);
+    await rejected;
+    gate.resolve();
+    await settle();
+    assert.equal(await f.transport.isConnected(), true);
+    assert.equal((await f.transport.read(target, "svc", "char")).getUint8(0), 1);
+    assert.equal(f.devices.A.gatt.connected, target === "A");
+  });
+}
+
+test("cancelling an initial connect rejects immediately and closes a late result", async () => {
+  const f = await lifecycleFixture();
+  const gate = f.devices.A.connectGate = deferred();
+  const controller = new AbortController();
+  const connecting = f.transport.connect("A", () => {}, { signal: controller.signal });
+  const rejected = assert.rejects(connecting, { name: "AbortError" });
+  await until(() => f.servers.length === 1);
+  controller.abort();
+  await rejected;
+  gate.resolve();
+  await settle();
+  assert.equal(f.devices.A.gatt.connected, false);
+  assert.equal(await f.transport.isConnected(), false);
+});

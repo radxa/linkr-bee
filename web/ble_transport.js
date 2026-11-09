@@ -2,11 +2,7 @@
 
 (function installLinkrBleTransport(root) {
   const browserDevices = new Map();
-  const browserCharacteristics = new Map();
-  const browserSubscriptions = new Map();
-  let browserServer = null;
-  let browserDevice = null;
-  let browserDisconnectHandler = null;
+  let browserSession = null;
 
   function copyDataView(value) {
     if (value instanceof DataView) {
@@ -81,16 +77,83 @@
     return `${serviceUuid.toLowerCase()}/${characteristicUuid.toLowerCase()}`;
   }
 
-  async function getBrowserCharacteristic(serviceUuid, characteristicUuid) {
-    if (!browserServer?.connected) {
-      throw new Error("Bluetooth device is not connected");
+  function sessionChangedError() {
+    const error = new Error("Bluetooth connection changed; GATT operation cancelled");
+    error.code = "BLE_SESSION_CHANGED";
+    return error;
+  }
+
+  function assertSession(session) {
+    session?.controller.signal.throwIfAborted();
+    if (!session || browserSession !== session) throw sessionChangedError();
+  }
+
+  function retireSession(session, { disconnect = false, notify = false, reason } = {}) {
+    if (!session || session.controller.signal.aborted) return;
+    if (browserSession === session) browserSession = null;
+    session.controller.abort(reason || sessionChangedError());
+    session.device.removeEventListener("gattserverdisconnected", session.onDisconnect);
+    for (const { characteristic, listener } of session.subscriptions.values()) {
+      characteristic.removeEventListener("characteristicvaluechanged", listener);
     }
+    session.subscriptions.clear();
+    session.characteristics.clear();
+    if (disconnect && session.device.gatt.connected) session.device.gatt.disconnect();
+    if (notify) session.notifyDisconnect?.(session.device.id);
+  }
+
+  // Browser GATT promises cannot be aborted directly. Reject their callers on
+  // teardown without waiting for the browser, and still observe late results.
+  function inSession(session, operation) {
+    assertSession(session);
+    return new Promise((resolve, reject) => {
+      const signal = session.controller.signal;
+      const finish = (callback, value) => {
+        signal.removeEventListener("abort", onAbort);
+        callback(value);
+      };
+      const onAbort = () => finish(reject, signal.reason);
+      signal.addEventListener("abort", onAbort, { once: true });
+      Promise.resolve().then(() => {
+        assertSession(session);
+        return operation();
+      }).then((value) => {
+        try {
+          assertSession(session);
+          finish(resolve, value);
+        } catch (error) {
+          finish(reject, error);
+        }
+      }, (error) => finish(reject, error));
+    });
+  }
+
+  async function connectServer(session) {
+    return inSession(session, async () => {
+      const server = await session.device.gatt.connect();
+      if (browserSession !== session || session.controller.signal.aborted) {
+        // A late connect must not keep an abandoned device connected, or tear
+        // down a newer connection that reused the same BluetoothDevice.
+        if (browserSession?.device !== session.device && session.device.gatt.connected) {
+          session.device.gatt.disconnect();
+        }
+        assertSession(session);
+      }
+      session.server = server;
+    });
+  }
+
+  async function getBrowserCharacteristic(session, serviceUuid, characteristicUuid) {
+    assertSession(session);
+    if (!session.server?.connected) throw new Error("Bluetooth device is not connected");
     const key = characteristicKey(serviceUuid, characteristicUuid);
-    let characteristic = browserCharacteristics.get(key);
+    let characteristic = session.characteristics.get(key);
     if (!characteristic) {
-      const service = await browserServer.getPrimaryService(serviceUuid);
+      const service = await session.server.getPrimaryService(serviceUuid);
+      assertSession(session);
       characteristic = await service.getCharacteristic(characteristicUuid);
-      browserCharacteristics.set(key, characteristic);
+      assertSession(session);
+      session.characteristics.set(key, characteristic);
     }
     return characteristic;
   }
@@ -99,14 +162,15 @@
    * second read, write or subscribe before the previous promise settles
    * rejects with "GATT operation already in progress". The application keeps
    * independent queues for UART bytes and management frames, and connection
-   * setup also subscribes, so every GATT call funnels through this single
-   * chain instead of racing. A rejected operation still releases the chain so
-   * one failed write cannot wedge the transport. */
-  let browserGattChain = Promise.resolve();
-
-  function withGattLock(operation) {
-    const run = browserGattChain.then(operation, operation);
-    browserGattChain = run.then(
+   * setup also subscribes, so every GATT call uses the connection's chain.
+   * Capture the session when enqueuing: old work must never reach a new link,
+   * even when reconnecting to the same device. Rejections release the chain. */
+  function withGattLock(deviceId, operation) {
+    const session = browserSession;
+    assertSession(session);
+    if (session.device.id !== deviceId) throw sessionChangedError();
+    const run = session.chain.then(() => inSession(session, () => operation(session)));
+    session.chain = run.then(
       () => undefined,
       () => undefined,
     );
@@ -156,88 +220,95 @@
         error.code = "BLE_RESELECT_REQUIRED";
         throw error;
       }
-      if (browserDevice && browserDisconnectHandler) {
-        browserDevice.removeEventListener(
-          "gattserverdisconnected",
-          browserDisconnectHandler,
-        );
-      }
-      browserDevice = device;
-      browserDisconnectHandler = () => {
-        browserServer = null;
-        browserCharacteristics.clear();
-        browserSubscriptions.clear();
-        onDisconnect?.(device.id);
+      retireSession(browserSession, { disconnect: true });
+      const session = {
+        device,
+        server: null,
+        controller: new AbortController(),
+        chain: Promise.resolve(),
+        characteristics: new Map(),
+        subscriptions: new Map(),
+        notifyDisconnect: onDisconnect,
+        onDisconnect: () => {
+          if (browserSession === session) retireSession(session, { notify: true });
+        },
       };
-      device.addEventListener(
-        "gattserverdisconnected",
-        browserDisconnectHandler,
-      );
-      /* A reconnect can reuse the same BluetoothDevice object. Any
-       * characteristic cached from the previous GATT server is stale even
-       * though this new server is connected; subscribing to it resolves but
-       * never delivers values. Drop the caches before every connect so the
-       * management and NUS characteristics both come from this server. */
-      browserCharacteristics.clear();
-      browserSubscriptions.clear();
+      browserSession = session;
+      device.addEventListener("gattserverdisconnected", session.onDisconnect);
+      const onAbort = () => retireSession(session, { disconnect: true, reason: signal.reason });
+      signal?.addEventListener("abort", onAbort, { once: true });
       try {
-        browserServer = await device.gatt.connect();
-      } catch (error) {
-        if (signal?.aborted || !needsRediscovery(error)) throw error;
         try {
-          await rediscover(device, signal);
-          signal?.throwIfAborted();
-        } catch (discoveryError) {
-          if (signal?.aborted) throw signal.reason;
-          const unavailable = new Error(error.message);
-          unavailable.code = "BLE_RESELECT_REQUIRED";
-          throw unavailable;
-        }
-        try {
-          browserServer = await device.gatt.connect();
-        } catch (retryError) {
-          if (needsRediscovery(retryError)) {
-            const unavailable = new Error(retryError.message);
+          await connectServer(session);
+        } catch (error) {
+          assertSession(session);
+          if (!needsRediscovery(error)) throw error;
+          try {
+            await rediscover(device, session.controller.signal);
+            assertSession(session);
+          } catch (_discoveryError) {
+            assertSession(session);
+            const unavailable = new Error(error.message);
             unavailable.code = "BLE_RESELECT_REQUIRED";
             throw unavailable;
           }
-          throw retryError;
+          try {
+            await connectServer(session);
+          } catch (retryError) {
+            assertSession(session);
+            if (needsRediscovery(retryError)) {
+              const unavailable = new Error(retryError.message);
+              unavailable.code = "BLE_RESELECT_REQUIRED";
+              throw unavailable;
+            }
+            throw retryError;
+          }
         }
+        assertSession(session);
+      } catch (error) {
+        retireSession(session, { disconnect: true });
+        throw error;
+      } finally {
+        signal?.removeEventListener("abort", onAbort);
       }
     },
 
-    async disconnect() {
-      if (browserDevice?.gatt?.connected) {
-        browserDevice.gatt.disconnect();
+    async disconnect(deviceId) {
+      if (browserSession?.device.id === deviceId) {
+        retireSession(browserSession, { disconnect: true, notify: true });
       }
     },
 
     isConnected() {
-      return Boolean(browserDevice?.gatt?.connected && browserServer?.connected);
+      return Boolean(browserSession?.device.gatt.connected && browserSession.server?.connected);
     },
 
-    async read(_deviceId, serviceUuid, characteristicUuid) {
-      return withGattLock(async () => {
+    async read(deviceId, serviceUuid, characteristicUuid) {
+      return withGattLock(deviceId, async (session) => {
         const characteristic = await getBrowserCharacteristic(
+          session,
           serviceUuid,
           characteristicUuid,
         );
+        assertSession(session);
         return copyDataView(await characteristic.readValue());
       });
     },
 
     async write(
-      _deviceId,
+      deviceId,
       serviceUuid,
       characteristicUuid,
       value,
       withResponse = true,
     ) {
-      return withGattLock(async () => {
+      return withGattLock(deviceId, async (session) => {
         const characteristic = await getBrowserCharacteristic(
+          session,
           serviceUuid,
           characteristicUuid,
         );
+        assertSession(session);
         const bytes = copyBytes(value);
         if (!withResponse && characteristic.writeValueWithoutResponse) {
           await characteristic.writeValueWithoutResponse(bytes);
@@ -250,49 +321,61 @@
     },
 
     async startNotifications(
-      _deviceId,
+      deviceId,
       serviceUuid,
       characteristicUuid,
       callback,
     ) {
-      return withGattLock(async () => {
+      return withGattLock(deviceId, async (session) => {
         const characteristic = await getBrowserCharacteristic(
+          session,
           serviceUuid,
           characteristicUuid,
         );
+        assertSession(session);
         const key = characteristicKey(serviceUuid, characteristicUuid);
-        const previous = browserSubscriptions.get(key);
+        const previous = session.subscriptions.get(key);
         if (previous) {
-          characteristic.removeEventListener(
+          previous.characteristic.removeEventListener(
             "characteristicvaluechanged",
-            previous,
+            previous.listener,
           );
         }
-        const listener = (event) => callback(copyBytes(event.target.value));
-        browserSubscriptions.set(key, listener);
+        const listener = (event) => {
+          if (browserSession === session && !session.controller.signal.aborted) {
+            callback(copyBytes(event.target.value));
+          }
+        };
+        session.subscriptions.set(key, { characteristic, listener });
         characteristic.addEventListener(
           "characteristicvaluechanged",
           listener,
         );
-        await characteristic.startNotifications();
+        try {
+          await characteristic.startNotifications();
+        } catch (error) {
+          characteristic.removeEventListener("characteristicvaluechanged", listener);
+          session.subscriptions.delete(key);
+          throw error;
+        }
       });
     },
 
-    async stopNotifications(_deviceId, serviceUuid, characteristicUuid) {
-      return withGattLock(async () => {
+    async stopNotifications(deviceId, serviceUuid, characteristicUuid) {
+      return withGattLock(deviceId, async (session) => {
         const key = characteristicKey(serviceUuid, characteristicUuid);
-        const characteristic = browserCharacteristics.get(key);
+        const characteristic = session.characteristics.get(key);
         if (!characteristic) {
           return;
         }
-        const listener = browserSubscriptions.get(key);
-        if (listener) {
+        const subscription = session.subscriptions.get(key);
+        if (subscription) {
           characteristic.removeEventListener(
             "characteristicvaluechanged",
-            listener,
+            subscription.listener,
           );
         }
-        browserSubscriptions.delete(key);
+        session.subscriptions.delete(key);
         await characteristic.stopNotifications();
       });
     },
