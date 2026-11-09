@@ -6,6 +6,7 @@
 
 | 文档 | 内容 |
 | --- | --- |
+| [用户说明书](USER_MANUAL.zh-CN.md) | X1.0 接线与配对、CLI / TUI / Web 使用、DeepSeek Harness 插件 |
 | [项目 README](../README.zh-CN.md) | 产品介绍、客户端选择、接线、首次连接与常见问题 |
 | [使用指南](USAGE.zh-CN.md) | 中文界面截图、终端操作、手机和平板布局、助手、局域网与日志 |
 | [Rust CLI / TUI](../tools/linkr-tui/README.md) | 桌面终端、脚本请求、常驻会话与主机实现（英文） |
