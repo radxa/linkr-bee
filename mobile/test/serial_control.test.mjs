@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseSerialControl, isReadonlyManagementCommand } from "../../web/serial_control.js";
+import { parseSerialControl, isReadonlyManagementCommand, agentLedAction } from "../../web/serial_control.js";
 
 test("control status is validated against its owner identity", () => {
   const status = "OK control self=2 owner=1 mode=readonly epoch=3 peers=2 ble_max=2 linkr_reserved=0\r\n";
@@ -36,5 +36,20 @@ test("board prompt reads with implicit and explicit offsets are read-only", () =
   }
   for (const command of ["@p set 6162", "@p clear", "@p get -1", "@p get 0 clear"]) {
     assert.equal(isReadonlyManagementCommand(command), false, command);
+  }
+});
+
+test("AI LED notifications require firmware support and current ownership", () => {
+  const line = "OK control self=1 owner=1 mode=control epoch=7 peers=1 ble_max=2 linkr_reserved=0";
+  const old = parseSerialControl(line);
+  assert.equal(agentLedAction(old, true), "?");
+  const control = parseSerialControl(line + " agent_led=1");
+  assert.equal(agentLedAction(control, true), "ai on 7");
+  assert.equal(agentLedAction(control, false), "ai off 7");
+  assert.equal(agentLedAction({...control, mode:"readonly"}, true), "?");
+  assert.equal(agentLedAction(null, true), "?");
+  assert.equal(agentLedAction(parseSerialControl(line + " agent_led=0"), true), "?");
+  for (const command of ["@c ai on 7", "@c ai off 7"]) {
+    assert.equal(isReadonlyManagementCommand(command), false);
   }
 });

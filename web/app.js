@@ -1,7 +1,7 @@
 import { createBondUi } from "./bond_ui.js";
 "use strict";
 
-import { MGMT_CAP_MULTI_SESSION, parseSerialControl, isReadonlyManagementCommand } from "./serial_control.js";
+import { MGMT_CAP_MULTI_SESSION, parseSerialControl, agentLedAction, isReadonlyManagementCommand } from "./serial_control.js";
 import { installSelectControls } from "./select_controls.js";
 import { normalizeUartMode, uartTransportPlan } from "./uart_transport_mode.js";
 import { createLanTokenStore } from "./lan_token_store.js";
@@ -110,6 +110,7 @@ let residentAgent = null;
 let terminalKeyPreferences = null;
 let aboutPage = null;
 let serialControlTimer = null;
+let agentLedActive = false;
 let serialControlPolling = false;
 let serialControlPending = false;
 let serialControlWaiter = null;
@@ -728,6 +729,7 @@ const I18N = {
     boardLed: "Status LED",
     boardLedAria: "Status LED",
     boardLedColors: "Status LED colours",
+    boardLedHint: "Blue: Bluetooth · white: WiFi · cyan: AI. UART traffic blinks. Manual colours preview for 5 seconds; AI takes priority.",
     boardLedCustom: "Custom colour",
     boardApply: "Apply",
     refresh: "Refresh",
@@ -1036,6 +1038,7 @@ const I18N = {
     boardLed: "状态灯",
     boardLedAria: "状态灯",
     boardLedColors: "状态灯颜色",
+    boardLedHint: "蓝色：蓝牙 · 白色：WiFi · 蓝绿色：AI。串口有数据时闪烁。手动颜色预览 5 秒，AI 状态优先。",
     boardLedCustom: "自定义颜色",
     boardApply: "应用",
     refresh: "刷新",
@@ -2338,7 +2341,7 @@ function consumeSerialControl(text) {
   }
   if (String(text).trim().startsWith("ERR control=")) {
     serialControlPending = false;
-    if (state.serialControl && String(text).includes("readonly")) {
+    if (state.serialControl && /ERR control=(?:readonly|not_owner|stale_epoch)(?:\s|$)/.test(String(text))) {
       applySerialControl({ ...state.serialControl, mode: "readonly" });
     }
     renderSerialControl();
@@ -2393,6 +2396,13 @@ async function claimIdleControl() {
   return idleClaimInFlight;
 }
 
+function setAgentLedActive(active) {
+  if (agentLedActive === active) return;
+  agentLedActive = active;
+  const action = agentLedAction(state.serialControl, active);
+  if (action !== "?") requestSerialControl(action).catch(() => {});
+}
+
 async function requestSerialControl(action = "?") {
   if (!state.connected) return;
   if (state.mode === "ws") {
@@ -2410,7 +2420,7 @@ function startSerialControlPoll() {
     const operation = {};
     const generation = state.writeGeneration;
     serialControlPolling = operation;
-    try { await requestSerialControl(); }
+    try { await requestSerialControl(agentLedAction(state.serialControl, agentLedActive)); }
     catch (_error) {
       if (generation === state.writeGeneration && state.serialControl) {
         applySerialControl({ ...state.serialControl, mode: "readonly" });
@@ -7540,6 +7550,7 @@ function init() {
     onCustomize: () => { resetModifiers(); hideTerminalSelectionHandles(); state.term?.blur(); },
   });
   agentPanel = createAgentPanel({
+    onBusyChange: setAgentLedActive,
     resident: {
       isBusy: () => residentAgent?.isBusy() === true,
       cancelAll: () => residentAgent?.cancelAll(),

@@ -103,9 +103,14 @@ The **Board** section appears for the Linkr Bee X1.0 accessory. It drives the
 board's own hardware over the same encrypted management channel as the serial
 settings; nothing here is written to the target's UART.
 
-- **Status LED** sets the single-wire RGB LED. Pick a swatch or a custom colour
-  and press **Apply**; **Off** turns it dark. The status line shows the colour
-  the board reported back.
+- **Status LED** is blue with Bluetooth connected, white with WiFi associated,
+  and cyan during AI takeover, in that priority order. UART RX/TX blinks the
+  current colour (5 Hz under continuous traffic). With no connection it is dark;
+  UART activity still flashes. **Apply** and **Off** preview a colour or darkness
+  for five seconds, then automatic status resumes; AI takes priority over previews.
+  The shared Web/mobile/HarmonyOS assistant reports its running state; older
+  clients need the explicit AI notification protocol described in
+  [Multi-client sessions](MULTI_CLIENT.md#management-protocol).
 - **Isolated contact (J5)** closes or opens the optocoupler contact — useful as
   a remote reset or power key — or pulses it for a chosen number of
   milliseconds.

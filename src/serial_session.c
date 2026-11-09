@@ -5,6 +5,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/sys/printk.h>
 #include "serial_session.h"
+#include "linkr_status_led.h"
 
 #define SESSION_COUNT (CONFIG_BT_MAX_CONN + 4)
 
@@ -29,6 +30,7 @@ K_MUTEX_DEFINE(session_lock);
 
 static void ownership_changed(void)
 {
+	linkr_status_led_ai(false);
 	if (++epoch == 0) ++epoch;
 }
 
@@ -200,6 +202,18 @@ static bool session_control(const void *peer, const char *command,
 		if (owner && owner != self && !owner_is_idle(now)) error = "busy";
 		else if (owner != self) set_owner(self, now);
 		else owner_touch(now);
+	} else if (!strncmp(action, "ai on ", 6) || !strncmp(action, "ai off ", 7)) {
+		/* An indication only: it never claims or extends console ownership.
+		 * Disconnect, release and every hand-over revoke the old indication. */
+		bool active = action[3] == 'o' && action[4] == 'n';
+		const char *value = action + (active ? 6 : 7);
+		char *end;
+		errno = 0;
+		unsigned long requested_epoch = strtoul(value, &end, 10);
+		if (owner != self) error = "not_owner";
+		else if (*value < '0' || *value > '9' || *end || errno ||
+			 requested_epoch != epoch) error = "stale_epoch";
+		else linkr_status_led_ai(active);
 	} else if (!strcmp(action, "release")) {
 		if (owner != self) error = "not_owner";
 		else { owner = 0; owner_active_ms = 0; ownership_changed(); }
@@ -218,7 +232,7 @@ static bool session_control(const void *peer, const char *command,
 	for (size_t i = 0; i < SESSION_COUNT; i++) peers += sessions[i].peer != NULL;
 	if (error) snprintk(response, capacity, "ERR control=%s\r\n", error);
 	else snprintk(response, capacity,
-		"OK control self=%u owner=%u mode=%s epoch=%u peers=%u ble_max=%u linkr_reserved=0\r\n",
+		"OK control self=%u owner=%u mode=%s epoch=%u peers=%u ble_max=%u linkr_reserved=0 agent_led=1\r\n",
 		self, owner, owner == self ? "control" : owner ? "readonly" : "available",
 		epoch, peers, CONFIG_BT_MAX_CONN);
 	k_mutex_unlock(&session_lock);

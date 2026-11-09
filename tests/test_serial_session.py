@@ -69,7 +69,7 @@ static bool dispatch_aux(const void *conn, const char *body, uint32_t queued) {
         ], check=True)
 
     def test_real_arbiter_scenarios(self):
-        for scenario in ["single_writer", "managed_release", "handover", "reconnect",
+        for scenario in ["ai_indicator", "ai_does_not_extend_ownership", "single_writer", "managed_release", "handover", "reconnect",
                          "queued_command", "concurrent_claims", "disconnected",
                          "bad_handover", "legacy_lan", "aux_permissions",
                          "preempt_claim", "claim_idle", "claim_idle_active",

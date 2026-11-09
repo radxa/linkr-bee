@@ -5,10 +5,16 @@ function sse({text='',thinking='',tool=null}) {
   const chunk=(delta,finish_reason)=>JSON.stringify({id:'activity',object:'chat.completion.chunk',created:1,model:'fixture',choices:[{index:0,delta,finish_reason}]});
   return [...deltas.map(delta=>`data: ${chunk(delta,null)}\n\n`),`data: ${chunk({},tool?'tool_calls':'stop')}\n\n`,'data: [DONE]\n\n'].join('');
 }
-async function setup(page,respond,{lang='en',theme='dark'}={}){
+async function setup(page,respond,{lang='en',theme='dark',resident=false}={}){
   const requests=[];
+  if (resident) await page.addInitScript(() => {
+    const state = {running:false, foreground:true, token:'fixture', url:'http://127.0.0.1:8712/mcp'};
+    window.LinkrMcp = {available:true, platform:'android',
+      async getState() { return {...state}; }, async stop() { return {...state}; },
+      async addListener() { return {async remove() {}}; }, async respond() {}};
+  });
   await page.addInitScript(({lang,theme})=>{localStorage.setItem('linkr-lang',lang);localStorage.setItem('linkr-theme',theme);localStorage.setItem('linkr-sidebar','closed');localStorage.setItem('linkr-agent-model',JSON.stringify({endpoint:'https://activity.test/v1',model:'fixture',reasoning:'low'}));},{lang,theme});
-  await page.route('**/app.js?*',async route=>{const response=await route.fetch();await route.fulfill({response,body:await response.text()+'\nwindow.__activity={state,setConnected,setMobileSidebarOpen,handleIncomingBytes};'});});
+  await page.route('**/app.js?*',async route=>{const response=await route.fetch();await route.fulfill({response,body:await response.text()+'\nwindow.__activity={state,setConnected,setMobileSidebarOpen,handleIncomingBytes,applySerialControl,startSerialControlPoll,residentAgent,consumeSerialControl};'});});
   await page.route('https://activity.test/v1/chat/completions',async route=>{
     const headers={'access-control-allow-origin':'*','access-control-allow-headers':'*'};
     if(route.request().method()==='OPTIONS'){await route.fulfill({status:204,headers});return;}
@@ -86,4 +92,85 @@ for(const width of [338,390,834,1440])for(const lang of ['en','zh'])for(const th
   expect(await page.locator('#agentPanel').evaluate(el=>el.scrollWidth<=el.clientWidth+1)).toBe(true);
   expect(await page.locator('#agentForm').evaluate(el=>el.getBoundingClientRect().bottom<=innerHeight)).toBe(true);
   await page.screenshot({path:info.outputPath(`assistant-${lang}-${theme}-${width}.png`)});
+});
+
+async function enableAgentLed(page) {
+  await page.evaluate(() => {
+    const app = window.__activity;
+    window.ledFrames = [];
+    app.state.serialControl = {self:1, owner:1, mode:"control", epoch:7, peers:1, capacity:2, agentLed:true};
+    const original = app.state.ws.send;
+    app.state.ws.send = bytes => typeof bytes === "string" ? window.ledFrames.push(bytes) : original(bytes);
+    app.startSerialControlPoll();
+  });
+}
+
+test('AI takeover LED notifies start and completion over the management channel', async ({page}) => {
+  await setup(page, reply);
+  await enableAgentLed(page);
+  await ask(page);
+  await expect(page.locator('#agentAsk')).toBeEnabled();
+  const frames = await page.evaluate(() => window.ledFrames);
+  expect(frames).toContain('@control ai on 7');
+  expect(frames.at(-1)).toBe('@control ai off 7');
+  expect(await page.evaluate(() => window.sent)).toEqual([]);
+});
+
+test('AI LED heartbeat stops immediately on Stop while the model is still pending', async ({page}) => {
+  let release; const gate = new Promise(resolve => release = resolve);
+  await setup(page, async (request, round) => { if (round === 2) await gate; return reply(request, round); });
+  await enableAgentLed(page);
+  await ask(page);
+  await expect.poll(() => page.evaluate(() => window.ledFrames.filter(f => f === '@control ai on 7').length)).toBeGreaterThan(1);
+  await page.locator('#agentStop').click();
+  await expect.poll(() => page.evaluate(() => window.ledFrames.at(-1))).toBe('@control ai off 7');
+  release();
+  await expect(page.locator('#agentAsk')).toBeEnabled();
+});
+
+test('ownership loss revokes AI takeover and never marks the new owner as AI', async ({page}) => {
+  let release; const gate = new Promise(resolve => release = resolve);
+  await setup(page, async (request, round) => { if (round === 2) await gate; return reply(request, round); });
+  await enableAgentLed(page);
+  await ask(page);
+  await expect.poll(() => page.evaluate(() => window.ledFrames.includes('@control ai on 7'))).toBe(true);
+  await page.evaluate(() => window.__activity.applySerialControl({self:1, owner:2, mode:"readonly", epoch:8, peers:2, capacity:2, agentLed:true}));
+  release();
+  await expect(page.locator('#agentAsk')).toBeEnabled();
+  await expect.poll(() => page.evaluate(() => window.ledFrames.at(-1))).toBe('@control ?');
+  expect(await page.evaluate(() => window.ledFrames.some(f => f.startsWith('@control ai on 8')))).toBe(false);
+});
+
+test('resident AI tasks also notify takeover and completion', async ({page}) => {
+  await setup(page, reply, {resident:true});
+  await enableAgentLed(page);
+  await page.evaluate(() => window.__activity.residentAgent.startTask({request:"Check the device status"}));
+  await expect.poll(() => page.evaluate(() => window.ledFrames.includes('@control ai on 7'))).toBe(true);
+  await expect.poll(() => page.evaluate(() => window.ledFrames.at(-1))).toBe('@control ai off 7');
+});
+
+test('resident Stop clears takeover before the pending model settles', async ({page}) => {
+  let release; const gate = new Promise(resolve => release = resolve);
+  await setup(page, async (request, round) => { if (round === 2) await gate; return reply(request, round); }, {resident:true});
+  await enableAgentLed(page);
+  await page.evaluate(() => window.__activity.residentAgent.startTask({request:"Check the device status"}));
+  await expect.poll(() => page.evaluate(() => window.ledFrames.includes('@control ai on 7'))).toBe(true);
+  await expect(page.locator('#agentStop')).toBeEnabled();
+  await page.locator('#agentStop').click();
+  await expect.poll(() => page.evaluate(() => window.ledFrames.at(-1))).toBe('@control ai off 7');
+  release();
+  await expect(page.locator('#agentAsk')).toBeEnabled();
+});
+
+for (const error of ['not_owner', 'stale_epoch']) test(`rejected AI heartbeat (${error}) refreshes ownership instead of retrying forever`, async ({page}) => {
+  let release; const gate = new Promise(resolve => release = resolve);
+  await setup(page, async (request, round) => { if (round === 2) await gate; return reply(request, round); });
+  await enableAgentLed(page);
+  await ask(page);
+  await expect.poll(() => page.evaluate(() => window.ledFrames.includes('@control ai on 7'))).toBe(true);
+  await page.evaluate(error => window.__activity.consumeSerialControl(`ERR control=${error}\r\n`), error);
+  release();
+  await expect(page.locator('#agentAsk')).toBeEnabled();
+  expect(await page.evaluate(() => window.__activity.state.serialControl.mode)).toBe('readonly');
+  await expect.poll(() => page.evaluate(() => window.ledFrames.at(-1))).toBe('@control ?');
 });

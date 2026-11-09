@@ -86,11 +86,17 @@ J7.4 外部5V ─F1(PTC 1A)─ V5_IN ───┘(D8 5.1V 稳压管)        │
 板载外设，通过 Management Service 的 `@` 命令控制；网页端和手机端（同一套
 Web 资源）都有 **Board / 板载** 页可以操作：
 
+RGB 状态灯默认自动显示：蓝牙连接为蓝色、WiFi 关联为白色、AI 接管为蓝绿色，
+优先级 AI > WiFi > 蓝牙。串口收发使当前状态色闪烁；持续流量下为 5 Hz，
+RGB 写入总速率最多 25 帧/秒，不按 UART 数据块刷新。未连接时默认熄灭。
+所有状态色、串口闪烁、手动预览和自检灯光的 RGB 输出统一按 30% 缩放；
+协议中的逻辑颜色值不变。亮度由 `CONFIG_LINKR_BLE_BRIDGE_RGB_BRIGHTNESS` 配置。
+
 | 命令 | 作用 |
 |------|------|
 | `@l?` | 查询 RGB 状态灯当前颜色 |
-| `@l=<r>,<g>,<b>` | 设置常亮颜色（0–255 或 0x00–0xff） |
-| `@l off` | 熄灭 |
+| `@l=<r>,<g>,<b>` | 预览颜色 5 秒（0–255 或 0x00–0xff），随后恢复自动状态 |
+| `@l off` | 预览熄灭 5 秒，随后恢复自动状态（AI 状态优先） |
 | `@o?` | 查询光耦干接点状态 |
 | `@o on` / `@o off` | 闭合 / 断开 J5 干接点 |
 | `@o pulse <ms>` | 闭合指定毫秒数后自动断开（1–60000） |
@@ -112,8 +118,8 @@ Web 资源）都有 **Board / 板载** 页可以操作：
 
 - **RGB 状态灯**：U1 是 WS2812 兼容的单线器件，固件自己产生 1.25 µs 波形
   （`src/linkr_ws2812.c`，RISC-V cycle counter + 关中断 30 µs/像素）；UART
-  收发活动会闪一下活动色（`CONFIG_LINKR_BLE_BRIDGE_RGB_ACTIVITY_COLOR`，
-  默认暗蓝色）。
+  收发活动使当前状态色闪烁；未连接时使用活动色
+  （`CONFIG_LINKR_BLE_BRIDGE_RGB_ACTIVITY_COLOR`，默认暗蓝色）。
 - **光耦开关**：GPIO10 拉低点亮 Q1 内部 LED，J5 的 1/2 脚导通，等价于按下
   目标板的复位/电源键。它是“干接点”，与目标板共地（J5 的 3/4 脚是 GND），
   不是电气隔离。
@@ -144,6 +150,7 @@ Kconfig（仅这些板子会开启）：
 | 选项 | 默认 | 说明 |
 |------|------|------|
 | `CONFIG_LINKR_BLE_BRIDGE_RGB_STATUS_LED` | y（有节点时） | 用 RGB 灯替代普通 GPIO 状态灯 |
+| `CONFIG_LINKR_BLE_BRIDGE_RGB_BRIGHTNESS` | 30 | RGB 输出亮度百分比（0–100） |
 | `CONFIG_LINKR_BLE_BRIDGE_RGB_ACTIVITY_COLOR` | `0x001830` | 活动闪烁颜色 |
 | `CONFIG_LINKR_BLE_BRIDGE_OPTO_SWITCH` | y（有节点时） | 光耦干接点 |
 | `CONFIG_LINKR_BLE_BRIDGE_IR` / `_IR_TX` / `_IR_RX` | y（有节点时） | 红外收发 |

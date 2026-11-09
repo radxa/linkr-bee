@@ -52,11 +52,12 @@ the following commands are supported; check it before using them on old firmware
 | `@c claim idle` | Take control only when the owner has been quiet for the idle window |
 | `@c release` | Release control, controller only |
 | `@c yield 2` | Transfer control to live session 2, controller only |
+| `@c ai on <epoch>` / `@c ai off <epoch>` | Notify AI takeover/end, current controller only; does not claim control |
 
 The long forms are `@linkr control?` and `@linkr control <action>`.
 
 ```text
-OK control self=2 owner=1 mode=readonly epoch=3 peers=2 ble_max=2 linkr_reserved=0
+OK control self=2 owner=1 mode=readonly epoch=3 peers=2 ble_max=2 linkr_reserved=0 agent_led=1
 ```
 
 `mode` is `control`, `readonly` or `available`. IDs are assigned for each live
@@ -75,6 +76,17 @@ may clients send text frames `@control ?`, `@control claim`, `@control release`
 or `@control yield 2`. UART bytes use binary frames. Text frames are reserved for
 control; fragmented or oversized control frames are rejected, never forwarded
 to the SBC. Do not probe old LAN firmware with these text commands.
+
+`agent_led=1` advertises AI status notifications. Send them only after this
+field is advertised, with the current `epoch`; stale generations return
+`stale_epoch`, and non-controllers receive `not_owner`. The shared
+Web/mobile/HarmonyOS assistant and resident tasks send `ai on` on start,
+renew every two seconds, and send `ai off` on completion or Stop. Heartbeats
+do not refresh the console's ownership idle timer. Release, handover and
+disconnect clear the indication immediately; a missing heartbeat expires after
+15 seconds. An ordinary `claim` does not mean AI takeover. LAN uses equivalent
+`@control ai on <epoch>` / `@control ai off <epoch>` text frames. Nothing is
+persisted to NVS.
 
 ## Delivery Boundaries
 

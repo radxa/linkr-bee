@@ -7,6 +7,10 @@
 #include <string.h>
 #include "serial_session.h"
 
+static bool ai_active;
+static unsigned int ai_updates;
+void linkr_status_led_ai(bool active) { ai_active = active; ++ai_updates; }
+static void ai_command(const void *peer, bool active, uint32_t epoch);
 static char a, b, c;
 static char response[256];
 /* The fake Zephyr clock used by serial_session.c on the host. */
@@ -14,6 +18,12 @@ uint32_t test_uptime_ms;
 static void command(const void *peer, const char *text)
 {
 	assert(linkr_session_control(peer, text, response, sizeof(response)));
+}
+static void ai_command(const void *peer, bool active, uint32_t epoch)
+{
+	char text[64];
+	snprintf(text, sizeof(text), "c ai %s %u", active ? "on" : "off", epoch);
+	command(peer, text);
 }
 static unsigned int id(const void *peer)
 {
@@ -39,7 +49,33 @@ int main(int argc, char **argv)
 	assert(!linkr_session_open(&a, LINKR_SESSION_BLE));
 	assert(!linkr_session_open(&b, LINKR_SESSION_BLE));
 	assert(!linkr_session_open(&c, LINKR_SESSION_LAN));
-	if (!strcmp(argv[1], "single_writer")) {
+	if (!strcmp(argv[1], "ai_indicator")) {
+		command(&a, "c claim");
+		uint32_t first = linkr_session_epoch(&a);
+		assert(strstr(response, "agent_led=1"));
+		ai_command(&a, true, first); assert(ai_active);
+		ai_command(&b, false, first); assert(ai_active && strstr(response, "not_owner"));
+		ai_command(&a, false, first + 1); assert(ai_active && strstr(response, "stale_epoch"));
+		for (size_t i = 0; i < 4; ++i) {
+			const char *bad[] = {"c ai off -1", "c ai off +2", "c ai off 2x", "c ai off 999999999999999999999999999999"};
+			command(&a, bad[i]); assert(ai_active && strstr(response, "stale_epoch"));
+		}
+		ai_command(&a, false, first); assert(!ai_active);
+		ai_command(&a, true, first); assert(ai_active);
+		command(&b, "c claim"); assert(!ai_active);
+		command(&a, "c claim");
+		ai_command(&a, true, first); assert(!ai_active && strstr(response, "stale_epoch"));
+		ai_command(&a, true, linkr_session_epoch(&a)); assert(ai_active);
+		command(&a, "c release"); assert(!ai_active);
+		command(&a, "c claim");
+		ai_command(&a, true, linkr_session_epoch(&a)); assert(ai_active);
+		linkr_session_close(&a); assert(!ai_active && ai_updates > 0);
+	} else if (!strcmp(argv[1], "ai_does_not_extend_ownership")) {
+		command(&a, "c claim");
+		test_uptime_ms = 3001;
+		ai_command(&a, true, linkr_session_epoch(&a)); assert(ai_active);
+		command(&b, "c claim idle"); assert(!ai_active && strstr(response, "mode=control"));
+	} else if (!strcmp(argv[1], "single_writer")) {
 		uint32_t ticket = linkr_session_ticket(&a, true);
 		assert(ticket && !linkr_session_ticket(&b, true) && !linkr_session_ticket(&c, true));
 		linkr_session_close(&b);

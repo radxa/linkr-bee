@@ -222,8 +222,8 @@ UART 自动波特率也是异步操作，但默认只在用户要求时运行：
 | `@linkr bonds label <type>/<addr> <hex>` | 设置任意配对的标签（需控制权；UTF-8 十六进制，最多 48 字节） |
 | `@linkr bonds label <type>/<addr> clear` | 清除任意配对的标签（需控制权） |
 | `@l?` | 查询 RGB 状态灯颜色（仅 Linkr Bee X1.0，其他板返回 `ERR led unsupported`） |
-| `@l=<r>,<g>,<b>` | 设置常亮颜色，通道 0–255 或 `0x00`–`0xff` |
-| `@l off` | 熄灭状态灯 |
+| `@l=<r>,<g>,<b>` | 预览颜色 5 秒后恢复自动状态；通道 0–255 或 `0x00`–`0xff`，AI 状态优先 |
+| `@l off` | 预览熄灭 5 秒后恢复自动状态，AI 状态优先 |
 | `@o?` | 查询光耦干接点状态（仅 Linkr Bee X1.0） |
 | `@o on` / `@o off` | 闭合 / 断开 J5 干接点 |
 | `@o pulse <ms>` | 闭合 1–60000 ms 后自动断开 |

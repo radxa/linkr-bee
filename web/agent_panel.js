@@ -156,7 +156,7 @@ const labels = {
   inspect_serial_execution: ["核查执行结果", "Inspect execution"],
 };
 
-export function createAgentPanel({ button, workspace, terminal, settings, bindingControl, accessory = null, readBoardPrompt = null, resident = null, openSettings, onOpen, onClose, onLayout, focusTerminal, getLang, getStatus, readLog, prepareInput, sendInput, onExecutionRecord = null, readExecutionEvents = null }) {
+export function createAgentPanel({ button, workspace, terminal, settings, bindingControl, accessory = null, readBoardPrompt = null, resident = null, openSettings, onOpen, onClose, onLayout, focusTerminal, getLang, getStatus, readLog, prepareInput, sendInput, onExecutionRecord = null, readExecutionEvents = null, onBusyChange = null }) {
   if (!available) return null;
   button.hidden = false;
   const text = (key) => labels[key]?.[getLang().startsWith("zh") ? 0 : 1] || key;
@@ -242,6 +242,8 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
   let executionMode = "auto";
   let fingerprint = "";
   let busy = false;
+  let stopping = false;
+  let residentWasBusy = false;
   const isResidentBusy = () => resident?.isBusy?.() === true;
   let version = 0;
   let eventVersion = 0;
@@ -545,6 +547,9 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
   }
   function refreshActivity() {
     const residentBusy = isResidentBusy();
+    if (residentBusy && !residentWasBusy) stopping = false;
+    residentWasBusy = residentBusy;
+    onBusyChange?.((busy || residentBusy) && !stopping);
     settings.setBusy(busy || residentBusy);
     $("agentAsk").disabled = $("agentNew").disabled = busy || residentBusy;
     $("agentStop").disabled = !(busy || residentBusy);
@@ -556,6 +561,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
   }
   function setBusy(value) {
     busy = value;
+    if (value) stopping = false;
     if (!value) activity.finish(currentTask?.status === "failed" ? "error" : currentTask?.status === "interrupted" ? "interrupted" : "done");
     refreshHistory();
     refreshActivity();
@@ -568,6 +574,8 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
   function stop(reason, { preserveConversation = true } = {}) {
     if (currentTask && busy) { currentTask.status = "interrupted"; persistTask(); }
     version++;
+    stopping = true;
+    onBusyChange?.(false);
     activity.finish("interrupted");
     runner?.abort();
     $("agentQueue").textContent = '';
@@ -1031,6 +1039,8 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
   }, true);
   $("agentStop").addEventListener("click", () => {
     if (isResidentBusy()) {
+      stopping = true;
+      onBusyChange?.(false);
       resident.cancelAll();
       refreshActivity();
     } else stop("stopped");

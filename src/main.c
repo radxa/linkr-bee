@@ -934,6 +934,7 @@ static void connected(struct bt_conn *conn, uint8_t err)
 		return;
 	}
 	atomic_inc(&ble_connection_count);
+	linkr_status_led_ble(true);
 	linkr_mgmt_connected(conn);
 	advertise_schedule(K_MSEC(100));
 
@@ -948,6 +949,7 @@ static void connected(struct bt_conn *conn, uint8_t err)
 static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
 	if (linkr_ble_peer_disconnected(conn)) atomic_dec(&ble_connection_count);
+	linkr_status_led_ble(atomic_get(&ble_connection_count) > 0);
 	k_mutex_lock(&conn_lock, K_FOREVER);
 	if (wifi_operation_conn == conn) {
 		bt_conn_unref(wifi_operation_conn);
@@ -1158,6 +1160,9 @@ static void wifi_state_event(uint32_t operation_id,
 	uint16_t flags = 0;
 	int err;
 	int len;
+
+	/* Autoconnect has no requesting BLE peer, but still drives status. */
+	linkr_status_led_wifi(linkr_wifi_is_connected());
 
 	k_mutex_lock(&conn_lock, K_FOREVER);
 	conn = wifi_operation_conn ? bt_conn_ref(wifi_operation_conn) : NULL;

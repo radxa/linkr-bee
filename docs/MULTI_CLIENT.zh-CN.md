@@ -40,11 +40,12 @@ Management v1 帧格式与请求编号不变，新增 bit 7 `MULTI_SESSION`：
 | `@c claim idle` | 仅当当前控制端安静超过空闲窗口时取得控制权 |
 | `@c release` | 控制端释放控制权 |
 | `@c yield 2` | 控制端主动交接给在线会话 2 |
+| `@c ai on <epoch>` / `@c ai off <epoch>` | 当前控制端通知 AI 开始／结束，不改变控制权 |
 
 长格式为 `@linkr control?` 和 `@linkr control <动作>`。
 
 ```text
-OK control self=2 owner=1 mode=readonly epoch=3 peers=2 ble_max=2 linkr_reserved=0
+OK control self=2 owner=1 mode=readonly epoch=3 peers=2 ble_max=2 linkr_reserved=0 agent_led=1
 ```
 
 `mode` 分别为 `control`、`readonly`、`available`；会话编号只在本次连接有效。
@@ -58,6 +59,13 @@ LAN 认证不变。新固件在认证完成后主动发送文本状态帧；客�
 才可发送 `@control ?`、`@control claim`、`@control release` 或 `@control yield 2`
 文本帧。UART 必须使用二进制帧；文本帧保留给控制协议，分片或超长控制帧会被拒绝，
 不能泄漏到 SBC。不要对旧版 LAN 固件发送探测控制文本。
+
+`agent_led=1` 声明支持 AI 状态通知。客户端只在该字段存在时发送通知，并带上
+当前 `epoch`；旧代际返回 `stale_epoch`，非控制端返回 `not_owner`。Web／移动端／
+HarmonyOS 助手和常驻任务开始时发送 `ai on`，每 2 秒续期，结束或停止时发送 `ai off`。
+心跳不刷新串口控制权的空闲计时。释放、交接、断连立即撤销 AI 状态，丢失心跳后
+15 秒自动恢复连接状态色；普通 `claim` 不代表 AI 接管。LAN 使用同样的
+`@control ai on <epoch>`／`@control ai off <epoch>` 文本帧。该通知不写入 NVS。
 
 ## 队列和交接边界
 
