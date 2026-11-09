@@ -1758,7 +1758,21 @@ async function saveConfig(ctx, config, body, signal) {
     // including while it is queued or preparing a compatibility fallback.
     if (changed && (configBorrows > 0 || sessionBorrows > 0 || streamBorrows > 0 ||
         oneShotWaiters > 0 || sessionStarting || session?.busy)) {
-      return { ok: false, error: 'The console is busy. Wait for the active operation before changing the connection.' };
+      // The panel can say which kind of work holds the link instead of only
+      // showing that something does; keep `error` for older callers.
+      const busy = [];
+      if (configBorrows > 0) busy.push('config');
+      if (sessionBorrows > 0) busy.push('session');
+      if (streamBorrows > 0) busy.push('command');
+      if (oneShotWaiters > 0) busy.push('queued');
+      if (sessionStarting) busy.push('connecting');
+      if (session?.busy) busy.push('running');
+      return {
+        ok: false,
+        code: 'busy',
+        busy,
+        error: 'The console is busy. Wait for the active operation before changing the connection.',
+      };
     }
     const applyLocally = () => {
       Object.assign(config, next);

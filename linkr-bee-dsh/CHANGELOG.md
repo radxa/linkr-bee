@@ -5,6 +5,13 @@
 The published cut of the Harness plugin after the 1.1.4 baseline. Versions
 continue to follow the Linkr Bee main line.
 
+- The connection-settings page no longer lets the UART card look like the way
+  to save a selected board: the footer button is the only "Save settings"
+  action, the UART action is labelled "Write to board", and unsaved connection
+  edits disable that card with a hint to save first. A failed scan reports a
+  scan failure instead of "save failed" and keeps the previous results. A
+  busy save says the board is working instead of echoing the Host's English
+  message, and UART errors for a disconnected or renamed board are explained.
 - Follow-up review fixes: commands acquire their configuration before preparing
   dial arguments or a timeout override, including one-shot management calls and
   HTTP input routes. Settings patches are persisted and applied in order; a

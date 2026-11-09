@@ -13411,13 +13411,22 @@ window.__ModuleLoader__.load({
       lanToken: '访问令牌',
       lanTokenKeep: '留空 = 保持不变',
       timeout: '超时 (ms)',
-      save: '保存',
+      save: '保存设置',
       saving: '保存中…',
       close: '关闭',
       saved: '已保存',
       saveFailed: '保存失败',
+      loadFailed: '读取配置失败',
+      scanFailed: '扫描失败',
+      unsaved: '有未保存的修改',
+      busyNotice: '板子正在执行其他操作，请稍候再保存。',
+      busyConnecting: '正在连接板子，请稍候再保存。',
+      busyCommand: '板子正在执行命令或扫描，请稍候再保存。',
+      busyQueued: '还有操作在排队，请稍候再保存。',
+      uartNeedsSave: '板子名称或传输方式已修改，请先点底部「保存设置」，再读取或写入串口参数。',
+      notConnected: '板子未连接或名称已变更，请检查设备后重试。',
       memoryOnly: '仅本次运行生效',
-      configHint: '修改后插件会按新配置重启，串口会自动重连。',
+      configHint: '修改连接设置后点「保存设置」，插件会按新配置重启并重连。',
       loading: '读取配置…',
       uartTitle: '串口参数',
       uartBaud: '波特率',
@@ -13426,11 +13435,13 @@ window.__ModuleLoader__.load({
       uartStop: '停止位',
       uartFlow: '流控',
       uartRead: '读取',
-      uartApply: '应用',
-      uartApplying: '应用中…',
-      uartApplied: '串口参数已更新',
+      uartApply: '写入板子',
+      uartApplying: '写入中…',
+      uartApplied: '串口参数已写入板子',
       uartFailed: '串口参数失败',
       uartBleOnly: '仅蓝牙 BLE 管理通道可读取或修改串口参数',
+      uartHint: '「读取 / 写入板子」只改 Bee 的串口参数；板子名称和传输方式请用底部「保存设置」保存。',
+      boardHint: '选好设备后按底部「保存设置」生效；「扫描」只刷新列表。',
       uartUnknown: '未读到当前参数',
       uartCustom: '自定义',
     };
@@ -13469,13 +13480,22 @@ window.__ModuleLoader__.load({
       lanToken: 'LAN token',
       lanTokenKeep: 'empty = keep current',
       timeout: 'Timeout (ms)',
-      save: 'Save',
+      save: 'Save settings',
       saving: 'Saving…',
       close: 'Close',
       saved: 'Saved',
       saveFailed: 'Save failed',
+      loadFailed: 'Failed to read the configuration',
+      scanFailed: 'Scan failed',
+      unsaved: 'Unsaved changes',
+      busyNotice: 'The board is busy with another operation; try saving when it finishes.',
+      busyConnecting: 'Connecting to the board; try saving when it finishes.',
+      busyCommand: 'A command or scan is running on the board; try saving when it finishes.',
+      busyQueued: 'More operations are queued; try saving when they finish.',
+      uartNeedsSave: 'The board name or transport changed; press "Save settings" before reading or writing UART settings.',
+      notConnected: 'The board is not connected or its name changed; check the device and retry.',
       memoryOnly: 'applies to this run only',
-      configHint: 'The plugin restarts with the new config; the link reconnects by itself.',
+      configHint: 'After changing connection settings, press "Save settings"; the plugin restarts with the new config and reconnects.',
       loading: 'Reading config…',
       uartTitle: 'UART settings',
       uartBaud: 'Baud',
@@ -13484,11 +13504,13 @@ window.__ModuleLoader__.load({
       uartStop: 'Stop bits',
       uartFlow: 'Flow',
       uartRead: 'Read',
-      uartApply: 'Apply',
-      uartApplying: 'Applying…',
-      uartApplied: 'UART settings updated',
+      uartApply: 'Write to board',
+      uartApplying: 'Writing…',
+      uartApplied: 'UART settings written to the board',
       uartFailed: 'UART settings failed',
       uartBleOnly: 'UART settings are read and changed over the Bluetooth LE management channel only',
+      uartHint: '"Read / Write to board" only changes the Bee UART settings; save the board name and transport with "Save settings" at the bottom.',
+      boardHint: 'Pick a device, then press "Save settings" at the bottom; Scan only refreshes the list.',
       uartUnknown: 'Current settings unknown',
       uartCustom: 'Custom',
     };
@@ -13656,7 +13678,7 @@ window.__ModuleLoader__.load({
      */
     const BAUD_RATES = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
 
-    function UartSettings({ t, transport }) {
+    function UartSettings({ t, transport, connectionDirty }) {
       const [baud, setBaud] = useState('115200');
       const [dataBits, setDataBits] = useState('8');
       const [parity, setParity] = useState('n');
@@ -13702,6 +13724,16 @@ window.__ModuleLoader__.load({
         }
       };
 
+      // Map the two errors a person can actually act on; keep everything else
+      // verbatim so a real CLI failure is not swallowed.
+      const explain = (text) => {
+        const message = String(text || '');
+        if (/not_connected|no board named|not connected|disconnected/i.test(message)) {
+          return t('notConnected');
+        }
+        return message.startsWith(t('uartFailed')) ? message : `${t('uartFailed')}: ${message}`;
+      };
+
       const read = async () => {
         setBusy(true);
         setNotice('');
@@ -13711,12 +13743,12 @@ window.__ModuleLoader__.load({
           if (payload.ok === false) {
             // An automatic read on an unattached board is not a user error.
             // Keep the card quiet until the person explicitly asks.
-            if (!initial.current) setNotice(payload.error || t('uartFailed'));
+            if (!initial.current) setNotice(explain(payload.error || t('uartFailed')));
           } else {
             applyReply(payload);
           }
         } catch (error) {
-          if (!initial.current) setNotice(`${t('uartFailed')}: ${String((error && error.message) || error)}`);
+          if (!initial.current) setNotice(explain(String((error && error.message) || error)));
         } finally {
           initial.current = false;
           setBusy(false);
@@ -13734,13 +13766,13 @@ window.__ModuleLoader__.load({
           });
           const payload = await response.json().catch(() => ({}));
           if (!response.ok || payload.ok === false) {
-            setNotice(`${t('uartFailed')}: ${payload.error || response.status}`);
+            setNotice(explain(payload.error || response.status));
           } else {
             setNotice(`${t('uartApplied')} · ${payload.value || spec}`);
             applyReply(payload);
           }
         } catch (error) {
-          setNotice(`${t('uartFailed')}: ${String((error && error.message) || error)}`);
+          setNotice(explain(String((error && error.message) || error)));
         } finally {
           setBusy(false);
         }
@@ -13776,10 +13808,11 @@ window.__ModuleLoader__.load({
           'div',
           { className: 'lb-uart-head' },
           h('span', { className: 'lb-uart-title' }, t('uartTitle')),
-          h('span', { className: 'lb-uart-state' }, notice || (known ? spec : t('uartUnknown'))),
-          h('button', { className: 'lb-btn-ghost lb-uart-btn', onClick: read, disabled: busy }, t('uartRead')),
-          h('button', { className: 'lb-btn lb-uart-btn', onClick: apply, disabled: busy }, busy ? t('uartApplying') : t('uartApply')),
+          h('span', { className: 'lb-uart-state', role: 'status' }, notice || (known ? spec : t('uartUnknown'))),
+          h('button', { className: 'lb-btn-ghost lb-uart-btn', onClick: read, disabled: busy || connectionDirty }, t('uartRead')),
+          h('button', { className: 'lb-btn-ghost lb-uart-btn', onClick: apply, disabled: busy || connectionDirty }, busy ? t('uartApplying') : t('uartApply')),
         ),
+        h('div', { className: 'lb-note' }, connectionDirty ? t('uartNeedsSave') : t('uartHint')),
         h(
           'div',
           { className: 'lb-uart-grid' },
@@ -13821,6 +13854,13 @@ window.__ModuleLoader__.load({
       const [boards, setBoards] = useState(null);
       const [scanning, setScanning] = useState(false);
       const [tokenEdited, setTokenEdited] = useState(false);
+      const baseline = useRef(null);
+      // Connection fields decide which board the UART card talks to, so they
+      // get a separate dirty bit from timeout-only edits.
+      const connKey = (f, token) =>
+        JSON.stringify([f.transport, f.bleName, f.lanHost, token ? f.lanToken : '']);
+      const fullKey = (f, token) =>
+        JSON.stringify([f.transport, f.bleName, f.lanHost, token ? f.lanToken : '', String(f.timeoutMs)]);
 
       useEffect(() => {
         let alive = true;
@@ -13829,17 +13869,19 @@ window.__ModuleLoader__.load({
           .then((payload) => {
             if (!alive) return;
             const config = (payload && payload.config) || {};
-            setForm({
+            const loaded = {
               transport:
                 config.transport === 'lan' || config.transport === 'loopback' ? config.transport : 'ble',
               bleName: config.bleName || '',
               lanHost: config.lanHost || '',
               lanToken: '',
               timeoutMs: Number.isFinite(config.timeoutMs) ? String(config.timeoutMs) : '30000',
-            });
+            };
+            setForm(loaded);
+            baseline.current = { conn: connKey(loaded, false), full: fullKey(loaded, false) };
           })
           .catch(() => {
-            if (alive) setNotice(t('saveFailed'));
+            if (alive) setNotice(t('loadFailed'));
           });
         return () => {
           alive = false;
@@ -13848,7 +13890,7 @@ window.__ModuleLoader__.load({
 
       const scan = async () => {
         setScanning(true);
-        setBoards(null);
+        setNotice('');
         try {
           const response = await fetch(SCAN_URL, {
             method: 'POST',
@@ -13856,10 +13898,15 @@ window.__ModuleLoader__.load({
             body: '{}',
           });
           const payload = await response.json().catch(() => ({}));
+          if (!response.ok || payload.ok === false) {
+            // A failed scan is not an empty one: keep the previous list so the
+            // person does not think their board disappeared.
+            setNotice(`${t('scanFailed')}: ${payload.error || response.status}`);
+            return;
+          }
           setBoards(Array.isArray(payload.boards) ? payload.boards : []);
-          if (!response.ok || payload.ok === false) setNotice(t('saveFailed'));
-        } catch {
-          setBoards([]);
+        } catch (error) {
+          setNotice(`${t('scanFailed')}: ${String((error && error.message) || error)}`);
         } finally {
           setScanning(false);
         }
@@ -13884,8 +13931,23 @@ window.__ModuleLoader__.load({
           });
           const payload = await response.json().catch(() => ({}));
           if (!response.ok || payload.ok === false) {
-            setNotice(`${t('saveFailed')}: ${payload.error || response.status}`);
+            if (payload.code === 'busy') {
+              const reasons = Array.isArray(payload.busy) ? payload.busy : [];
+              setNotice(reasons.includes('connecting')
+                ? t('busyConnecting')
+                : reasons.includes('command') || reasons.includes('running') || reasons.includes('session')
+                  ? t('busyCommand')
+                  : reasons.includes('queued')
+                    ? t('busyQueued')
+                    : t('busyNotice'));
+            } else if (/not_connected|no board named|not connected/i.test(String(payload.error || ''))) {
+              setNotice(t('notConnected'));
+            } else {
+              setNotice(`${t('saveFailed')}: ${payload.error || response.status}`);
+            }
           } else {
+            baseline.current = { conn: connKey(form, false), full: fullKey(form, false) };
+            setTokenEdited(false);
             setNotice(payload.applied === 'profile' ? t('saved') : `${t('saved')} · ${t('memoryOnly')}`);
           }
         } catch (error) {
@@ -13894,6 +13956,11 @@ window.__ModuleLoader__.load({
           setBusy(false);
         }
       };
+
+      const dirtyConn = form !== null && baseline.current !== null &&
+        connKey(form, tokenEdited) !== baseline.current.conn;
+      const dirty = form !== null && baseline.current !== null &&
+        fullKey(form, tokenEdited) !== baseline.current.full;
 
       if (!form) return h('div', { className: 'lb-settings' }, h('div', { className: 'lb-note' }, t('loading')));
 
@@ -13932,6 +13999,7 @@ window.__ModuleLoader__.load({
               h('button', { className: 'lb-btn-ghost', onClick: scan, disabled: scanning }, scanning ? t('scanning') : t('scan')),
             ),
           ),
+        form.transport === 'ble' && h('div', { className: 'lb-note' }, t('boardHint')),
         form.transport === 'ble' &&
           boards !== null &&
           h(
@@ -13942,7 +14010,7 @@ window.__ModuleLoader__.load({
               : boards.map((board) =>
                   h(
                     'button',
-                    { key: board.name, className: 'lb-chip', onClick: () => setForm({ ...form, bleName: board.name }) },
+                    { key: board.name, className: board.name === form.bleName ? 'lb-chip lb-chip-selected' : 'lb-chip', onClick: () => setForm({ ...form, bleName: board.name }) },
                     board.name,
                   ),
                 ),
@@ -13980,11 +14048,11 @@ window.__ModuleLoader__.load({
             onChange: (e) => setForm({ ...form, timeoutMs: e.target.value }),
           }),
         ),
-        h(UartSettings, { t, transport: form.transport }),
+        h(UartSettings, { t, transport: form.transport, connectionDirty: dirtyConn }),
         h(
           'div',
           { className: 'lb-settings-foot' },
-          h('span', { className: 'lb-note' }, notice || t('configHint')),
+          h('span', { className: 'lb-note', role: 'status' }, notice || (dirty ? t('unsaved') : t('configHint'))),
           h('button', { className: 'lb-btn', onClick: save, disabled: busy }, busy ? t('saving') : t('save')),
           h('button', { className: 'lb-ghost', onClick: onClose }, t('close')),
         ),
@@ -14998,6 +15066,7 @@ window.__ModuleLoader__.load({
 .lb-boards { display: flex; flex-wrap: wrap; gap: 6px; }
 .lb-chip { background: var(--dsw-alias-bg-base); border: 1px solid var(--dsw-alias-border-l2); color: var(--dsw-alias-label-primary); border-radius: 999px; padding: 4px 10px; font-size: 12px; cursor: pointer; }
 .lb-chip:hover { border-color: var(--dsw-alias-brand-primary); }
+.lb-chip-selected { border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-brand-primary); }
 .lb-chip:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px; }
 .lb-note { color: var(--dsw-alias-label-secondary); font-size: 11.5px; }
 .lb-btn-ghost { min-height: 36px; background: transparent; border: 1px solid var(--dsw-alias-border-l2); color: var(--dsw-alias-label-primary); border-radius: 7px; padding: 6px 10px; font-size: 12.5px; cursor: pointer; flex: 0 0 auto; }

@@ -895,3 +895,32 @@ test('output truncation preserves a later lost-link error without replay', async
   assert.equal(history.filter(c=>c.mode==='request'&&c.op==='exec').length,1);
   assert.equal(history.some(c=>c.mode==='one-shot'),false);
 });
+
+test('a connection change reports which operation holds the console', async t => {
+  const f = await fixture(t, 'ok');
+  const scanning = f.route('/scan', {});
+  await pause(50);
+  const answer = await f.route('/config', { bleName: 'Linkr Bee Other' });
+  assert.equal(answer.status, 200);
+  assert.equal(answer.ok, false);
+  assert.equal(answer.code, 'busy');
+  assert.ok(answer.busy.includes('command'), 'a one-shot scan holds the link as a command');
+  const scan = await scanning;
+  assert.equal(scan.ok, true);
+});
+
+test('an idle console accepts a connection change', async t => {
+  const f = await fixture(t, 'ok');
+  const answer = await f.route('/config', { bleName: 'Linkr Bee Other' });
+  assert.equal(answer.status, 200);
+  assert.equal(answer.ok, true);
+  assert.equal(answer.applied, 'memory');
+});
+
+test('a failed scan is reported as a scan failure, not an empty list', async t => {
+  const f = await fixture(t, 'scan-fail');
+  const answer = await f.route('/scan', {});
+  assert.equal(answer.status, 400);
+  assert.equal(answer.ok, false);
+  assert.match(answer.error, /bluetooth adapter unavailable/);
+});
