@@ -95,6 +95,24 @@
     return characteristic;
   }
 
+  /* Web Bluetooth runs one GATT procedure at a time per device. Starting a
+   * second read, write or subscribe before the previous promise settles
+   * rejects with "GATT operation already in progress". The application keeps
+   * independent queues for UART bytes and management frames, and connection
+   * setup also subscribes, so every GATT call funnels through this single
+   * chain instead of racing. A rejected operation still releases the chain so
+   * one failed write cannot wedge the transport. */
+  let browserGattChain = Promise.resolve();
+
+  function withGattLock(operation) {
+    const run = browserGattChain.then(operation, operation);
+    browserGattChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
   const browserBackend = {
     platform: "web",
 
@@ -199,11 +217,13 @@
     },
 
     async read(_deviceId, serviceUuid, characteristicUuid) {
-      const characteristic = await getBrowserCharacteristic(
-        serviceUuid,
-        characteristicUuid,
-      );
-      return copyDataView(await characteristic.readValue());
+      return withGattLock(async () => {
+        const characteristic = await getBrowserCharacteristic(
+          serviceUuid,
+          characteristicUuid,
+        );
+        return copyDataView(await characteristic.readValue());
+      });
     },
 
     async write(
@@ -213,18 +233,20 @@
       value,
       withResponse = true,
     ) {
-      const characteristic = await getBrowserCharacteristic(
-        serviceUuid,
-        characteristicUuid,
-      );
-      const bytes = copyBytes(value);
-      if (!withResponse && characteristic.writeValueWithoutResponse) {
-        await characteristic.writeValueWithoutResponse(bytes);
-      } else if (characteristic.writeValueWithResponse) {
-        await characteristic.writeValueWithResponse(bytes);
-      } else {
-        await characteristic.writeValue(bytes);
-      }
+      return withGattLock(async () => {
+        const characteristic = await getBrowserCharacteristic(
+          serviceUuid,
+          characteristicUuid,
+        );
+        const bytes = copyBytes(value);
+        if (!withResponse && characteristic.writeValueWithoutResponse) {
+          await characteristic.writeValueWithoutResponse(bytes);
+        } else if (characteristic.writeValueWithResponse) {
+          await characteristic.writeValueWithResponse(bytes);
+        } else {
+          await characteristic.writeValue(bytes);
+        }
+      });
     },
 
     async startNotifications(
@@ -233,39 +255,46 @@
       characteristicUuid,
       callback,
     ) {
-      const characteristic = await getBrowserCharacteristic(
-        serviceUuid,
-        characteristicUuid,
-      );
-      const key = characteristicKey(serviceUuid, characteristicUuid);
-      const previous = browserSubscriptions.get(key);
-      if (previous) {
-        characteristic.removeEventListener(
-          "characteristicvaluechanged",
-          previous,
+      return withGattLock(async () => {
+        const characteristic = await getBrowserCharacteristic(
+          serviceUuid,
+          characteristicUuid,
         );
-      }
-      const listener = (event) => callback(copyBytes(event.target.value));
-      browserSubscriptions.set(key, listener);
-      characteristic.addEventListener("characteristicvaluechanged", listener);
-      await characteristic.startNotifications();
-    },
-
-    async stopNotifications(_deviceId, serviceUuid, characteristicUuid) {
-      const key = characteristicKey(serviceUuid, characteristicUuid);
-      const characteristic = browserCharacteristics.get(key);
-      if (!characteristic) {
-        return;
-      }
-      const listener = browserSubscriptions.get(key);
-      if (listener) {
-        characteristic.removeEventListener(
+        const key = characteristicKey(serviceUuid, characteristicUuid);
+        const previous = browserSubscriptions.get(key);
+        if (previous) {
+          characteristic.removeEventListener(
+            "characteristicvaluechanged",
+            previous,
+          );
+        }
+        const listener = (event) => callback(copyBytes(event.target.value));
+        browserSubscriptions.set(key, listener);
+        characteristic.addEventListener(
           "characteristicvaluechanged",
           listener,
         );
-      }
-      browserSubscriptions.delete(key);
-      await characteristic.stopNotifications();
+        await characteristic.startNotifications();
+      });
+    },
+
+    async stopNotifications(_deviceId, serviceUuid, characteristicUuid) {
+      return withGattLock(async () => {
+        const key = characteristicKey(serviceUuid, characteristicUuid);
+        const characteristic = browserCharacteristics.get(key);
+        if (!characteristic) {
+          return;
+        }
+        const listener = browserSubscriptions.get(key);
+        if (listener) {
+          characteristic.removeEventListener(
+            "characteristicvaluechanged",
+            listener,
+          );
+        }
+        browserSubscriptions.delete(key);
+        await characteristic.stopNotifications();
+      });
     },
   };
 

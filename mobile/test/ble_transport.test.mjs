@@ -208,3 +208,132 @@ test("rediscovery timeout is bounded and stops scanning", async (t) => {
   assert.equal(f.calls.watchSignal.aborted, true);
   assert.equal(f.listeners.has("advertisementreceived"), false);
 });
+
+function browserGattFixture({ failFirst = false } = {}) {
+  const calls = [];
+  let releaseWrite;
+  const gate = new Promise((resolve) => {
+    releaseWrite = resolve;
+  });
+  const characteristic = {
+    async writeValueWithResponse(bytes) {
+      calls.push(["write:start", Array.from(bytes)]);
+      if (calls.filter((call) => call[0] === "write:start").length === 1) {
+        await gate;
+        if (failFirst) throw new Error("GATT failure");
+      }
+      calls.push(["write:end", Array.from(bytes)]);
+    },
+    async startNotifications() {
+      calls.push(["start:notifications"]);
+    },
+    async stopNotifications() {
+      calls.push(["stop:notifications"]);
+    },
+    addEventListener() {},
+    removeEventListener() {},
+  };
+  const server = {
+    connected: true,
+    async getPrimaryService() {
+      return {
+        async getCharacteristic() {
+          return characteristic;
+        },
+      };
+    },
+  };
+  const device = {
+    id: "browser-1",
+    name: "Linkr Bee 0001",
+    addEventListener() {},
+    removeEventListener() {},
+    gatt: {
+      connected: false,
+      async connect() {
+        this.connected = true;
+        return server;
+      },
+      disconnect() {
+        this.connected = false;
+      },
+    },
+  };
+  const { transport } = installTransport({
+    navigator: {
+      bluetooth: {
+        async requestDevice() {
+          return device;
+        },
+      },
+    },
+  });
+  return { transport, device, calls, release: () => releaseWrite() };
+}
+
+async function settle() {
+  for (let i = 0; i < 10; i += 1) await Promise.resolve();
+}
+
+test("browser serializes concurrent GATT writes", async () => {
+  const f = browserGattFixture();
+  await f.transport.requestDevice({});
+  await f.transport.connect(f.device.id);
+
+  const first = f.transport.write("browser-1", "service", "characteristic", [1], true);
+  const second = f.transport.write("browser-1", "service", "characteristic", [2], true);
+  await settle();
+
+  assert.deepEqual(
+    f.calls.filter((call) => call[0] === "write:start"),
+    [["write:start", [1]]],
+    "the second write must not start while the first is in flight",
+  );
+
+  f.release();
+  await Promise.all([first, second]);
+  assert.deepEqual(f.calls.filter((call) => call[0] === "write:start"), [
+    ["write:start", [1]],
+    ["write:start", [2]],
+  ]);
+});
+
+test("browser queues notification setup behind a pending write", async () => {
+  const f = browserGattFixture();
+  await f.transport.requestDevice({});
+  await f.transport.connect(f.device.id);
+
+  const write = f.transport.write("browser-1", "service", "characteristic", [3], true);
+  const subscribe = f.transport.startNotifications(
+    "browser-1",
+    "service",
+    "characteristic",
+    () => {},
+  );
+  await settle();
+
+  assert.deepEqual(f.calls.filter((call) => call[0] === "start:notifications"), []);
+  f.release();
+  await Promise.all([write, subscribe]);
+  assert.deepEqual(f.calls.filter((call) => call[0] === "start:notifications"), [
+    ["start:notifications"],
+  ]);
+});
+
+test("a rejected GATT write releases the serialization chain", async () => {
+  const f = browserGattFixture({ failFirst: true });
+  await f.transport.requestDevice({});
+  await f.transport.connect(f.device.id);
+
+  const failing = f.transport.write("browser-1", "service", "characteristic", [4], true);
+  const following = f.transport.write("browser-1", "service", "characteristic", [5], true);
+  await settle();
+  f.release();
+
+  await assert.rejects(failing, /GATT failure/);
+  await following;
+  assert.deepEqual(f.calls.filter((call) => call[0] === "write:start"), [
+    ["write:start", [4]],
+    ["write:start", [5]],
+  ]);
+});
