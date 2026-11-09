@@ -60,7 +60,7 @@ west flash
 west flash --esp-device /dev/cu.usbmodemXXXX
 ```
 
-X1.0 的 USB-C 同时是供电、烧录和调试口。烧录完成后如果电脑能看到 USB 串口但搜不到蓝牙，说明芯片停在 ROM 下载模式：拔插一次 USB，或执行 `esptool --port <端口> --after watchdog-reset read-mac` 让应用重新启动。
+X1.0 的 USB-C 同时是供电、烧录和调试口。烧录完成后如果电脑能看到 USB 串口但搜不到蓝牙，先检查烧录结果和 USB 调试日志；仅凭串口枚举不能判断芯片是否停在 ROM 下载模式。若日志确认仍在 ROM 下载模式，可拔插一次 USB，或执行 `esptool --port <端口> --after watchdog-reset read-mac` 让应用重新启动。
 
 如果使用 GitHub Releases 中的预编译镜像，解压后进入目录运行 `flash_firmware.sh`。脚本按镜像文件名推断芯片和写入地址，不做全片擦除：
 
