@@ -22,6 +22,8 @@ log_*.txt
 
 # Local tooling state
 .reasonix/
+# Dependencies installed into the linked Harness plugin (npm install linkr-bee-cli)
+linkr-bee-dsh/node_modules/
 
 # Mobile app dependencies and generated output
 mobile/node_modules/

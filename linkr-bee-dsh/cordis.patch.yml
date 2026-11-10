@@ -4,7 +4,8 @@
 # keeps its own connection entry in the browser and does not read these.
 #
 #   cliPath       bee-cli executable; empty = auto-detect (LINKR_BEE_CLI env,
-#                 the workspace build, then `bee-cli` on PATH)
+#                 the linkr-bee-cli launcher, this checkout's build under
+#                 tools/linkr-tui/target/release, then `bee-cli` on PATH)
 #   transport     'ble' (auto-discovers a nearby board), 'lan' or 'loopback'
 #   lanHost       LAN bridge: host, host:port or ws:// URL (transport: lan)
 #   lanToken      LAN access token, 32 hex chars; sent via LINKR_LAN_TOKEN

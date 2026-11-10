@@ -39,8 +39,10 @@ on the target board — the person and the agent share one board and one link.
   rm -f target/release/bee-cli && cp target/release/bee target/release/bee-cli
   ```
 
-  The plugin resolves it as: `cliPath` (below) → `$LINKR_BEE_CLI` → `bee-cli` on
-  `PATH` (which the global npm install provides). Keep the *same path* across
+  The plugin resolves it as: `cliPath` (below) → `$LINKR_BEE_CLI` → the
+  `linkr-bee-cli` launcher this plugin depends on (it fetches and checks the
+  release binary) → `tools/linkr-tui/target/release/bee-cli` in the source
+  checkout → `bee-cli` on `PATH`. Keep the *same path* across
   restarts; replace the file with `rm`/`cp` rather than overwriting it in place
   (macOS may refuse to run a binary that was rewritten under the same inode).
 

@@ -5,6 +5,11 @@
 The published cut of the Harness plugin after the 1.1.4 baseline. Versions
 continue to follow the Linkr Bee main line.
 
+- Resolution now falls back to a `bee-cli` built in the checkout this plugin is
+  linked from (`tools/linkr-tui/target/release/bee-cli`). A profile whose
+  package manager pruned the linked plugin's `linkr-bee-cli` dependency used to
+  fail every link with "bee-cli was not found" even though the person had just
+  built it; the documented auto-detect order now matches the code.
 - The connection-settings page no longer lets the UART card look like the way
   to save a selected board: the footer button is the only "Save settings"
   action, the UART action is labelled "Write to board", and unsaved connection

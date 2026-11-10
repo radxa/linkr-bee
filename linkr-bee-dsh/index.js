@@ -103,7 +103,10 @@ function killStrayChildren() {
  * 3. the `linkr-bee-cli` npm launcher this plugin depends on: it downloads the
  *    platform binary on first use, checks it against the release's SHA256SUMS
  *    and caches it, so installing the plugin is the whole install;
- * 4. `bee-cli` on `PATH` — where a binary someone built themselves ends up.
+ * 4. a `bee-cli` built in this checkout (`tools/linkr-tui/target/release`) —
+ *    the developer case, where the plugin is linked from the source tree and a
+ *    package manager does not install a linked package's own dependencies;
+ * 5. `bee-cli` on `PATH` — where a binary someone built themselves ends up.
  */
 function resolveCli(config) {
   for (const candidate of [config?.cliPath, process.env.LINKR_BEE_CLI]) {
@@ -126,9 +129,24 @@ function resolveCli(config) {
   for (const launcher of launcherCandidates()) {
     if (launcher !== null) return { command: process.execPath, args: [launcher] };
   }
+  const built = workspaceBuild();
+  if (built !== null) return { command: built, args: [] };
   // libuv does not resolve `.cmd` without a shell, so name the executable
   // explicitly on Windows; the bundled launcher above is the normal path.
   return { command: process.platform === 'win32' ? 'bee-cli.exe' : 'bee-cli', args: [] };
+}
+
+/**
+ * A `bee-cli` built beside this checkout's `linkr-bee-dsh` directory, or null
+ * when the plugin was installed rather than linked. This is what keeps a
+ * source checkout working when its `node_modules` is pruned: the dependency's
+ * launcher disappears, but the build the person just made is still there.
+ */
+function workspaceBuild() {
+  const root = dirname(dirname(fileURLToPath(import.meta.url)));
+  const exe = process.platform === 'win32' ? 'bee-cli.exe' : 'bee-cli';
+  const candidate = join(root, 'tools', 'linkr-tui', 'target', 'release', exe);
+  return existsSync(candidate) ? candidate : null;
 }
 
 /** The installed `linkr-bee-cli` launcher, or null when this profile has none. */
@@ -1858,7 +1876,7 @@ const CONFIG_JSON_SCHEMA = {
     bleAddress: { type: 'string', default: '', title: 'Board address', description: 'Board MAC, e.g. EE:C7:42:34:48:CF; empty = discover by name' },
     lanHost: { type: 'string', default: '', title: 'LAN host', description: 'host, host:port or ws:// URL of the bridge (transport: lan)' },
     lanToken: { type: 'string', default: '', title: 'LAN token', description: '32-hex LAN access token, sent through LINKR_LAN_TOKEN' },
-    cliPath: { type: 'string', default: '', title: 'bee-cli path', description: 'bee-cli executable; empty = auto-detect (LINKR_BEE_CLI, the workspace build, then PATH)' },
+    cliPath: { type: 'string', default: '', title: 'bee-cli path', description: 'bee-cli executable; empty = auto-detect (LINKR_BEE_CLI, the linkr-bee-cli launcher, this checkout\'s build, then PATH)' },
     timeoutMs: { type: 'number', default: 30000, title: 'Timeout (ms)', description: 'Per-call budget for one bee-cli request' },
     sendCaptureMs: { type: 'number', default: 1500, title: 'Capture window (ms)', description: 'How long linkr_bee_send keeps the link open to capture the reply' },
   },
