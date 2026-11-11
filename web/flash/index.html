@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Linkr Bee · 固件刷写</title>
+<meta name="description" content="在浏览器里通过 USB 刷写 Linkr Bee 固件，不需要安装任何工具。">
+<link rel="icon" href="../favicon.svg">
+<link rel="stylesheet" href="./flash.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="dot" aria-hidden="true"></span>
+    <h1>Linkr Bee · 固件刷写</h1>
+  </div>
+  <span class="meta" id="buildMeta">正在读取固件清单…</span>
+</header>
+
+<main>
+  <p class="lede">
+    插上板子、选择型号、点一下写入。固件随本站发布，浏览器直接通过 USB 刷写，
+    不需要安装 esptool 或驱动。
+  </p>
+
+  <section id="boards" class="grid" aria-live="polite" aria-busy="true"></section>
+
+  <section class="card notes">
+    <h2>刷写前请确认</h2>
+    <ul>
+      <li>桌面版 <strong>Chrome 或 Edge</strong>：刷写用的是 Web Serial，Safari 与 Firefox 不支持。</li>
+      <li>用<strong>能传数据的 USB 线</strong>；只有充电线时电脑看不到串口。</li>
+      <li>Linkr Bee X1.0 与 C3 开发板走芯片自带的 USB-Serial/JTAG，插上就能选；
+          WROOM 开发板需要板载 USB-UART 芯片。</li>
+      <li>写入的是 <code>0x0</code> 应用区。已保存的配对与设置通常在别的分区里，会保留；
+          但刷机有风险，重要配置请先备份。</li>
+      <li>刷完拔插一次 USB，再回到<a href="../">串口终端</a>连接。</li>
+    </ul>
+  </section>
+</main>
+
+<footer>
+  <a href="../">串口终端</a>
+  <span aria-hidden="true">·</span>
+  <a href="https://github.com/radxa/linkr-bee/releases" rel="noreferrer">发布记录</a>
+  <span aria-hidden="true">·</span>
+  <a href="https://github.com/radxa/linkr-bee" rel="noreferrer">源代码</a>
+</footer>
+
+<script type="module" src="./vendor/esp-web-tools/install-button.js"></script>
+<script type="module" src="./flash.js"></script>
+</body>
+</html>

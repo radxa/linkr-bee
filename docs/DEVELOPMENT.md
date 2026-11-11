@@ -322,6 +322,30 @@ must be cleared. The artifact also contains `FLASHING.txt`,
 `SHA256SUMS` for debugging and traceability. The workflow fails if the default
 WiFi, networking, Bluetooth, or binary-output configuration is absent.
 
+
+### The browser flashing page
+
+`web/flash/` is a static page that writes the same release images over USB with
+[esp-web-tools](https://github.com/esphome/esp-web-tools) (Web Serial, so Chrome
+or Edge on a desktop). It is published with the rest of the site at `/flash/`;
+a repository has one Pages deployment, so this is a page rather than a second
+site.
+
+The images are not checked in. `.github/workflows/pages.yml` downloads the
+current release's `*firmware-*.zip`, then runs:
+
+```sh
+python3 tools/build_flasher.py --release-dir build-demo/flash-release \
+    --version-from web/about-data.js
+```
+
+which writes `web/flash/firmware/<board>.bin`, one esp-web-tools manifest per
+board, and the `index.json` the page renders. `tools/build_flasher.py` refuses a
+bundle whose `firmware.json` disagrees with the version the tree ships, and
+refuses a board the page has no entry for — a flasher that silently drops a
+board is worse than one that fails. To preview locally without a release, pass
+`--image <slug>=build-.../zephyr/zephyr.bin` instead of `--release-dir`.
+
 ## UART selection
 
 The app reads the UART from the devicetree chosen node

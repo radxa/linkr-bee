@@ -6,6 +6,13 @@ name: Deploy the web terminal to GitHub Pages
 # artifact -- it is not rebuilt here, so what is published is exactly what the
 # regression suite ran against.
 #
+# `web/flash/` is the browser flashing page. It is part of the same site (a
+# repository has one Pages deployment), but it is a separate page with its own
+# entry point at /flash/. Its firmware is not checked in: this workflow copies
+# the release bundles into `web/flash/firmware/` and generates the manifests
+# with tools/build_flasher.py, so the page always offers the images the release
+# actually built.
+#
 # BLE (Web Bluetooth) needs a secure context, which Pages provides. The LAN
 # WebSocket bridge works from here too, but with a warning: an https page that
 # opens ws:// is mixed content, and Chromium allows it while marking it
@@ -24,7 +31,10 @@ on:
       - main
     paths:
       - "web/**"
+      - "tools/build_flasher.py"
       - ".github/workflows/pages.yml"
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
@@ -42,13 +52,51 @@ jobs:
   deploy:
     name: Publish the plain web terminal
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      # A release run builds the page from that tag; a push run from whatever
+      # GitHub currently calls the latest release. Either way the firmware the
+      # page offers is a published artifact, never a local build.
+      - name: Resolve the firmware release
+        id: release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "release" ]; then
+            tag="${{ github.event.release.tag_name }}"
+          else
+            tag="$(gh release view --repo "${GITHUB_REPOSITORY}" --json tagName -q .tagName)"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Download the firmware bundles
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p build-demo/flash-release
+          gh release download "${{ steps.release.outputs.tag }}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern '*firmware-*.zip' \
+            --dir build-demo/flash-release
+
+      # The manifest names the version, and build_flasher.py refuses a bundle
+      # whose firmware.json disagrees with it. A release that carries the wrong
+      # version therefore fails here instead of publishing a page that lies.
+      - name: Build the flashing page data
+        run: |
+          python3 tools/build_flasher.py \
+            --release-dir build-demo/flash-release \
+            --version-from web/about-data.js
 
       # Jekyll is skipped for artifacts, but an empty .nojekyll also keeps a
       # future switch to branch-based publishing from silently dropping paths.

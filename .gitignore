@@ -57,3 +57,6 @@ bin/
 # …except an npm package's launcher, which lives in bin/ by npm's own convention.
 !tools/linkr-tui/npm/bin/
 !tools/linkr-tui/npm/bin/**
+# Firmware images and manifests are generated for the /flash/ page by
+# tools/build_flasher.py (CI runs it against the release artifacts).
+web/flash/firmware/
