@@ -23,6 +23,7 @@ Screenshots are UI previews with sample output, not hardware acceptance evidence
 | [Development guide](DEVELOPMENT.md) | English | Firmware build/flash, Kconfig, terminal tools, protocols, and test modes |
 | [Development guide](DEVELOPMENT.zh-CN.md) | Chinese | Chinese edition of the development guide |
 | [Hardware requirements](HARDWARE.md) | Chinese | Pinout, electrical requirements, test points, and production notes |
+| [Bee FT servo debugger](../tools/bee_ftservo/README.md) | English, Chinese | Drive FEETECH bus servos through the Bee: wiring, CLI, BLE latency and half-duplex notes |
 | [Linkr Bee X1.0 hardware](BEE_X1.0_HARDWARE.md) | Chinese | MV013 schematic map: power tree, ESP32-C3FH4 pinout, RGB/opto/IR wiring, known PCB issues, and firmware commands |
 | [BLE accessory API v1](LINKR_BLE_API.zh-CN.md) | Chinese | GATT services, framed requests, Reliable UART, and events |
 | [BLE pairing and recovery](BLE_PAIRING.md) | Chinese | Pairing GPIO authorization (GPIO1 on C3/C5; WROOM optional GPIO4, off by default), persistent bonds, client steps, and recovery |

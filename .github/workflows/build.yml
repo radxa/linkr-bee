@@ -31,13 +31,16 @@ jobs:
       #  * libdbus-1-dev, because tests/test_terminal_cli_c.py builds the shipped
       #    C reference client with -Werror, and skips itself without it;
       #  * fish and zsh, because the completion tests check the generated scripts
-      #    with the real shells, and skip themselves where those are absent.
+      #    with the real shells, and skip themselves where those are absent;
+      #  * ftservo-python-sdk, because tests/test_bee_ftservo.py drives the servo
+      #    bridge through the real FEETECH packet handler (the test skips itself
+      #    where the SDK is absent).
       - name: Install the test dependencies
         run: |
           set -euo pipefail
           sudo apt-get update -y
           sudo apt-get install -y libdbus-1-dev pkg-config fish zsh
-          python3 -m pip install kconfiglib==14.1.0
+          python3 -m pip install kconfiglib==14.1.0 ftservo-python-sdk==2.0.1
       # One version, everywhere. The release assembler proves the *artifacts*
       # match the tag; this proves the tree agrees with itself (and with the
       # tag, when a release tag is what triggered the build) before anything is

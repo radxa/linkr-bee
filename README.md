@@ -285,6 +285,7 @@ outside a trusted lab network; see [LAN warning](docs/DEVELOPMENT.md#uart-over-w
 
 - [User guide](docs/USAGE.md): interface tour, serial input, assistant, LAN, and logging
 - [Rust CLI / TUI](tools/linkr-tui/README.md): desktop terminal and automation
+- [Bee FT servo debugger](tools/bee_ftservo/README.md): FEETECH bus servos over the Bee (BLE bridge, half-duplex wiring)
 - [Development guide](docs/DEVELOPMENT.md): build, flash, packaging, Kconfig, protocol
 - [Hardware requirements](docs/HARDWARE.md): pinout, electrical, production notes (Chinese)
 - [Bluetooth pairing](docs/BLE_PAIRING.md): authorization and recovery (Chinese)
