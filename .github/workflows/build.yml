@@ -350,6 +350,10 @@ jobs:
             'import json; print(json.load(open("app/mobile/package.json"))["version"])')"
           grep -qx "CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION=\"${firmware_version}\"" "${config}"
           grep -qx 'CONFIG_BT_SMP=y' "${config}"
+          # The same fast-link request every board ships: 7.5-15 ms interval.
+          grep -qx 'CONFIG_BT_GAP_AUTO_UPDATE_CONN_PARAMS=y' "${config}"
+          grep -qx 'CONFIG_BT_PERIPHERAL_PREF_MIN_INT=6' "${config}"
+          grep -qx 'CONFIG_BT_PERIPHERAL_PREF_MAX_INT=12' "${config}"
           if grep -Eq '^CONFIG_SOC_SERIES_ESP32(C3|C5)=y$' "${config}"; then
             grep -qx 'CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=y' "${config}"
           fi

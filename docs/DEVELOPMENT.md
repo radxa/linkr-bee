@@ -149,6 +149,26 @@ UART input can exceed a host's BLE drain rate: a separate unpaced run counted
 only absorb bursts; sustained lossless traffic requires upstream pacing, flow
 control or a transport with sufficient throughput.
 
+The air link is the other half of that budget, and until now every board left it
+at the slowest setting: `prj.conf` shipped `CONFIG_BT_GAP_AUTO_UPDATE_CONN_PARAMS=n`,
+so the peripheral never asked for an interval and the central's choice stood
+(measured 37.5 ms on the ESP32 board), and no board requested a PHY, so every
+link ran 1M. A full-screen program is the worst case for that: one redraw is a
+burst of a few KB, and a slower interval multiplies the time the 232-byte
+output queue stays full. `prj.conf` now asks for 7.5–15 ms (`PREF_MIN/MAX_INT`
+6/12 in 1.25 ms units) and `BT_AUTO_PHY_PERIPHERAL_2M`; the 2M request is
+guarded by the controller's feature bit, so the BT 4.2 WROOM board keeps 1M.
+`boards/esp32_devkitc_esp32_procpu.conf` keeps the original measurement notes
+for that interval. The supervision timeout that C5 and X1.0 already set
+(`PREF_TIMEOUT=800`) only takes effect now that the request is actually sent.
+
+Compression of the UART stream was considered and rejected for this link: at
+115200 the serial line caps the bridge at 11520 B/s (`src/uart_bulk_tx.c`), and
+once the interval above is in force the air link carries more than that, so
+compressing the bytes cannot raise the ceiling. It would only pay off above
+115200 baud, where the UART stops being the limit — LAN (`ws://`) is the better
+answer there.
+
 The HTTP/WebSocket bridge defaults `CONFIG_ZVFS_POLL_MAX` to 5. HTTP/1 polling
 needs one wakeup eventfd, one listener per service and one event per client
 still in HTTP/upgrade processing: two clients and one service need four events.

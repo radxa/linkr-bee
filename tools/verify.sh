@@ -44,6 +44,12 @@ for board in $boards; do
   grep -qx 'CONFIG_LINKR_BLE_BRIDGE_UART_RX_DROP_NO_CONN=y' "$config"
   grep -qx 'CONFIG_BT_SMP=y' "$config"
   grep -qx 'CONFIG_BT_MAX_CONN=2' "$config"
+  # The air link: every board asks for 7.5-15 ms and (where the controller has
+  # it) 2M PHY. A board conf that drops either silently returns the link to the
+  # central's default interval, which is what made full-screen programs crawl.
+  grep -qx 'CONFIG_BT_GAP_AUTO_UPDATE_CONN_PARAMS=y' "$config"
+  grep -qx 'CONFIG_BT_PERIPHERAL_PREF_MIN_INT=6' "$config"
+  grep -qx 'CONFIG_BT_PERIPHERAL_PREF_MAX_INT=12' "$config"
   if grep -Eq '^CONFIG_SOC_SERIES_ESP32(C3|C5)=y$' "$config"; then
     grep -qx 'CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=y' "$config"
   fi
