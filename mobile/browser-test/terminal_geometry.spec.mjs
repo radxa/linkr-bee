@@ -7,7 +7,7 @@ test.beforeEach(async ({ page }) => {
   await page.route("**/app.js?*", async (route) => {
     const response = await route.fetch();
     await route.fulfill({ response, body: await response.text() +
-      "\nwindow.__geometry = { state, setConnected, handleIncomingBytes, onTerminalData };" });
+      "\nwindow.__geometry = { state, setConnected, handleIncomingBytes, onTerminalData, applySerialControl };" });
   });
   await page.goto("/");
   await page.waitForFunction(() => window.__geometry?.state.term?.buffer.active.cursorY > 0);
@@ -38,6 +38,96 @@ async function syncCommands(page) {
 async function expectSyncCount(page, count) {
   await expect.poll(() => syncCommands(page)).toHaveLength(count);
 }
+
+async function confirmation(page, { index = -1, nonce, rows, cols } = {}) {
+  const command = (await syncCommands(page)).at(index);
+  const requested = /^stty rows (\d+) cols (\d+)/.exec(command);
+  nonce ??= /LinkrTTY=([a-f0-9]{32})/.exec(command)[1];
+  return `\x1b]633;P;LinkrTTY=${nonce};${rows ?? requested[1]} ${cols ?? requested[2]}\x07`;
+}
+
+test("a continuation prompt never receives a size command", async ({ page }) => {
+  await receive(page, "> ");
+  expect(await syncCommands(page)).toEqual([]);
+});
+
+test("TTY confirmation works when a LAN page has no randomUUID API", async ({ page }) => {
+  await page.evaluate(() => Object.defineProperty(crypto, "randomUUID", { value: undefined }));
+  await receive(page, prompt);
+  await expectSyncCount(page, 1);
+  await receive(page, await confirmation(page));
+  await expect(page.locator("#ttySizeLabel")).not.toHaveText("—");
+});
+
+test("TTY status waits for a matching target readback and accepts fragmented OSC", async ({ page }) => {
+  await receive(page, prompt);
+  await expectSyncCount(page, 1);
+  await expect(page.locator("#ttySizeLabel")).toHaveText("—");
+  await expect(page.locator("#ttySizeItem")).toHaveAttribute("title", /not yet confirmed/);
+  await receive(page, `\r\n${prompt}`);
+  expect(await syncCommands(page)).toHaveLength(1); // No blind retry without a receipt.
+  await receive(page, await confirmation(page, { nonce: "0".repeat(32) }));
+  await expect(page.locator("#ttySizeLabel")).toHaveText("—");
+  const frame = await confirmation(page);
+  await receive(page, frame.slice(0, 18));
+  await expect(page.locator("#ttySizeLabel")).toHaveText("—");
+  await receive(page, frame.slice(18));
+  const requested = /^stty rows (\d+) cols (\d+)/.exec((await syncCommands(page))[0]);
+  await expect(page.locator("#ttySizeLabel")).toHaveText(`${requested[2]}×${requested[1]}`);
+  await expect(page.locator("#ttySizeItem")).toHaveAttribute("title", "Target tty matches this pane");
+  expect(await page.locator("#terminalOutput").innerText()).not.toContain("LinkrTTY=");
+});
+
+test("TTY status shows the readback instead of assuming the requested size", async ({ page }) => {
+  await receive(page, prompt);
+  await expectSyncCount(page, 1);
+  await receive(page, await confirmation(page, { rows: 20, cols: 70 }));
+  await expect(page.locator("#ttySizeLabel")).toHaveText("70×20");
+  await expect(page.locator("#ttySizeItem")).toHaveAttribute("title", /not yet confirmed/);
+});
+
+test("reboot clears the displayed TTY size and rejects the previous receipt", async ({ page }) => {
+  await receive(page, prompt);
+  await expectSyncCount(page, 1);
+  const old = await confirmation(page);
+  await receive(page, old);
+  await expect(page.locator("#ttySizeLabel")).not.toHaveText("—");
+  await receive(page, "\r\nLinux version 6.6.0\r\ntarget login: ");
+  await expect(page.locator("#ttySizeLabel")).toHaveText("—");
+  await receive(page, old);
+  await expect(page.locator("#ttySizeLabel")).toHaveText("—");
+  await receive(page, `\r\n${prompt}`);
+  await expectSyncCount(page, 2);
+  await receive(page, old);
+  await expect(page.locator("#ttySizeLabel")).toHaveText("—");
+  await receive(page, await confirmation(page));
+  await expect(page.locator("#ttySizeLabel")).not.toHaveText("—");
+});
+
+test("disconnect discards an outstanding target size confirmation", async ({ page }) => {
+  await receive(page, prompt);
+  await expectSyncCount(page, 1);
+  const old = await confirmation(page);
+  await page.evaluate(() => { window.__geometry.setConnected(false); window.__geometry.setConnected(true); });
+  await receive(page, `\r\n${prompt}`);
+  await expectSyncCount(page, 2);
+  await receive(page, old);
+  await expect(page.locator("#ttySizeLabel")).toHaveText("—");
+  await receive(page, await confirmation(page));
+  await expect(page.locator("#ttySizeLabel")).not.toHaveText("—");
+});
+
+test("ownership changes revoke confirmed sizes and outstanding receipts", async ({ page }) => {
+  await page.evaluate(() => window.__geometry.applySerialControl({self:1,owner:1,mode:"control",epoch:2,peers:2,capacity:2}));
+  await receive(page, prompt);
+  await expectSyncCount(page, 1);
+  const old = await confirmation(page);
+  await receive(page, old);
+  await page.evaluate(() => window.__geometry.applySerialControl({self:1,owner:2,mode:"readonly",epoch:3,peers:2,capacity:2}));
+  await expect(page.locator("#ttySizeLabel")).toHaveText("—");
+  await receive(page, old);
+  await expect(page.locator("#ttySizeLabel")).toHaveText("—");
+});
 
 for (const viewport of [{ width: 1552, height: 1221 }, { width: 390, height: 844 }]) {
   test.describe(`terminal viewport ${viewport.width}`, () => {

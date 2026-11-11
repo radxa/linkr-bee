@@ -26,6 +26,24 @@ export function terminalGeometryCommand(cols, rows) {
   return `stty rows ${geometry.rows} cols ${geometry.cols} >/dev/null 2>&1\r`;
 }
 
+// Keep the basic resize shared with the CLI/TUI. The web status indicator also
+// needs a readback: a completed transport write is not a successful stty.
+export function terminalGeometryProbeCommand(cols, rows, nonce) {
+  if (!/^[a-f0-9]{32}$/.test(nonce)) throw new TypeError("Invalid TTY probe nonce");
+  return terminalGeometryCommand(cols, rows).slice(0, -1) +
+    ` && printf '\\033]633;P;LinkrTTY=${nonce};%s\\007' "$(stty size 2>/dev/null)"\r`;
+}
+
+export function parseTerminalGeometryConfirmation(data, nonce) {
+  if (!/^[a-f0-9]{32}$/.test(nonce || "")) return null;
+  const match = /^P;LinkrTTY=([a-f0-9]{32});([0-9]{1,4}) ([0-9]{1,4})$/.exec(data);
+  if (!match || match[1] !== nonce) return null;
+  const rows = Number(match[2]), cols = Number(match[3]);
+  if (rows < MIN_TERMINAL_ROWS || cols < MIN_TERMINAL_COLUMNS ||
+      rows > MAX_TERMINAL_DIMENSION || cols > MAX_TERMINAL_DIMENSION) return null;
+  return normalizeTerminalGeometry(cols, rows);
+}
+
 /* Prompt terminators, each followed by one space.
  *
  * `%` is zsh's default and fish uses `>`; both were missing, so a board whose
@@ -85,6 +103,9 @@ export function looksLikeShellPrompt(line) {
   if (typeof line !== "string" || line.length < 2) return false;
   if (!PROMPT_TERMINATORS.has(line[line.length - 2])) return false;
   if (line[line.length - 1] !== " ") return false;
+  // Bare `> ` is the default PS2 continuation prompt (quotes, heredocs, etc.).
+  // A fish-style primary prompt needs an identifying prefix to be safe here.
+  if (line[line.length - 2] === ">" && !line.slice(0, -2).trim()) return false;
   return looksLikePromptPrefix(line.slice(0, -2).trim());
 }
 

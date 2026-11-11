@@ -1234,6 +1234,11 @@ for (const matches of [true, false]) test('automatic identity waits for shell an
   bleTransport.write=async (_id,_s,_c,bytes)=>{
    pending+=new TextDecoder().decode(bytes);
    if(pending.endsWith('\r')) {
+    if(pending.startsWith('stty ')) {
+     const nonce=pending.match(/LinkrTTY=([a-f0-9]{32})/)[1];
+     const [,rows,cols]=pending.match(/^stty rows (\d+) cols (\d+)/);
+     pending='';setTimeout(()=>handleIncomingBytes(new TextEncoder().encode(`\x1b]633;P;LinkrTTY=${nonce};${rows} ${cols}\x07\r\nroot@board:~# `)),30);return;
+    }
     window.identityCommands.push(pending);
     const marker=pending.match(/LINKR_ID_[a-f0-9]+/)[0],exit=pending.match(/LINKR_EXIT_[a-f0-9]+/)[0];
     pending='';setTimeout(()=>handleIncomingBytes(new TextEncoder().encode(`\r\n${marker}:${observedId}\r\n${exit}:0\r\nroot@board:~# `)),30);

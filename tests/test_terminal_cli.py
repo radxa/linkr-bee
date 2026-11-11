@@ -958,6 +958,8 @@ class TerminalGeometryTests(unittest.TestCase):
             "echo hi > ",
             "100% ",
             "select> ",
+            "> ",  # Default PS2: heredoc/quote continuation, not an idle shell.
+            "   > ",
             "cost $ ",
         ]:
             with self.subTest(text=text):
@@ -980,6 +982,20 @@ class TerminalGeometryTests(unittest.TestCase):
         sync.confirm_sent()
         sync.observe("root@target:~$ ")
         self.assertIsNone(sync.take_pending_command())
+
+    def test_geometry_resize_during_a_multiline_command_never_writes_into_it(self):
+        sync = terminal.TerminalGeometrySync(80, 24)
+        sync.observe("root@target:~$ ")
+        sync.take_pending_command()
+        sync.confirm_sent()
+        sync.mark_busy()
+        sync.set_size(120, 40)
+        sync.observe("cat <<EOF\r\n> ")
+        self.assertIsNone(sync.take_pending_command())
+        sync.observe("PAYLOAD\r\n> ")
+        self.assertIsNone(sync.take_pending_command())
+        sync.observe("EOF\r\nroot@target:~$ ")
+        self.assertEqual(sync.take_pending_command(), "stty rows 40 cols 120 >/dev/null 2>&1\r")
 
     def test_geometry_sync_resends_after_a_resize(self):
         sync = terminal.TerminalGeometrySync(80, 24)

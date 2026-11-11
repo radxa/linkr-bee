@@ -395,7 +395,7 @@ def terminal_geometry(cols, rows) -> dict:
 
 
 def terminal_geometry_command(cols, rows) -> str:
-    """The stty line the web client sends; keep the two byte-identical."""
+    """Basic resize shared with Web/TUI; Web additionally reads back the size."""
     geometry = terminal_geometry(cols, rows)
     return (
         f"stty rows {geometry['rows']} cols {geometry['cols']} "
@@ -413,6 +413,8 @@ def looks_like_shell_prompt(text: str) -> bool:
         return False
 
     prefix = text[:-2].strip()
+    if text[-2] == ">" and not prefix:
+        return False  # Default PS2: a multiline command is still being entered.
     if not prefix:
         return True
 

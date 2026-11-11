@@ -96,7 +96,8 @@ import {
   createTerminalSessionTracker,
   looksLikeShellPrompt,
   normalizeTerminalGeometry,
-  terminalGeometryCommand,
+  terminalGeometryProbeCommand,
+  parseTerminalGeometryConfirmation,
 } from "./terminal_geometry.js";
 
 const terminalSessionTracker = createTerminalSessionTracker();
@@ -330,6 +331,8 @@ const state = {
   diagnostics: {},
   terminalGeometry: null,
   terminalGeometrySynced: "",
+  terminalGeometrySent: "",
+  terminalGeometryProbe: null,
   terminalGeometrySyncInFlight: "",
   terminalGeometrySyncTimer: null,
   terminalGeometrySession: 0,
@@ -855,9 +858,10 @@ const I18N = {
     baud: "Baud",
     tty: "TTY",
     ttySynced: "Target tty matches this pane",
-    ttyPending: "Pane resized; the target tty is told at the next idle shell prompt",
+    ttyPending: "Target tty size awaits synchronization at an idle shell prompt",
     ttyFullscreen: "A full-screen program owns the tty; it is resized after you exit",
     ttyUnsynced: "Not yet synced; the target is told at its next idle shell prompt",
+    ttyUnconfirmed: "Size request sent; the requested target tty size is not yet confirmed",
     ttyDisconnected: "Not connected",
     welcome: "Linkr Bee Terminal ready. Press Connect to open a device.",
     connecting: "Connecting…",
@@ -1170,9 +1174,10 @@ const I18N = {
     baud: "波特率",
     tty: "TTY",
     ttySynced: "目标 tty 与当前面板一致",
-    ttyPending: "面板已改变，目标 tty 将在下一个空闲提示符处同步",
+    ttyPending: "目标 tty 尺寸待同步；请求只在空闲 shell 提示符处发送",
     ttyFullscreen: "全屏程序占用 tty，退出后才会同步尺寸",
     ttyUnsynced: "尚未同步；目标会在下一个空闲 shell 提示符处收到尺寸",
+    ttyUnconfirmed: "尺寸请求已发送；目标尚未确认所请求的 tty 尺寸",
     ttyDisconnected: "未连接",
     welcome: "Linkr Bee 终端已就绪，点击「连接」打开设备。",
     connecting: "连接中…",
@@ -1609,8 +1614,24 @@ function invalidateTerminalGeometrySync() {
   clearTerminalGeometrySyncTimer();
   state.terminalGeometrySession += 1;
   state.terminalGeometrySynced = "";
+  state.terminalGeometrySent = "";
+  state.terminalGeometryProbe = null;
   state.terminalGeometrySyncInFlight = "";
   state.shellPromptVisible = false;
+  state.terminalGeometryUrgent = true;
+  renderTerminalGeometryStatus();
+}
+
+function confirmTerminalGeometry(data) {
+  const probe = state.terminalGeometryProbe;
+  if (terminalReplay || !state.connected || !canSerialInput() || !probe ||
+      probe.session !== state.terminalGeometrySession) return false;
+  const geometry = parseTerminalGeometryConfirmation(data, probe.nonce);
+  if (!geometry) return false;
+  state.terminalGeometrySynced = geometry.key;
+  state.terminalGeometryProbe = null;
+  renderTerminalGeometryStatus();
+  return true;
 }
 
 function markTerminalBusy() {
@@ -1633,7 +1654,8 @@ function scheduleTerminalGeometrySync() {
     !state.shellPromptVisible ||
     !geometry ||
     geometry.key === state.terminalGeometrySynced ||
-    geometry.key === state.terminalGeometrySyncInFlight
+    geometry.key === state.terminalGeometrySent ||
+    state.terminalGeometrySyncInFlight
   ) {
     return;
   }
@@ -1656,28 +1678,35 @@ function scheduleTerminalGeometrySync() {
       !terminalHasIdleShellPrompt() ||
       geometry.key !== state.terminalGeometry?.key ||
       geometry.key === state.terminalGeometrySynced ||
-      geometry.key === state.terminalGeometrySyncInFlight
+      geometry.key === state.terminalGeometrySent ||
+      state.terminalGeometrySyncInFlight
     ) {
       return;
     }
 
     state.shellPromptVisible = false;
     state.terminalGeometrySyncInFlight = geometry.key;
-    writeText(terminalGeometryCommand(geometry.cols, geometry.rows), { claim: false })
+    // getRandomValues also works on HTTP LAN pages where randomUUID is absent.
+    const nonce = Array.from(crypto.getRandomValues(new Uint8Array(16)),
+      byte => byte.toString(16).padStart(2, "0")).join("");
+    const probe = state.terminalGeometryProbe = { nonce, session };
+    writeText(terminalGeometryProbeCommand(geometry.cols, geometry.rows, nonce), { claim: false })
       .then(() => {
         if (session === state.terminalGeometrySession) {
-          state.terminalGeometrySynced = geometry.key;
+          state.terminalGeometrySent = geometry.key;
           state.terminalGeometryUrgent = false;
           renderTerminalGeometryStatus();
         }
       })
       .catch((error) => {
+        if (state.terminalGeometryProbe === probe) state.terminalGeometryProbe = null;
         debugLine(`[terminal-size] ${error.message}`);
       })
       .finally(() => {
         if (session === state.terminalGeometrySession &&
             state.terminalGeometrySyncInFlight === geometry.key) {
           state.terminalGeometrySyncInFlight = "";
+          scheduleTerminalGeometrySync();
         }
       });
   }, delay);
@@ -1706,7 +1735,7 @@ function renderTerminalGeometryStatus() {
   if (item) item.hidden = false;
   const synced = state.terminalGeometrySynced;
   const pane = state.terminalGeometry?.key || "";
-  const pending = Boolean(state.connected && pane && synced && pane !== synced);
+  const pending = Boolean(state.connected && pane && pane !== synced);
   /* Only a size the target acknowledged is reported as its size. Showing the
    * pane's own size before the first sync would be the same false claim the
    * `stty` gate exists to avoid. */
@@ -1715,6 +1744,7 @@ function renderTerminalGeometryStatus() {
   let hint = "";
   if (!state.connected) hint = t("ttyDisconnected");
   else if (state.alternateScreen && pending) hint = t("ttyFullscreen");
+  else if (pending && state.terminalGeometrySent === pane) hint = t("ttyUnconfirmed");
   else if (pending) hint = t("ttyPending");
   else if (synced) hint = t("ttySynced");
   else hint = t("ttyUnsynced");
@@ -1875,6 +1905,9 @@ function initTerminal() {
   }
   subscribeTerminalInput(state.term, onTerminalData);
   state.term.onResize(onTerminalResize);
+  // xterm handles split OSC frames and keeps this private property off screen.
+  // Other OSC 633 properties, including shell integration, remain untouched.
+  state.term.parser.registerOscHandler(633, confirmTerminalGeometry);
   state.term.onScroll(() => {
     onTerminalScroll();
     positionTerminalSelectionHandles();
@@ -2393,10 +2426,9 @@ function applySerialControl(control) {
     state.serialControlRevision++;
     serialInputPending = false;
     serialInputRevision++;
-    clearTerminalGeometrySyncTimer();
+    invalidateTerminalGeometrySync();
     if (previous?.mode === "control") agentPanel?.connectionChanged(false);
     if (control.mode === "control") {
-      state.terminalGeometrySynced = "";
       agentPanel?.connectionChanged(true);
     }
   }

@@ -3,8 +3,9 @@
 //! The UART carries a live console, so an `stty` line sent while a command owns
 //! the line would be typed into that command. The web client gates on the same
 //! condition (`web/terminal_geometry.js`), and the Python reference client
-//! mirrors it (`tools/linkr_ble_terminal.py`). The command is byte-identical
-//! across all three clients; the TUI gate uses the existing VT parser's screen.
+//! mirrors it (`tools/linkr_ble_terminal.py`). The basic resize is shared by all
+//! three clients; the Web status indicator adds a correlated size readback.
+//! The TUI gate uses the existing VT parser's screen.
 //!
 //! The target's tty is a separate screen from the pane. A board that was left
 //! at 57 columns by an earlier client keeps wrapping there however wide the
@@ -44,7 +45,7 @@ pub fn normalize(cols: u16, rows: u16) -> Geometry {
     }
 }
 
-/// The line sent to the target, byte-identical to the web and Python clients.
+/// The basic resize line shared with the web helper and Python client.
 pub fn command(cols: u16, rows: u16) -> String {
     let geometry = normalize(cols, rows);
     format!(
@@ -74,6 +75,9 @@ pub fn looks_like_shell_prompt(text: &str) -> bool {
         return false;
     }
     let prefix: String = chars[..chars.len() - 2].iter().collect();
+    if chars[chars.len() - 2] == '>' && prefix.trim().is_empty() {
+        return false; // Default PS2: a multiline command is still being entered.
+    }
     looks_like_prompt_prefix(prefix.trim())
 }
 
@@ -138,9 +142,7 @@ fn looks_like_prompt_prefix(prefix: &str) -> bool {
                     return !tail.chars().any(char::is_whitespace);
                 }
                 let path = tail.trim();
-                return path == "~"
-                    || path.starts_with("~/")
-                    || path.starts_with('/');
+                return path == "~" || path.starts_with("~/") || path.starts_with('/');
             }
         }
     }
@@ -150,7 +152,9 @@ fn looks_like_prompt_prefix(prefix: &str) -> bool {
         let host = &prefix[..colon];
         let path = &prefix[colon + 1..];
         if !host.is_empty()
-            && !host.chars().any(|c| c.is_whitespace() || c == '@' || c == ':')
+            && !host
+                .chars()
+                .any(|c| c.is_whitespace() || c == '@' || c == ':')
             && !path.chars().any(char::is_whitespace)
         {
             return path == "~" || path.starts_with("~/") || path.starts_with('/');
@@ -185,7 +189,7 @@ fn is_shell_name(prefix: &str) -> bool {
 #[derive(Debug, Clone)]
 pub struct TerminalGeometrySync {
     geometry: Geometry,
-    /// The last size the target acknowledged, as a key.
+    /// The last size whose transport send completed, used only for deduplication.
     synced: String,
     /// The size a command is currently out for, as a key.
     in_flight: String,
@@ -239,7 +243,7 @@ impl TerminalGeometrySync {
         }
     }
 
-    /// Forget what an *earlier* link acknowledged: a new session is a new tty,
+    /// Forget what an *earlier* link was sent: a new session is a new tty,
     /// even when the size is the same.
     pub fn reset_session(&mut self) {
         self.synced.clear();
@@ -351,6 +355,8 @@ mod tests {
             "echo hi > ",
             "100% ",
             "select> ",
+            "> ", // Default PS2: heredoc/quote continuation, not an idle shell.
+            "   > ",
             "cost $ ",
         ] {
             assert!(!looks_like_shell_prompt(text), "{text:?}");
@@ -385,6 +391,23 @@ mod tests {
         assert_eq!(sync.take_pending_command(), None);
         sync.set_size(117, 40);
         observe(&mut sync, &mut pane, "\r\nroot@target:~$ ");
+        assert_eq!(sync.take_pending_command(), Some(command(117, 40)));
+    }
+
+    #[test]
+    fn resize_during_a_multiline_command_never_writes_into_it() {
+        let mut sync = TerminalGeometrySync::default();
+        let mut pane = TerminalPane::new();
+        observe(&mut sync, &mut pane, "root@target:~$ ");
+        sync.take_pending_command();
+        sync.confirm_sent();
+        sync.note_input(b"cat <<EOF\r");
+        sync.set_size(117, 40);
+        observe(&mut sync, &mut pane, "cat <<EOF\r\n> ");
+        assert_eq!(sync.take_pending_command(), None);
+        observe(&mut sync, &mut pane, "PAYLOAD\r\n> ");
+        assert_eq!(sync.take_pending_command(), None);
+        observe(&mut sync, &mut pane, "EOF\r\nroot@target:~$ ");
         assert_eq!(sync.take_pending_command(), Some(command(117, 40)));
     }
 
