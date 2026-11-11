@@ -1,0 +1,604 @@
+/* Servo bench: the Web Bluetooth servo tool page.
+ *
+ * Tokens, cards, buttons and focus rings come from style.css + skin-v2.css.
+ * Only components that exist on this page (bus list, position track, metric
+ * grid, register table, log) are defined here, and every colour is a token.
+ */
+
+.servo-app [hidden] {
+  display: none !important;
+}
+
+body.servo-app {
+  height: auto;
+  min-height: 100vh;
+  padding: 0 0 28px;
+  overflow-x: hidden;
+}
+
+.servo-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  max-width: 1240px;
+  margin: 0 auto;
+  padding: 14px clamp(12px, 2vw, 24px) 12px;
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  backdrop-filter: var(--glass-blur);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.servo-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.servo-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 30px;
+  padding: 0 9px 0 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  font-size: 12px;
+  text-decoration: none;
+}
+
+.servo-back:hover {
+  color: var(--text);
+  background: var(--btn-hover);
+}
+
+.servo-brand h1 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
+.servo-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-3);
+  color: var(--muted);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.servo-pill-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--danger);
+}
+
+.servo-pill[data-state="connected"] {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  color: var(--accent-strong);
+}
+
+.servo-pill[data-state="connected"] .servo-pill-dot {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.servo-pill[data-state="sim"] {
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--line));
+  color: var(--warn);
+}
+
+.servo-pill[data-state="sim"] .servo-pill-dot {
+  background: var(--warn);
+}
+
+.servo-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.servo-lang .btn-label {
+  font-size: 11.5px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+}
+
+.servo-layout {
+  display: grid;
+  grid-template-columns: minmax(300px, 360px) minmax(0, 1fr);
+  gap: clamp(12px, 1.2vw, 18px);
+  max-width: 1240px;
+  margin: 0 auto;
+  padding: 18px clamp(12px, 2vw, 24px) 0;
+  align-items: start;
+}
+
+.servo-column {
+  display: flex;
+  flex-direction: column;
+  gap: clamp(12px, 1.2vw, 18px);
+  min-width: 0;
+}
+
+.servo-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 15px;
+}
+
+.servo-card .card-title {
+  margin-bottom: 0;
+}
+
+.servo-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.servo-row-stretch > .servo-field {
+  flex: 1 1 90px;
+  min-width: 0;
+}
+
+.servo-row-tight {
+  flex-wrap: nowrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.servo-row-tight .btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.servo-baud {
+  flex: 1 1 100%;
+  min-width: 0;
+}
+
+.servo-baud select {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
+}
+
+.servo-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.servo-field input,
+.servo-field select {
+  width: 100%;
+  height: 34px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--input-bg);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+
+.servo-field input:focus-visible,
+.servo-field select:focus-visible {
+  outline: none;
+  border-color: var(--focus);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 25%, transparent);
+}
+
+.servo-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.servo-check input {
+  accent-color: var(--accent);
+}
+
+.servo-small {
+  height: 26px;
+  padding: 0 9px;
+  font-size: 11.5px;
+  margin-left: auto;
+}
+
+.btn-quiet {
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+  box-shadow: none;
+}
+
+.btn-quiet:hover:not(:disabled) {
+  border-color: var(--line);
+  background: var(--btn-hover);
+  color: var(--text);
+}
+
+/* Bus list ---------------------------------------------------------------- */
+
+.servo-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 216px;
+  overflow-y: auto;
+}
+
+.servo-list:empty::after {
+  content: "";
+  display: block;
+  height: 2px;
+}
+
+.servo-list-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px solid var(--line-soft);
+  border-radius: 9px;
+  background: var(--panel-3);
+  color: var(--text);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.servo-list-item:hover {
+  border-color: var(--line-strong);
+}
+
+.servo-list-item[aria-selected="true"] {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+  background: color-mix(in srgb, var(--accent) 10%, var(--panel-3));
+}
+
+.servo-list-id {
+  font-family: var(--font-mono);
+  font-weight: 650;
+  color: var(--accent-strong);
+}
+
+.servo-list-model {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.servo-list-badge {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+
+/* Log --------------------------------------------------------------------- */
+
+.servo-log-card {
+  min-height: 160px;
+  flex: 1 1 auto;
+}
+
+.servo-log {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 230px;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+.servo-log li {
+  display: grid;
+  grid-template-columns: 54px minmax(0, 1fr);
+  gap: 8px;
+  padding: 2px 0;
+  border-top: 1px solid var(--line-soft);
+  overflow-wrap: anywhere;
+}
+
+.servo-log li:first-child {
+  border-top: 0;
+}
+
+.servo-log time {
+  color: var(--placeholder);
+}
+
+.servo-log li[data-level="ok"] span {
+  color: var(--accent-strong);
+}
+
+.servo-log li[data-level="warn"] span {
+  color: var(--warn);
+}
+
+.servo-log li[data-level="error"] span {
+  color: var(--danger);
+}
+
+/* Selected servo ---------------------------------------------------------- */
+
+.servo-servo-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.servo-servo-title {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  min-width: 0;
+}
+
+.servo-id {
+  font-family: var(--font-mono);
+  font-size: 20px;
+  font-weight: 650;
+  color: var(--accent-strong);
+}
+
+.servo-model {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.servo-position {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  background: var(--panel-3);
+}
+
+.servo-position-value {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-family: var(--font-mono);
+}
+
+.servo-position-value #positionValue {
+  font-size: clamp(30px, 5vw, 40px);
+  font-weight: 650;
+  line-height: 1;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.servo-position-value small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.servo-track {
+  position: relative;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--input-bg);
+  overflow: hidden;
+}
+
+.servo-needle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 5px;
+  margin-left: -2.5px;
+  border-radius: 3px;
+  background: var(--accent);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 60%, transparent);
+  transition: left 0.12s linear;
+}
+
+.servo-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px 12px;
+  margin: 0;
+}
+
+.servo-metrics div {
+  min-width: 0;
+}
+
+.servo-metrics dt {
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+.servo-metrics dd {
+  margin: 2px 0 0;
+  overflow: hidden;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.servo-form {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.servo-slider {
+  width: 100%;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.servo-slider:disabled {
+  opacity: 0.4;
+}
+
+/* Register table ---------------------------------------------------------- */
+
+.servo-table-wrap {
+  max-height: 300px;
+  overflow: auto;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+}
+
+.servo-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.servo-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 6px 8px;
+  background: var(--sticky-surface);
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-weight: 550;
+  text-align: left;
+}
+
+.servo-table td {
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--text);
+}
+
+.servo-table tr[data-writable="true"] {
+  cursor: pointer;
+}
+
+.servo-table tr[data-writable="true"]:hover td {
+  background: var(--btn-hover);
+}
+
+.servo-table td.servo-area {
+  color: var(--muted);
+}
+
+.servo-table td.servo-unread {
+  color: var(--placeholder);
+}
+
+.servo-table tr:last-child td {
+  border-bottom: 0;
+}
+
+@media (max-width: 800px) {
+  .servo-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .servo-log {
+    max-height: 150px;
+  }
+}
+
+@media (max-width: 620px) {
+  .servo-topbar {
+    padding-top: 10px;
+  }
+
+  .servo-brand h1 {
+    font-size: 15px;
+  }
+
+  .servo-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .servo-layout {
+    padding-top: 12px;
+  }
+
+  .servo-row-stretch > .servo-field {
+    flex-basis: calc(50% - 4px);
+  }
+
+  /* DESIGN.md: touch targets stay at 44 px on phones. */
+  .servo-app .btn,
+  .servo-app .servo-field input,
+  .servo-app .servo-field select {
+    height: 44px;
+  }
+
+  .servo-app .servo-back {
+    height: 40px;
+  }
+
+  .servo-app .servo-small {
+    height: 32px;
+  }
+
+  /* Keep the header on one row: the back link becomes an icon, the rest keeps
+   * its 44 px targets. */
+  .servo-back span {
+    display: none;
+  }
+
+  .servo-brand {
+    gap: 8px;
+  }
+
+  .servo-back {
+    padding: 0 7px;
+  }
+
+  .servo-pill {
+    padding: 0 8px;
+  }
+
+  .servo-actions {
+    gap: 6px;
+  }
+}

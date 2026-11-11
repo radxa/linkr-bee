@@ -7,6 +7,11 @@ No USB-TTL adapter and no cable to the robot.
 
 中文说明见 [README.zh-CN.md](README.zh-CN.md)。
 
+There is also a browser-only counterpart, [web/servo.html](../../web/servo.html):
+it implements the same packet layer in JavaScript and talks to the Bee with Web
+Bluetooth, so it needs neither Python nor a host. Use the Python tool below for
+scripts and agents; use the page when you just want a servo bench in Chrome.
+
 ## How it fits together
 
 ```text

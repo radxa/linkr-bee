@@ -80,5 +80,13 @@ export default defineConfig({
   build: {
     outDir: path.join(mobileDir, "dist"),
     emptyOutDir: true,
+    rollupOptions: {
+      /* The servo bench is a second page in the same app, so the terminal can
+       * link to it and Capacitor's asset copy carries it into the APK. */
+      input: {
+        index: path.join(webDir, "index.html"),
+        servo: path.join(webDir, "servo.html"),
+      },
+    },
   },
 });

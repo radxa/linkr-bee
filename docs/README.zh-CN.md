@@ -22,6 +22,7 @@
 | --- | --- |
 | [开发指南](DEVELOPMENT.zh-CN.md) · [English](DEVELOPMENT.md) | 固件构建和刷写、Kconfig、终端工具、协议与测试模式 |
 | [硬件需求](HARDWARE.md) | 引脚、电气要求、测试点与量产注意事项 |
+| [舵机调试台](../web/servo.html) | 中英 | 浏览器页面：通过 Bee BLE 调飞特总线舵机，实时位置、力矩与参数表 |
 | [Bee 调试飞特舵机](../tools/bee_ftservo/README.zh-CN.md) · [English](../tools/bee_ftservo/README.md) | 用 Bee 的 BLE 桥接飞特总线舵机：接线、命令、BLE 延迟与半双工处理 |
 | [BLE 配件 API v1](LINKR_BLE_API.zh-CN.md) | GATT 服务、分帧请求、Reliable UART 与事件 |
 | [蓝牙配对与恢复](BLE_PAIRING.md) | 配对 GPIO 授权（C3/C5 为 GPIO1；WROOM 可选 GPIO4，默认关闭）、绑定保留、各端步骤与故障恢复 |

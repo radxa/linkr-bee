@@ -6,6 +6,10 @@
 
 English: [README.md](README.md)
 
+浏览器里还有一个同源实现：[web/servo.html](../../web/servo.html)。它在 JS 里实现了
+同一套飞特协议并用 Web Bluetooth 直接连 Bee，不需要 Python 或主机进程；适合临时
+调试，脚本和 Agent 场景仍用下面的 Python 工具。
+
 ## 拓扑
 
 ```text

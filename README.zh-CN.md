@@ -223,6 +223,7 @@ Ctrl 组合。助手根据可用空间切换为上下排列或左右分栏。
 - [使用指南](docs/USAGE.zh-CN.md)：界面、串口输入、助手、局域网与日志
 - [Rust CLI / TUI](tools/linkr-tui/README.md)：桌面终端与自动化（英文）
 - [Bee 调试飞特舵机](tools/bee_ftservo/README.zh-CN.md)：用 BLE 桥接飞特总线舵机（接线、命令与限制）
+- [舵机调试台](web/servo.html)：浏览器里通过 BLE 调飞特总线舵机，不需要主机软件
 - [开发指南](docs/DEVELOPMENT.zh-CN.md)：构建、刷写、打包、Kconfig、协议
 - [硬件需求](docs/HARDWARE.md)：引脚、电气要求、量产注意事项
 - [蓝牙配对与恢复](docs/BLE_PAIRING.md)：授权、绑定与恢复

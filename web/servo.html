@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Linkr Bee · 舵机调试 / Servo bench</title>
+    <meta name="theme-color" id="themeColorMeta" content="#05080D" />
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <script>
+      (() => {
+        try {
+          const saved = localStorage.getItem("linkr-theme");
+          const theme =
+            saved === "light" || saved === "dark"
+              ? saved
+              : window.matchMedia?.("(prefers-color-scheme: light)").matches
+                ? "light"
+                : "dark";
+          document.documentElement.dataset.theme = theme;
+        } catch {
+          // Storage can be unavailable in an embedded webview; keep the default.
+        }
+      })();
+    </script>
+    <link rel="stylesheet" href="./style.css?v=20261024-copybg" />
+    <link rel="stylesheet" href="./skin-v2.css?v=20261021-cross-browser" />
+    <link rel="stylesheet" href="./servo.css?v=20261111" />
+  </head>
+  <body class="servo-app">
+    <header class="servo-topbar">
+      <div class="servo-brand">
+        <a class="servo-back" href="./index.html" data-i18n-title="backToTerminal" aria-label="Terminal">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M15 5l-7 7 7 7"></path>
+          </svg>
+          <span>Linkr Bee</span>
+        </a>
+        <h1 data-i18n="title">舵机调试</h1>
+        <span id="linkState" class="servo-pill" data-state="offline">
+          <span class="servo-pill-dot"></span>
+          <span id="linkStateText" data-i18n="disconnected">未连接</span>
+        </span>
+      </div>
+      <div class="servo-actions">
+        <button id="connectButton" class="btn btn-primary" type="button" data-i18n="connect">连接 Bee</button>
+        <button id="disconnectButton" class="btn btn-soft" type="button" hidden data-i18n="disconnect">断开</button>
+        <button id="servoThemeButton" class="icon-btn" type="button" data-i18n-title="theme" aria-label="Theme">
+          <svg class="icon-sun" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="4"></circle>
+            <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path>
+          </svg>
+          <svg class="icon-moon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z"></path>
+          </svg>
+        </button>
+        <button id="servoLangButton" class="icon-btn servo-lang" type="button" data-i18n-title="language" aria-label="Language">
+          <span class="btn-label">EN</span>
+        </button>
+      </div>
+    </header>
+
+    <main class="servo-layout">
+      <section class="servo-column servo-column-bus" aria-label="Bus">
+        <article class="card servo-card">
+          <div class="card-title"><span class="dot"></span><span data-i18n="busTitle">总线</span></div>
+          <p class="field-hint" id="linkHint" data-i18n="linkHint">
+            通过 BLE 连接 Linkr Bee，把舵机总线接到 J7（TX/RX 短接）。
+          </p>
+          <div class="servo-field servo-baud">
+            <span data-i18n="busBaud">总线波特率</span>
+            <div class="servo-row servo-row-tight">
+              <select id="baudSelect" aria-label="Bus baud">
+                <option value="1000000">1 Mbaud</option>
+                <option value="500000">500 kbaud</option>
+                <option value="250000">250 kbaud</option>
+                <option value="115200">115200</option>
+                <option value="76800">76800</option>
+              </select>
+              <button id="baudApply" class="btn btn-soft servo-small" type="button" data-i18n="apply">应用</button>
+              <button id="baudRestore" class="btn btn-quiet servo-small" type="button" data-i18n="restore">恢复</button>
+            </div>
+          </div>
+          <p class="field-hint" id="uartHint" data-i18n="uartHint">尚未读取 Bee 的 UART 参数。</p>
+          <div class="servo-row servo-row-stretch">
+            <label class="servo-field" for="scanRange">
+              <span data-i18n="scanRange">扫描 ID 范围</span>
+              <input id="scanRange" value="1-12" autocomplete="off" spellcheck="false" />
+            </label>
+            <button id="scanButton" class="btn btn-soft" type="button" data-i18n="scan">扫描</button>
+          </div>
+          <p class="field-hint" id="scanHint" role="status" data-i18n="notScanned">尚未扫描。</p>
+          <div id="servoList" class="servo-list" role="listbox" data-i18n-aria="servoList" aria-label="Servo list"></div>
+        </article>
+
+        <article class="card servo-card servo-log-card">
+          <div class="card-title"><span class="dot"></span><span data-i18n="logTitle">日志</span>
+            <button id="logClear" class="btn btn-quiet servo-small" type="button" data-i18n="clear">清空</button>
+          </div>
+          <ol id="logList" class="servo-log" aria-live="polite"></ol>
+        </article>
+      </section>
+
+      <section class="servo-column servo-column-main" aria-label="Servo">
+        <article class="card servo-card servo-main-card">
+          <div class="servo-servo-head">
+            <div class="servo-servo-title">
+              <span id="selectedId" class="servo-id">—</span>
+              <span id="selectedModel" class="servo-model" data-i18n="noServo">未选择舵机</span>
+            </div>
+            <div class="servo-row">
+              <button id="torqueOn" class="btn btn-soft" type="button" disabled data-i18n="torqueOn">力矩开</button>
+              <button id="torqueOff" class="btn btn-soft" type="button" disabled data-i18n="torqueOff">力矩关</button>
+              <button id="refreshButton" class="btn btn-soft" type="button" disabled data-i18n="refresh">刷新</button>
+            </div>
+          </div>
+
+          <div class="servo-position">
+            <div class="servo-position-value">
+              <span id="positionValue">—</span><small>/ 4095</small>
+            </div>
+            <div class="servo-track" role="presentation">
+              <div id="positionNeedle" class="servo-needle"></div>
+            </div>
+            <dl class="servo-metrics">
+              <div><dt data-i18n="speed">速度</dt><dd id="metricSpeed">—</dd></div>
+              <div><dt data-i18n="load">负载</dt><dd id="metricLoad">—</dd></div>
+              <div><dt data-i18n="voltage">电压</dt><dd id="metricVoltage">—</dd></div>
+              <div><dt data-i18n="temperature">温度</dt><dd id="metricTemperature">—</dd></div>
+              <div><dt data-i18n="current">电流</dt><dd id="metricCurrent">—</dd></div>
+              <div><dt data-i18n="moving">运动中</dt><dd id="metricMoving">—</dd></div>
+            </dl>
+          </div>
+
+          <form id="moveForm" class="servo-form" autocomplete="off">
+            <div class="servo-row servo-row-stretch">
+              <label class="servo-field" for="targetInput">
+                <span data-i18n="target">目标位置</span>
+                <input id="targetInput" type="number" min="0" max="4095" step="1" value="2048" />
+              </label>
+              <label class="servo-field" for="speedInput">
+                <span data-i18n="speedLabel">速度</span>
+                <input id="speedInput" type="number" min="0" max="3400" step="1" value="2400" />
+              </label>
+              <label class="servo-field" for="accInput">
+                <span data-i18n="accLabel">加速度</span>
+                <input id="accInput" type="number" min="0" max="254" step="1" value="50" />
+              </label>
+              <button id="moveButton" class="btn btn-primary" type="submit" disabled data-i18n="move">移动</button>
+            </div>
+            <input id="positionSlider" class="servo-slider" type="range" min="0" max="4095" step="1" value="2048" aria-label="Position" />
+            <p class="field-hint" data-i18n="moveHint">滑块与数字框同步；移动前会自动打开力矩。</p>
+          </form>
+
+          <div class="servo-row servo-row-stretch">
+            <label class="servo-field" for="wheelSpeed">
+              <span data-i18n="wheelSpeed">轮模式速度</span>
+              <input id="wheelSpeed" type="number" step="1" value="600" />
+            </label>
+            <button id="wheelButton" class="btn btn-soft" type="button" disabled data-i18n="wheel">轮模式</button>
+            <label class="servo-check">
+              <input id="liveToggle" type="checkbox" checked />
+              <span data-i18n="live">实时监视</span>
+            </label>
+            <span id="actionHint" class="field-hint" role="status"></span>
+          </div>
+        </article>
+
+        <article class="card servo-card">
+          <div class="card-title"><span class="dot"></span><span data-i18n="paramsTitle">参数表</span></div>
+          <div class="servo-row">
+            <button id="readParams" class="btn btn-soft" type="button" disabled data-i18n="readParams">读取参数</button>
+            <span id="paramsHint" class="field-hint" data-i18n="paramsHint">先选择舵机。</span>
+          </div>
+          <div class="servo-table-wrap">
+            <table class="servo-table">
+              <thead>
+                <tr>
+                  <th data-i18n="colAddress">地址</th>
+                  <th data-i18n="colRegister">寄存器</th>
+                  <th data-i18n="colValue">值</th>
+                  <th data-i18n="colArea">区域</th>
+                </tr>
+              </thead>
+              <tbody id="paramRows"></tbody>
+            </table>
+          </div>
+          <form id="writeForm" class="servo-row servo-row-stretch" autocomplete="off">
+            <label class="servo-field" for="writeAddress">
+              <span data-i18n="writeAddress">地址</span>
+              <input id="writeAddress" value="42" />
+            </label>
+            <label class="servo-field" for="writeLength">
+              <span data-i18n="writeLength">长度</span>
+              <input id="writeLength" type="number" min="1" max="16" value="2" />
+            </label>
+            <label class="servo-field" for="writeValue">
+              <span data-i18n="writeValue">值</span>
+              <input id="writeValue" value="2048" />
+            </label>
+            <button id="writeButton" class="btn btn-soft" type="submit" disabled data-i18n="write">写入</button>
+          </form>
+          <p class="field-hint" data-i18n="writeHint">地址/值支持十进制或 0x 十六进制。写入只做单次 8 位/16 位小端写入。</p>
+        </article>
+      </section>
+    </main>
+
+    <script type="module" src="./native-bootstrap.js"></script>
+    <script type="module" src="./ble_transport.js"></script>
+    <script type="module" src="./servo.js"></script>
+  </body>
+</html>
