@@ -5155,6 +5155,11 @@ function isAttSizeRejection(error) {
   return /\blength\b[^.]*\binvalid\b/i.test(message) || /\binvalid\b[^.]*\blength\b/i.test(message);
 }
 
+/* The hardware-free demo has no GATT characteristics, so app.js hands it the
+ * bytes directly; it echoes them through appendOutput() so a typed line lands
+ * in the terminal the way a real board's would. */
+let demoSerialSink = null;
+
 async function writeBytes(bytes, sensitive = false, generation = state.writeGeneration, signal, revision = state.serialControlRevision) {
   assertWriteSession(generation, signal);
   assertSerialInput(revision);
@@ -5171,6 +5176,13 @@ async function writeBytes(bytes, sensitive = false, generation = state.writeGene
       );
     }
     state.ws.send(bytes);
+    state.txBytes += bytes.length;
+    updateCounters();
+    return;
+  }
+
+  if (demoSerialSink) {
+    demoSerialSink(bytes);
     state.txBytes += bytes.length;
     updateCounters();
     return;
@@ -7875,6 +7887,8 @@ function startDemoModeIfRequested() {
     setControl: (fn) => { sendControl = fn; },
     setPage: setSettingsPage,
     appendLine,
+    feedOutput: appendOutput,
+    setSerial: (sink) => { demoSerialSink = sink; },
     panelToggle: elements.panelToggle,
     appShell: elements.appShell,
   });

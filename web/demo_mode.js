@@ -38,6 +38,8 @@ export function installDemoMode({
   setControl,
   setPage,
   appendLine,
+  feedOutput,
+  setSerial,
   panelToggle,
   appShell,
 }) {
@@ -421,6 +423,18 @@ export function installDemoMode({
     return new Promise((resolve) => {
       setTimeout(() => resolve(options.returnResponse ? text : 1), delay);
     });
+  });
+
+  /* UART writes: there is no GATT characteristic behind this mock, so app.js
+   * hands the bytes here and the board echoes them. Without this a typed line
+   * showed "[error] UART RX characteristic is not ready", which also meant the
+   * demo could not stand in for a full-screen program at all. */
+  const echo = new TextDecoder();
+  setSerial?.((bytes) => {
+    const text = echo.decode(bytes, { stream: true });
+    /* A cooked tty echoes CR as CRLF (ONLCR); without that every echoed line
+     * would overwrite the one above it and the mock would look broken. */
+    if (text) feedOutput?.(text.replace(/\r(?!\n)/g, "\r\n"));
   });
 
   state.mode = "ble";
