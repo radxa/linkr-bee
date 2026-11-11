@@ -13389,6 +13389,11 @@ window.__ModuleLoader__.load({
       statusLive: '实时',
       statusOffline: '离线',
       ttySize: '终端尺寸',
+      autoResizeShort: '自动',
+      autoResize: '随面板自动同步目标尺寸',
+      autoResizeHint: '面板尺寸变化时自动把新尺寸发给板子。关掉后只在点「同步尺寸」时发送。',
+      syncSize: '同步尺寸',
+      syncSizeHint: '把面板当前的列数/行数发给板子；板子停在 shell 提示符时才会执行。',
       empty: '等待串口输出…',
       connecting: '连接中…',
       linkLost: '与开发板的连接已断开',
@@ -13458,6 +13463,11 @@ window.__ModuleLoader__.load({
       statusLive: 'Live',
       statusOffline: 'Offline',
       ttySize: 'Terminal size',
+      autoResizeShort: 'Auto',
+      autoResize: 'Follow the panel size automatically',
+      autoResizeHint: 'Send the new size when the panel changes. Off sends only when you press "Sync size".',
+      syncSize: 'Sync size',
+      syncSizeHint: 'Send the panel size to the board; it runs at the next idle shell prompt.',
       empty: 'Waiting for serial output…',
       connecting: 'Connecting…',
       linkLost: 'The board link dropped',
@@ -14192,6 +14202,13 @@ window.__ModuleLoader__.load({
       const [link, setLink] = useState(null);
       const [session, setSession] = useState(null);
       const [tty, setTty] = useState(null);
+      // Off records the pane's own geometry but sends nothing; the header's
+      // "Sync size" button is then the only thing that does.
+      const [autoResize, setAutoResize] = useState(() => {
+        try { return localStorage.getItem('linkr-auto-resize') !== '0'; } catch { return true; }
+      });
+      const autoResizeRef = useRef(autoResize);
+      autoResizeRef.current = autoResize;
       const [conn, setConn] = useState(screen.conn);
       const [drew, setDrew] = useState(screen.drew);
       const [reconnectBusy, setReconnectBusy] = useState(false);
@@ -14576,16 +14593,22 @@ window.__ModuleLoader__.load({
         if (el && atBottomRef.current) el.scrollTop = el.scrollHeight;
       }, [lines]);
 
-      /** Tell the target its console size; coalesced, and only when it changes. */
-      const postResize = useCallback((cols, rows) => {
+      /** Tell the target its console size; coalesced, and only when it changes.
+       *
+       * `force` is the header button: it sends this size even when automatic
+       * syncing is off and even when the size has not changed, because that is
+       * the whole point of pressing it — what the target has is unknown.
+       */
+      const postResize = useCallback((cols, rows, force = false) => {
         if (!Number.isSafeInteger(cols) || !Number.isSafeInteger(rows)) return;
         if (cols < 2 || rows < 1) return;
         const key = `${cols}x${rows}`;
-        if (lastSize.current === key) return;
-        lastSize.current = key;
+        const changed = lastSize.current !== key;
+        if (changed) lastSize.current = key;
         // The header shows the geometry the terminal actually took, not the one
         // it asked for, so the two are updated from the same place.
         setTty({ cols, rows });
+        if (!force && (!autoResizeRef.current || !changed)) return;
         if (resizeTimer.current !== null) clearTimeout(resizeTimer.current);
         resizeTimer.current = setTimeout(() => {
           resizeTimer.current = null;
@@ -14597,6 +14620,20 @@ window.__ModuleLoader__.load({
           }).catch(() => {});
         }, 250);
       }, []);
+
+      /** Send the pane's size now, whatever the automatic setting says. */
+      const syncSizeNow = () => {
+        if (tty === null) return;
+        postResize(tty.cols, tty.rows, true);
+      };
+
+      const toggleAutoResize = (on) => {
+        setAutoResize(on);
+        autoResizeRef.current = on;
+        try { localStorage.setItem('linkr-auto-resize', on ? '1' : '0'); } catch { /* private mode */ }
+        // Turning it on is a request to make the target match the pane now.
+        if (on && tty !== null) postResize(tty.cols, tty.rows, true);
+      };
 
       /** Hand text to the terminal; false means the line renderer must draw it. */
       const feedTerminal = (text) => {
@@ -14890,7 +14927,25 @@ window.__ModuleLoader__.load({
             h('span', { className: 'lb-title' }, t('title')),
             h('span', { className: 'lb-sub', title: where }, where),
             h('span', { className: 'lb-spacer' }),
-            tty !== null && h('span', { className: 'lb-tty', title: t('ttySize') }, `${tty.cols}\u00d7${tty.rows}`),
+            tty !== null && h('span', { className: 'lb-tty-group' },
+              h('label', { className: 'lb-auto', title: t('autoResizeHint') },
+                h('input', {
+                  type: 'checkbox',
+                  checked: autoResize,
+                  onChange: (event) => toggleAutoResize(event.target.checked),
+                  'aria-label': t('autoResize'),
+                }),
+                h('span', null, t('autoResizeShort')),
+              ),
+              h('span', { className: 'lb-tty', title: t('ttySize') }, `${tty.cols}\u00d7${tty.rows}`),
+              h('button', {
+                className: 'lb-sync',
+                type: 'button',
+                title: t('syncSizeHint'),
+                disabled: !live,
+                onClick: syncSizeNow,
+              }, t('syncSize')),
+            ),
           ),
           h('div', { className: 'lb-actions' },
             h(
@@ -15017,6 +15072,13 @@ window.__ModuleLoader__.load({
 .lb-view-btn:hover { opacity: 1; color: var(--dsw-alias-label-secondary); }
 .lb-view-btn.on { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); opacity: 1; font-weight: 600; }
 .lb-tty { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-secondary); border: 1px solid var(--dsw-alias-border-l1); border-radius: 999px; padding: 1px 8px; flex: 0 0 auto; }
+.lb-tty-group { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+.lb-auto { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--dsw-alias-label-secondary); cursor: pointer; user-select: none; }
+.lb-auto input { width: 13px; height: 13px; margin: 0; accent-color: var(--dsw-alias-brand-primary); cursor: pointer; }
+.lb-sync { font: inherit; font-size: 11px; line-height: 1.4; padding: 1px 8px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 999px; background: transparent; color: var(--dsw-alias-label-secondary); cursor: pointer; }
+.lb-sync:hover:not(:disabled) { color: var(--dsw-alias-label-primary); border-color: var(--dsw-alias-border-l2); }
+.lb-sync:disabled { opacity: 0.45; cursor: default; }
+.lb-sync:focus-visible, .lb-auto input:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px; }
 .lb-ghost { position: relative; display: inline-flex; align-items: center; justify-content: center; min-height: 36px; padding: 0 8px; background: transparent; border: none; color: var(--dsw-alias-label-secondary); font-size: 12px; border-radius: 7px; cursor: pointer; flex: 0 0 auto; }
 /* Match the existing controls while keeping visible 36 px hit targets. */
 .lb-ghost::after { content: ''; position: absolute; inset: -4px -2px; }
