@@ -9,8 +9,12 @@ No USB-TTL adapter and no cable to the robot.
 
 There is also a browser-only counterpart, [web/servo.html](../../web/servo.html):
 it implements the same packet layer in JavaScript and talks to the Bee with Web
-Bluetooth, so it needs neither Python nor a host. Use the Python tool below for
-scripts and agents; use the page when you just want a servo bench in Chrome.
+Bluetooth, so it needs neither Python nor a host. Its tabs mirror the vendor
+utility: bench (position control with normal/sync/async writes, live feedback,
+a scrolling chart with CSV export, and a step/sweep auto test) and program
+(register table, JSON parameter save/load/restore, midpoint calibration). Use
+the Python tool below for scripts and agents; use the page when you want a
+servo bench in Chrome.
 
 ## How it fits together
 

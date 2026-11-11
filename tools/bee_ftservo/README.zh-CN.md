@@ -7,8 +7,10 @@
 English: [README.md](README.md)
 
 浏览器里还有一个同源实现：[web/servo.html](../../web/servo.html)。它在 JS 里实现了
-同一套飞特协议并用 Web Bluetooth 直接连 Bee，不需要 Python 或主机进程；适合临时
-调试，脚本和 Agent 场景仍用下面的 Python 工具。
+同一套飞特协议并用 Web Bluetooth 直接连 Bee，不需要 Python 或主机进程。页面按官方
+调试工具分成两个页签：调试（普通/同步/异步写、实时反馈、可导出 CSV 的实时曲线、
+步进/连续扫描自动测试）和编程（参数表、JSON 参数备份/载入/恢复、中位校准）。
+适合临时调试，脚本和 Agent 场景仍用下面的 Python 工具。
 
 ## 拓扑
 

@@ -355,6 +355,16 @@ export class SimulatedBus {
     const instruction = frame[4];
     const params = Array.from(frame.slice(5, -1));
     const servo = this.servos.get(id);
+    if (instruction === INSTRUCTION.action) {
+      if (id === BROADCAST_ID) {
+        for (const target of this.servos.values()) flushPending(target);
+        return [];
+      }
+      const target = this.servos.get(id);
+      if (!target) return [];
+      flushPending(target);
+      return [statusFrame(id, 0, [])];
+    }
     if (instruction === INSTRUCTION.syncWrite) {
       const address = params[0];
       const length = params[1];
@@ -375,7 +385,8 @@ export class SimulatedBus {
       writeRegister(servo, params[0], params.slice(1));
       return id === BROADCAST_ID ? [] : [statusFrame(id, 0, [])];
     }
-    if (instruction === INSTRUCTION.regWrite || instruction === INSTRUCTION.action) {
+    if (instruction === INSTRUCTION.regWrite && params.length >= 1) {
+      servo.pending = { address: params[0], values: params.slice(1) };
       return [statusFrame(id, 0, [])];
     }
     return [];
@@ -391,6 +402,7 @@ function makeServo(id) {
   setWord(regs, 11, 4095);
   setWord(regs, 42, 2048);
   setWord(regs, 56, 2048);
+  setWord(regs, 69, 0);
   regs[62] = 120;
   regs[63] = 33;
   return { id, regs };
@@ -407,6 +419,12 @@ function getWord(regs, address) {
 
 function readRegister(servo, address, length) {
   return Array.from(servo.regs.slice(address, address + length));
+}
+
+function flushPending(servo) {
+  if (!servo.pending) return;
+  writeRegister(servo, servo.pending.address, servo.pending.values);
+  servo.pending = null;
 }
 
 function writeRegister(servo, address, values) {

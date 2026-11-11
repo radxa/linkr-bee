@@ -52,11 +52,14 @@ test("the demo bus fills the servo list and live values", async ({ page }) => {
   await expect(page.locator("#selectedId")).toHaveText("001");
   await expect(page.locator("#positionValue")).toHaveText("2048");
   await expect(page.locator("#connectButton")).toBeHidden();
+  await expect(page.locator("#chartCanvas")).toBeVisible();
+  await expect(page.locator("#chartLegend label")).toHaveCount(6);
   expect(errors).toEqual([]);
 });
 
 test("register read, move and servo selection hit the bus", async ({ page }) => {
   await page.goto(`${base}/servo.html?demo=servo&lang=en&theme=dark`);
+  await page.locator("#tabProgram").click();
   await page.locator("#readParams").click();
   await expect(page.locator("#paramsHint")).toContainText("Read 22 registers");
   const modelCell = page
@@ -66,6 +69,7 @@ test("register read, move and servo selection hit the bus", async ({ page }) => 
     .nth(2);
   await expect(modelCell).toHaveText("777");
 
+  await page.locator("#tabBench").click();
   await page.locator("#targetInput").fill("1024");
   await page.locator("#moveButton").click();
   await expect(page.locator("#logList")).toContainText("Moved to 1024");
@@ -74,6 +78,51 @@ test("register read, move and servo selection hit the bus", async ({ page }) => 
   await page.locator(".servo-list-item").nth(1).click();
   await expect(page.locator("#selectedId")).toHaveText("002");
   await expect(page.locator("#positionValue")).toHaveText("2048");
+});
+
+test("async write queues the goal and Run async applies it", async ({ page }) => {
+  await page.goto(`${base}/servo.html?demo=servo&lang=en&theme=dark`);
+  await page.locator('input[name="writeMode"][value="async"]').check();
+  await page.locator("#targetInput").fill("1500");
+  await page.locator("#moveButton").click();
+  await expect(page.locator("#moveHint")).toContainText("queued");
+  await expect(page.locator("#positionValue")).toHaveText("2048");
+  await page.locator("#asyncExecute").click();
+  await expect(page.locator("#positionValue")).toHaveText("1500");
+});
+
+test("the chart collects samples and the auto step test ends at the end point", async ({ page }) => {
+  await page.goto(`${base}/servo.html?demo=servo&lang=en&theme=dark`);
+  await page.waitForFunction(() => (window.__servoBench?.chart.samples.length || 0) > 2);
+  const samples = await page.evaluate(() => window.__servoBench.chart.samples.length);
+  expect(samples).toBeGreaterThan(2);
+
+  await page.locator("#autoStart").fill("500");
+  await page.locator("#autoEnd").fill("900");
+  await page.locator("#autoSteps").fill("2");
+  await page.locator("#autoStepDelay").fill("10");
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.locator("#autoStep").click();
+  await expect(page.locator("#logList")).toContainText("Auto test finished");
+  await expect(page.locator("#positionValue")).toHaveText("900");
+});
+
+test("all torque off broadcasts a sync write to every scanned servo", async ({ page }) => {
+  await page.goto(`${base}/servo.html?demo=servo&lang=en&theme=dark`);
+  await expect(page.locator("#torqueAllOff")).toBeEnabled();
+  await page.locator("#torqueAllOff").click();
+  await expect(page.locator("#logList")).toContainText("Torque released on 6 servo");
+});
+
+test("parameter save downloads a JSON file with the EEPROM map", async ({ page }) => {
+  await page.goto(`${base}/servo.html?demo=servo&lang=en&theme=dark`);
+  await page.locator("#tabProgram").click();
+  await page.locator("#readParams").click();
+  await expect(page.locator("#paramsHint")).toContainText("Read 22 registers");
+  const downloadPromise = page.waitForEvent("download");
+  await page.locator("#saveParams").click();
+  const download = await downloadPromise;
+  expect(download.suggestedFilename()).toMatch(/STS3215_ID1\.json/);
 });
 
 test("the phone layout has no horizontal overflow and the language toggles", async ({ page }) => {

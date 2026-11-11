@@ -24,7 +24,7 @@
     </script>
     <link rel="stylesheet" href="./style.css?v=20261024-copybg" />
     <link rel="stylesheet" href="./skin-v2.css?v=20261021-cross-browser" />
-    <link rel="stylesheet" href="./servo.css?v=20261111" />
+    <link rel="stylesheet" href="./servo.css?v=20261111b" />
   </head>
   <body class="servo-app">
     <header class="servo-topbar">
@@ -80,7 +80,13 @@
               <button id="baudRestore" class="btn btn-quiet servo-small" type="button" data-i18n="restore">恢复</button>
             </div>
           </div>
-          <p class="field-hint" id="uartHint" data-i18n="uartHint">尚未读取 Bee 的 UART 参数。</p>
+          <p class="field-hint" id="uartHint" data-i18n="uartHint">连接后会读取 Bee 的 UART 参数。</p>
+          <div class="servo-row servo-row-tight">
+            <label class="servo-field servo-timeout" for="timeoutInput">
+              <span data-i18n="timeoutLabel">通信超时 (ms)</span>
+              <input id="timeoutInput" type="number" min="50" max="3000" step="10" value="250" />
+            </label>
+          </div>
           <div class="servo-row servo-row-stretch">
             <label class="servo-field" for="scanRange">
               <span data-i18n="scanRange">扫描 ID 范围</span>
@@ -101,106 +107,195 @@
       </section>
 
       <section class="servo-column servo-column-main" aria-label="Servo">
-        <article class="card servo-card servo-main-card">
-          <div class="servo-servo-head">
-            <div class="servo-servo-title">
-              <span id="selectedId" class="servo-id">—</span>
-              <span id="selectedModel" class="servo-model" data-i18n="noServo">未选择舵机</span>
+        <div class="servo-tabs" role="tablist" data-i18n-aria="tabsAria" aria-label="Servo tools">
+          <button id="tabBench" class="servo-tab is-active" type="button" role="tab" aria-selected="true" data-servo-tab="bench" data-i18n="tabBench">调试</button>
+          <button id="tabProgram" class="servo-tab" type="button" role="tab" aria-selected="false" data-servo-tab="program" data-i18n="tabProgram">编程</button>
+        </div>
+
+        <div class="servo-page" data-servo-page="bench">
+          <article class="card servo-card servo-main-card">
+            <div class="servo-servo-head">
+              <div class="servo-servo-title">
+                <span id="selectedId" class="servo-id">—</span>
+                <span id="selectedModel" class="servo-model" data-i18n="noServo">未选择舵机</span>
+              </div>
+              <div class="servo-row">
+                <button id="torqueOn" class="btn btn-soft" type="button" disabled data-i18n="torqueOn">力矩开</button>
+                <button id="torqueOff" class="btn btn-soft" type="button" disabled data-i18n="torqueOff">力矩关</button>
+                <button id="torqueAllOff" class="btn btn-soft" type="button" disabled data-i18n="torqueAllOff">全部力矩关</button>
+                <button id="refreshButton" class="btn btn-soft" type="button" disabled data-i18n="refresh">刷新</button>
+              </div>
+            </div>
+
+            <div class="servo-position">
+              <div class="servo-position-value">
+                <span id="positionValue">—</span><small>/ 4095</small>
+              </div>
+              <div class="servo-track" role="presentation">
+                <div id="positionNeedle" class="servo-needle"></div>
+              </div>
+              <dl class="servo-metrics">
+                <div><dt data-i18n="speed">速度</dt><dd id="metricSpeed">—</dd></div>
+                <div><dt data-i18n="load">负载</dt><dd id="metricLoad">—</dd></div>
+                <div><dt data-i18n="voltage">电压</dt><dd id="metricVoltage">—</dd></div>
+                <div><dt data-i18n="temperature">温度</dt><dd id="metricTemperature">—</dd></div>
+                <div><dt data-i18n="current">电流</dt><dd id="metricCurrent">—</dd></div>
+                <div><dt data-i18n="moving">运动中</dt><dd id="metricMoving">—</dd></div>
+                <div><dt data-i18n="goalLabel">目标</dt><dd id="metricGoal">—</dd></div>
+                <div><dt data-i18n="statusLabel">状态</dt><dd id="metricStatus">—</dd></div>
+              </dl>
+            </div>
+
+            <form id="moveForm" class="servo-form" autocomplete="off">
+              <div class="servo-row servo-row-stretch">
+                <label class="servo-field" for="targetInput">
+                  <span data-i18n="target">目标位置</span>
+                  <input id="targetInput" type="number" min="0" max="4095" step="1" value="2048" />
+                </label>
+                <label class="servo-field" for="speedInput">
+                  <span data-i18n="speedLabel">速度</span>
+                  <input id="speedInput" type="number" min="0" max="3400" step="1" value="2400" />
+                </label>
+                <label class="servo-field" for="accInput">
+                  <span data-i18n="accLabel">加速度</span>
+                  <input id="accInput" type="number" min="0" max="254" step="1" value="50" />
+                </label>
+                <label class="servo-field" for="timeInput">
+                  <span data-i18n="timeLabel">时间 (ms)</span>
+                  <input id="timeInput" type="number" min="0" max="65535" step="1" value="0" />
+                </label>
+              </div>
+              <input id="positionSlider" class="servo-slider" type="range" min="0" max="4095" step="1" value="2048" aria-label="Position" />
+              <div class="servo-row servo-row-modes">
+                <div class="servo-modes" role="radiogroup" aria-labelledby="writeModeLabel">
+                  <span id="writeModeLabel" class="servo-modes-label" data-i18n="writeMode">写入方式</span>
+                  <label class="servo-radio"><input type="radio" name="writeMode" value="normal" checked /><span data-i18n="modeNormal">普通写</span></label>
+                  <label class="servo-radio"><input type="radio" name="writeMode" value="sync" /><span data-i18n="modeSync">同步写</span></label>
+                  <label class="servo-radio"><input type="radio" name="writeMode" value="async" /><span data-i18n="modeAsync">异步写</span></label>
+                </div>
+                <label class="servo-check"><input id="torqueOutput" type="checkbox" checked /><span data-i18n="torqueOutput">扭矩输出</span></label>
+                <button id="moveButton" class="btn btn-primary" type="submit" disabled data-i18n="set">设置</button>
+                <button id="asyncExecute" class="btn btn-soft" type="button" disabled data-i18n="asyncExecute">异步执行</button>
+              </div>
+              <p class="field-hint" id="moveHint" data-i18n="moveHint">滑块与数字框同步；普通写完成后会等待舵机停稳。</p>
+            </form>
+
+            <div class="servo-row servo-row-tight">
+              <label class="servo-field" for="wheelSpeed">
+                <span data-i18n="wheelSpeed">轮模式速度</span>
+                <input id="wheelSpeed" type="number" step="1" value="600" />
+              </label>
+              <button id="wheelButton" class="btn btn-soft" type="button" disabled data-i18n="wheel">轮模式</button>
+              <label class="servo-check">
+                <input id="liveToggle" type="checkbox" checked />
+                <span data-i18n="live">实时监视</span>
+              </label>
+              <span id="actionHint" class="field-hint" role="status"></span>
+            </div>
+          </article>
+
+          <article class="card servo-card">
+            <div class="card-title"><span class="dot"></span><span data-i18n="chartTitle">实时曲线</span>
+              <button id="chartExport" class="btn btn-quiet servo-small" type="button" data-i18n="chartExport">导出 CSV</button>
+              <button id="chartClear" class="btn btn-quiet servo-small" type="button" data-i18n="clear">清空</button>
+            </div>
+            <div id="chartLegend" class="servo-legend" role="group" data-i18n-aria="chartChannels" aria-label="Chart channels"></div>
+            <div class="servo-chart-wrap">
+              <canvas id="chartCanvas" class="servo-chart" width="720" height="260"></canvas>
+              <p id="chartEmpty" class="servo-chart-empty" data-i18n="chartEmpty">开启“实时监视”后开始采样。</p>
+            </div>
+            <div class="servo-row servo-row-tight">
+              <label class="servo-field" for="chartWindow">
+                <span data-i18n="chartWindow">时间窗</span>
+                <select id="chartWindow">
+                  <option value="10">10 s</option>
+                  <option value="30" selected>30 s</option>
+                  <option value="60">60 s</option>
+                  <option value="600">600 s</option>
+                </select>
+              </label>
+              <span id="chartStats" class="field-hint"></span>
+            </div>
+          </article>
+
+          <article class="card servo-card">
+            <div class="card-title"><span class="dot"></span><span data-i18n="autoTitle">自动调试</span></div>
+            <p class="field-hint" data-i18n="autoHint">固定好机构、确认限位后再运行；运行中可用“停止”中断。</p>
+            <div class="servo-row servo-row-stretch">
+              <label class="servo-field" for="autoStart">
+                <span data-i18n="autoStart">起始</span>
+                <input id="autoStart" type="number" min="0" max="4095" step="1" value="0" />
+              </label>
+              <label class="servo-field" for="autoEnd">
+                <span data-i18n="autoEnd">结束</span>
+                <input id="autoEnd" type="number" min="0" max="4095" step="1" value="4095" />
+              </label>
+              <label class="servo-field" for="autoSteps">
+                <span data-i18n="autoSteps">步数</span>
+                <input id="autoSteps" type="number" min="1" max="500" step="1" value="10" />
+              </label>
+              <label class="servo-field" for="autoStepDelay">
+                <span data-i18n="autoStepDelay">步进延时 (ms)</span>
+                <input id="autoStepDelay" type="number" min="0" max="10000" step="10" value="200" />
+              </label>
+              <label class="servo-field" for="autoSweepDelay">
+                <span data-i18n="autoSweepDelay">扫描延时 (ms)</span>
+                <input id="autoSweepDelay" type="number" min="0" max="60000" step="100" value="2000" />
+              </label>
             </div>
             <div class="servo-row">
-              <button id="torqueOn" class="btn btn-soft" type="button" disabled data-i18n="torqueOn">力矩开</button>
-              <button id="torqueOff" class="btn btn-soft" type="button" disabled data-i18n="torqueOff">力矩关</button>
-              <button id="refreshButton" class="btn btn-soft" type="button" disabled data-i18n="refresh">刷新</button>
+              <button id="autoSweep" class="btn btn-soft" type="button" disabled data-i18n="autoSweep">连续扫描</button>
+              <button id="autoStep" class="btn btn-soft" type="button" disabled data-i18n="autoStep">步进</button>
+              <button id="autoStop" class="btn btn-quiet" type="button" disabled data-i18n="autoStop">停止</button>
+              <span id="autoHint" class="field-hint" role="status"></span>
             </div>
-          </div>
+          </article>
+        </div>
 
-          <div class="servo-position">
-            <div class="servo-position-value">
-              <span id="positionValue">—</span><small>/ 4095</small>
+        <div class="servo-page" data-servo-page="program" hidden>
+          <article class="card servo-card">
+            <div class="card-title"><span class="dot"></span><span data-i18n="paramsTitle">参数表</span></div>
+            <div class="servo-row servo-row-wrap">
+              <button id="readParams" class="btn btn-soft" type="button" disabled data-i18n="onlineLoad">在线载入</button>
+              <button id="saveParams" class="btn btn-soft" type="button" disabled data-i18n="saveParams">保存参数</button>
+              <button id="loadParams" class="btn btn-soft" type="button" data-i18n="loadParams">载入参数</button>
+              <button id="restoreParams" class="btn btn-soft" type="button" disabled data-i18n="restoreParams">恢复参数</button>
+              <button id="calibrateButton" class="btn btn-soft" type="button" disabled data-i18n="calibrate">中位校准</button>
+              <input id="paramFile" type="file" accept=".json,application/json" hidden />
             </div>
-            <div class="servo-track" role="presentation">
-              <div id="positionNeedle" class="servo-needle"></div>
+            <p class="field-hint" id="paramsHint" data-i18n="paramsHint">先选择舵机。</p>
+            <div class="servo-table-wrap">
+              <table class="servo-table">
+                <thead>
+                  <tr>
+                    <th data-i18n="colAddress">地址</th>
+                    <th data-i18n="colRegister">寄存器</th>
+                    <th data-i18n="colValue">值</th>
+                    <th data-i18n="colArea">区域</th>
+                  </tr>
+                </thead>
+                <tbody id="paramRows"></tbody>
+              </table>
             </div>
-            <dl class="servo-metrics">
-              <div><dt data-i18n="speed">速度</dt><dd id="metricSpeed">—</dd></div>
-              <div><dt data-i18n="load">负载</dt><dd id="metricLoad">—</dd></div>
-              <div><dt data-i18n="voltage">电压</dt><dd id="metricVoltage">—</dd></div>
-              <div><dt data-i18n="temperature">温度</dt><dd id="metricTemperature">—</dd></div>
-              <div><dt data-i18n="current">电流</dt><dd id="metricCurrent">—</dd></div>
-              <div><dt data-i18n="moving">运动中</dt><dd id="metricMoving">—</dd></div>
-            </dl>
-          </div>
-
-          <form id="moveForm" class="servo-form" autocomplete="off">
-            <div class="servo-row servo-row-stretch">
-              <label class="servo-field" for="targetInput">
-                <span data-i18n="target">目标位置</span>
-                <input id="targetInput" type="number" min="0" max="4095" step="1" value="2048" />
+            <form id="writeForm" class="servo-row servo-row-stretch" autocomplete="off">
+              <label class="servo-field" for="writeAddress">
+                <span data-i18n="writeAddress">地址</span>
+                <input id="writeAddress" value="42" />
               </label>
-              <label class="servo-field" for="speedInput">
-                <span data-i18n="speedLabel">速度</span>
-                <input id="speedInput" type="number" min="0" max="3400" step="1" value="2400" />
+              <label class="servo-field" for="writeLength">
+                <span data-i18n="writeLength">长度</span>
+                <input id="writeLength" type="number" min="1" max="16" value="2" />
               </label>
-              <label class="servo-field" for="accInput">
-                <span data-i18n="accLabel">加速度</span>
-                <input id="accInput" type="number" min="0" max="254" step="1" value="50" />
+              <label class="servo-field" for="writeValue">
+                <span data-i18n="writeValue">值</span>
+                <input id="writeValue" value="2048" />
               </label>
-              <button id="moveButton" class="btn btn-primary" type="submit" disabled data-i18n="move">移动</button>
-            </div>
-            <input id="positionSlider" class="servo-slider" type="range" min="0" max="4095" step="1" value="2048" aria-label="Position" />
-            <p class="field-hint" data-i18n="moveHint">滑块与数字框同步；移动前会自动打开力矩。</p>
-          </form>
-
-          <div class="servo-row servo-row-stretch">
-            <label class="servo-field" for="wheelSpeed">
-              <span data-i18n="wheelSpeed">轮模式速度</span>
-              <input id="wheelSpeed" type="number" step="1" value="600" />
-            </label>
-            <button id="wheelButton" class="btn btn-soft" type="button" disabled data-i18n="wheel">轮模式</button>
-            <label class="servo-check">
-              <input id="liveToggle" type="checkbox" checked />
-              <span data-i18n="live">实时监视</span>
-            </label>
-            <span id="actionHint" class="field-hint" role="status"></span>
-          </div>
-        </article>
-
-        <article class="card servo-card">
-          <div class="card-title"><span class="dot"></span><span data-i18n="paramsTitle">参数表</span></div>
-          <div class="servo-row">
-            <button id="readParams" class="btn btn-soft" type="button" disabled data-i18n="readParams">读取参数</button>
-            <span id="paramsHint" class="field-hint" data-i18n="paramsHint">先选择舵机。</span>
-          </div>
-          <div class="servo-table-wrap">
-            <table class="servo-table">
-              <thead>
-                <tr>
-                  <th data-i18n="colAddress">地址</th>
-                  <th data-i18n="colRegister">寄存器</th>
-                  <th data-i18n="colValue">值</th>
-                  <th data-i18n="colArea">区域</th>
-                </tr>
-              </thead>
-              <tbody id="paramRows"></tbody>
-            </table>
-          </div>
-          <form id="writeForm" class="servo-row servo-row-stretch" autocomplete="off">
-            <label class="servo-field" for="writeAddress">
-              <span data-i18n="writeAddress">地址</span>
-              <input id="writeAddress" value="42" />
-            </label>
-            <label class="servo-field" for="writeLength">
-              <span data-i18n="writeLength">长度</span>
-              <input id="writeLength" type="number" min="1" max="16" value="2" />
-            </label>
-            <label class="servo-field" for="writeValue">
-              <span data-i18n="writeValue">值</span>
-              <input id="writeValue" value="2048" />
-            </label>
-            <button id="writeButton" class="btn btn-soft" type="submit" disabled data-i18n="write">写入</button>
-          </form>
-          <p class="field-hint" data-i18n="writeHint">地址/值支持十进制或 0x 十六进制。写入只做单次 8 位/16 位小端写入。</p>
-        </article>
+              <button id="writeButton" class="btn btn-soft" type="submit" disabled data-i18n="write">写入</button>
+            </form>
+            <p class="field-hint" data-i18n="writeHint">写入 EEPROM（地址 0–39）时会自动解锁、写完加锁；地址/值支持十进制或 0x 十六进制。</p>
+            <p class="field-hint" data-i18n="paramFileHint">保存/载入为 JSON 参数文件（相当于官方工具的 xdat 备份）；恢复参数只写 EEPROM 区。</p>
+          </article>
+        </div>
       </section>
     </main>
 

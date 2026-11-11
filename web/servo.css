@@ -212,10 +212,12 @@ body.servo-app {
 
 .servo-check {
   display: inline-flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 6px;
   color: var(--muted);
   font-size: 12px;
+  white-space: nowrap;
   cursor: pointer;
 }
 
@@ -453,6 +455,10 @@ body.servo-app {
   font-size: 10.5px;
 }
 
+.servo-metrics dd.is-bad {
+  color: var(--danger);
+}
+
 .servo-metrics dd {
   margin: 2px 0 0;
   overflow: hidden;
@@ -580,6 +586,20 @@ body.servo-app {
     height: 32px;
   }
 
+  /* Stack the bus first, then the bench tabs, and keep the log last: the
+   * controls a phone user needs are not behind a screen of log text. */
+  .servo-column-bus {
+    display: contents;
+  }
+
+  .servo-column-main {
+    order: 2;
+  }
+
+  .servo-log-card {
+    order: 3;
+  }
+
   /* Keep the header on one row: the back link becomes an icon, the rest keeps
    * its 44 px targets. */
   .servo-back span {
@@ -600,5 +620,166 @@ body.servo-app {
 
   .servo-actions {
     gap: 6px;
+  }
+}
+
+/* Tabs, chart and the operation modes added for the bench/program split. */
+
+.servo-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  box-shadow: var(--shadow-flat);
+}
+
+.servo-tab {
+  flex: 1 1 auto;
+  height: 36px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.servo-tab:hover {
+  color: var(--text);
+}
+
+.servo-tab.is-active {
+  background: var(--panel-3);
+  color: var(--text);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.servo-page {
+  display: flex;
+  flex-direction: column;
+  gap: clamp(12px, 1.2vw, 18px);
+}
+
+.servo-row-wrap {
+  flex-wrap: wrap;
+}
+
+.servo-row-modes {
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.servo-row-modes #moveButton {
+  margin-left: auto;
+}
+
+.servo-modes-label {
+  color: var(--muted);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.servo-radio span {
+  white-space: nowrap;
+}
+
+.servo-modes {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.servo-radio {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.servo-radio input {
+  accent-color: var(--accent);
+}
+
+.servo-timeout {
+  max-width: 132px;
+}
+
+.servo-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+}
+
+.servo-legend label {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 11.5px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.servo-legend input {
+  accent-color: var(--accent);
+}
+
+.servo-legend i {
+  width: 14px;
+  height: 3px;
+  border-radius: 2px;
+  background: currentColor;
+}
+
+.servo-legend strong {
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.servo-chart-wrap {
+  position: relative;
+}
+
+.servo-chart {
+  display: block;
+  width: 100%;
+  height: 260px;
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  background: var(--input-bg);
+}
+
+.servo-chart-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  pointer-events: none;
+}
+
+@media (max-width: 800px) {
+  .servo-chart {
+    height: 200px;
+  }
+
+  .servo-row-modes #moveButton {
+    margin-left: 0;
   }
 }
