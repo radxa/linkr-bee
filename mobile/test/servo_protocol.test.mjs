@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  FAMILIES,
   INSTRUCTION,
+  MODELS,
   REGISTERS,
+  SCS_REGISTERS,
   ServoLink,
   SimulatedBus,
   checksum,
@@ -10,8 +13,12 @@ import {
   encodeFrame,
   encodeRegister,
   frameChecksumValid,
+  bytesFromWord,
+  modelInfoFromBytes,
   parseIdRange,
   parseStatusFrames,
+  registersFor,
+  wordFromBytes,
 } from "../../web/servo_protocol.js";
 
 const tick = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -129,4 +136,56 @@ test("sync write reaches every servo without expecting a reply", async () => {
   const second = await link.request(2, INSTRUCTION.read, [56, 2]);
   assert.equal(first.data[0] | (first.data[1] << 8), 2048);
   assert.equal(second.data[0] | (second.data[1] << 8), 1024);
+});
+
+
+test("model bytes identify the family and its register map", () => {
+  const sts = modelInfoFromBytes(Uint8Array.from([9, 3]));
+  assert.equal(sts.name, "STS3215");
+  assert.equal(sts.family, "sts");
+  assert.equal(sts.positionMax, 4095);
+  assert.equal(sts.lock, 55);
+  assert.equal(registersFor(sts), REGISTERS);
+
+  const scs = modelInfoFromBytes(Uint8Array.from([5, 4]));
+  assert.equal(scs.name, "SCS0009");
+  assert.equal(scs.family, "scs");
+  assert.equal(scs.endian, "big");
+  assert.equal(scs.positionMax, 1023);
+  assert.equal(scs.lock, 48);
+  assert.equal(registersFor(scs), SCS_REGISTERS);
+
+  const hd = modelInfoFromBytes(Uint8Array.from([10, 31]));
+  assert.equal(hd.family, "hd");
+  assert.equal(modelInfoFromBytes(Uint8Array.from([0xee, 0xee])).known, false);
+  assert.equal(FAMILIES.hd.factory, 0x06);
+  assert.equal(MODELS.length, 3);
+});
+
+test("byte order helpers round-trip both families", () => {
+  assert.deepEqual(bytesFromWord(0x0309, "big"), [0x03, 0x09]);
+  assert.deepEqual(bytesFromWord(0x0309, "little"), [0x09, 0x03]);
+  assert.equal(wordFromBytes(Uint8Array.from([0x03, 0x09]), "big"), 0x0309);
+  assert.equal(wordFromBytes(Uint8Array.from([0x09, 0x03]), "little"), 0x0309);
+});
+
+test("the SCS family moves with big-endian goal and time fields", async () => {
+  const bus = new SimulatedBus({ ids: [1], models: { 1: 1029 }, latencyMs: 0 });
+  const link = new ServoLink({ write: (bytes) => bus.write(bytes), echo: true, timeoutMs: 120 });
+  bus.onData = (bytes) => link.feed(bytes);
+  const model = await link.request(1, INSTRUCTION.read, [3, 2]);
+  assert.deepEqual(Array.from(model.data), [5, 4]);
+  const info = modelInfoFromBytes(model.data);
+  assert.equal(info.family, "scs");
+  await link.request(1, INSTRUCTION.write, [info.motion.start, 0x02, 0xbc, 0x00, 0x00, 0x00, 0x64]);
+  const position = await link.request(1, INSTRUCTION.read, [56, 2]);
+  assert.equal(wordFromBytes(position.data, "big"), 0x02bc);
+});
+
+test("the SCS model has no offset register and uses its own lock", () => {
+  const info = modelInfoFromBytes(Uint8Array.from([5, 4]));
+  assert.equal(info.offset, null);
+  assert.equal(info.lock, 48);
+  assert.equal(info.motion.length, 6);
+  assert.equal(info.motion.start, 42);
 });

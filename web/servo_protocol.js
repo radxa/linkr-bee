@@ -29,10 +29,10 @@ export const INSTRUCTION = {
   syncRead: 0x82,
 };
 
-/* Register map for the STS/SMS family (the STS3215 is the common case).  The
- * address and length are what goes on the wire; `decode` turns the raw bytes
- * into the number shown in the table. */
-export const REGISTERS = [
+/* Register maps. Addresses are protocol addresses; the SCS series shares most
+ * of the STS map but has no acceleration/mode/offset registers and uses a
+ * different lock address. `REGISTERS` stays as the STS alias for older imports. */
+export const STS_REGISTERS = [
   { address: 3, name: "model", length: 2, area: "eeprom", writable: false },
   { address: 5, name: "id", length: 1, area: "eeprom", writable: true },
   { address: 6, name: "baud", length: 1, area: "eeprom", writable: true },
@@ -57,20 +57,125 @@ export const REGISTERS = [
   { address: 69, name: "current", length: 2, area: "sram", writable: false, scale: 6.5, unit: "mA" },
 ];
 
-export const MODEL_NAMES = {
-  777: "STS3215",
+export const SCS_REGISTERS = [
+  { address: 3, name: "model", length: 2, area: "eeprom", writable: false },
+  { address: 5, name: "id", length: 1, area: "eeprom", writable: true },
+  { address: 6, name: "baud", length: 1, area: "eeprom", writable: true },
+  { address: 9, name: "minAngle", length: 2, area: "eeprom", writable: true },
+  { address: 11, name: "maxAngle", length: 2, area: "eeprom", writable: true },
+  { address: 26, name: "cwDead", length: 1, area: "eeprom", writable: true },
+  { address: 27, name: "ccwDead", length: 1, area: "eeprom", writable: true },
+  { address: 40, name: "torque", length: 1, area: "sram", writable: true },
+  { address: 42, name: "goalPosition", length: 2, area: "sram", writable: true },
+  { address: 44, name: "goalTime", length: 2, area: "sram", writable: true },
+  { address: 46, name: "goalSpeed", length: 2, area: "sram", writable: true },
+  { address: 48, name: "lock", length: 1, area: "sram", writable: true },
+  { address: 56, name: "position", length: 2, area: "sram", writable: false, signed: true, bits: 15 },
+  { address: 58, name: "speed", length: 2, area: "sram", writable: false, signed: true, bits: 15 },
+  { address: 60, name: "load", length: 2, area: "sram", writable: false, signed: true, bits: 10 },
+  { address: 62, name: "voltage", length: 1, area: "sram", writable: false, scale: 0.1, unit: "V" },
+  { address: 63, name: "temperature", length: 1, area: "sram", writable: false, unit: "°C" },
+  { address: 66, name: "moving", length: 1, area: "sram", writable: false },
+  { address: 69, name: "current", length: 2, area: "sram", writable: false, scale: 6.5, unit: "mA" },
+];
+
+export const REGISTERS = STS_REGISTERS;
+
+/* Families differ in byte order, travel range, lock/offset registers, the
+ * position write layout and the factory-restore instruction. The model table
+ * below matches the vendor tool's identification bytes (main/sub at 3/4). */
+export const FAMILIES = {
+  sts: {
+    key: "sts",
+    label: "STS/SMS",
+    endian: "little",
+    positionMax: 4095,
+    lock: 55,
+    offset: 31,
+    motion: { start: 41, length: 7 },
+    factory: 0x06,
+  },
+  scs: {
+    key: "scs",
+    label: "SCS",
+    endian: "big",
+    positionMax: 1023,
+    lock: 48,
+    offset: null,
+    motion: { start: 42, length: 6 },
+    factory: 0x0a,
+  },
+  hd: {
+    key: "hd",
+    label: "HD",
+    endian: "little",
+    positionMax: 4095,
+    lock: 55,
+    offset: 31,
+    motion: { start: 41, length: 7 },
+    factory: 0x06,
+  },
 };
 
-/* Registers the servo UI reads for its telemetry, in one place so the page and
- * the tests agree on what a status refresh costs. */
-export const TELEMETRY_WORDS = [
-  { key: "position", address: 56, length: 2, signed: true, bits: 15 },
-  { key: "speed", address: 58, length: 2, signed: true, bits: 15 },
-  { key: "load", address: 60, length: 2, signed: true, bits: 10 },
-  { key: "voltage", address: 62, length: 1, scale: 0.1 },
-  { key: "temperature", address: 63, length: 1 },
-  { key: "current", address: 69, length: 2, scale: 6.5 },
+export const MODELS = [
+  { model: 777, name: "STS3215", main: 9, sub: 3, family: "sts" },
+  { model: 1029, name: "SCS0009", main: 5, sub: 4, family: "scs" },
+  { model: 7946, name: "HD1910", main: 10, sub: 31, family: "hd" },
 ];
+
+export const MODEL_NAMES = Object.fromEntries(MODELS.map((entry) => [entry.model, entry.name]));
+
+/* Identify from the two bytes read at address 3 (main, sub), which avoids
+ * guessing an endianness before the family is known. */
+export function modelInfoFromBytes(bytes) {
+  const main = bytes?.[0] ?? 0;
+  const sub = bytes?.[1] ?? 0;
+  const match = MODELS.find((entry) => entry.main === main && entry.sub === sub);
+  const family = FAMILIES[match?.family || "sts"];
+  return {
+    model: match?.model ?? null,
+    name: match?.name || "unknown",
+    known: Boolean(match),
+    bytes: [main, sub],
+    ...family,
+    family: family.key,
+  };
+}
+
+export function modelInfoFromNumber(model) {
+  const match = MODELS.find((entry) => entry.model === model);
+  const family = FAMILIES[match?.family || "sts"];
+  return {
+    model: match?.model ?? model,
+    name: match?.name || "unknown",
+    known: Boolean(match),
+    bytes: match ? [match.main, match.sub] : [0, 0],
+    ...family,
+    family: family.key,
+  };
+}
+
+export function modelInfo(model) {
+  return typeof model === "object" ? model : modelInfoFromNumber(model);
+}
+
+export function registersFor(info) {
+  return info?.family === "scs" ? SCS_REGISTERS : STS_REGISTERS;
+}
+
+/* --- Byte order helpers -------------------------------------------------- */
+
+export function wordFromBytes(data, endian = "little") {
+  if (!data || data.length < 2) return data?.[0] ?? 0;
+  return endian === "big" ? (data[0] << 8) | data[1] : data[0] | (data[1] << 8);
+}
+
+export function bytesFromWord(value, endian = "little") {
+  const word = value & 0xffff;
+  return endian === "big"
+    ? [(word >> 8) & 0xff, word & 0xff]
+    : [word & 0xff, (word >> 8) & 0xff];
+}
 
 export function checksum(bytes) {
   let sum = 0;
@@ -120,7 +225,7 @@ export function parseStatusFrames(bytes, maxFrame = 260) {
 }
 
 export function decodeWord(data) {
-  return data.length >= 2 ? data[0] | (data[1] << 8) : data[0] || 0;
+  return wordFromBytes(data, "little");
 }
 
 export function toHostWord(value, bits) {
@@ -133,8 +238,8 @@ export function toServoWord(value, bits) {
   return value;
 }
 
-export function decodeRegister(register, data) {
-  const raw = register.length === 1 ? (data[0] || 0) : decodeWord(data);
+export function decodeRegister(register, data, endian = "little") {
+  const raw = register.length === 1 ? (data[0] || 0) : wordFromBytes(data, endian);
   if (register.signed) {
     return toHostWord(raw, register.bits || 15);
   }
@@ -144,13 +249,13 @@ export function decodeRegister(register, data) {
   return raw;
 }
 
-export function encodeRegister(register, value) {
+export function encodeRegister(register, value, endian = "little") {
   const number = Number(value);
   if (!Number.isFinite(number)) throw new Error("not a number");
   let raw = Math.round(number / (register.scale || 1));
   if (register.signed) raw = toServoWord(raw, register.bits || 15);
   if (register.length === 1) return [raw & 0xff];
-  return [raw & 0xff, (raw >> 8) & 0xff];
+  return bytesFromWord(raw, endian);
 }
 
 export function parseIdRange(text) {
@@ -306,14 +411,13 @@ const DEFAULT_BAUD_TABLE = [
 ];
 
 export class SimulatedBus {
-  constructor({ ids = [1, 2, 3], echo = true, latencyMs = 4 } = {}) {
+  constructor({ ids = [1], models = {}, echo = true, latencyMs = 4 } = {}) {
     this.echo = echo;
     this.latencyMs = latencyMs;
     this.servos = new Map();
     this.partial = new Uint8Array(0);
     this.onData = null;
-    this.timer = null;
-    for (const id of ids) this.servos.set(id, makeServo(id));
+    for (const id of ids) this.servos.set(id, makeServo(id, models[id] ?? 777));
   }
 
   write(bytes) {
@@ -321,8 +425,7 @@ export class SimulatedBus {
     const frames = [];
     if (this.echo) frames.push(data);
     this.partial = concat(this.partial, data);
-    const parsed = this.#drainInstructions();
-    frames.push(...parsed);
+    frames.push(...this.#drainInstructions());
     if (this.onData) {
       const deliver = () => {
         for (const frame of frames) this.onData(frame);
@@ -360,9 +463,8 @@ export class SimulatedBus {
         for (const target of this.servos.values()) flushPending(target);
         return [];
       }
-      const target = this.servos.get(id);
-      if (!target) return [];
-      flushPending(target);
+      if (!servo) return [];
+      flushPending(servo);
       return [statusFrame(id, 0, [])];
     }
     if (instruction === INSTRUCTION.syncWrite) {
@@ -389,32 +491,53 @@ export class SimulatedBus {
       servo.pending = { address: params[0], values: params.slice(1) };
       return [statusFrame(id, 0, [])];
     }
+    if (instruction === servo.factory) {
+      resetServo(servo);
+      return [statusFrame(id, 0, [])];
+    }
     return [];
   }
 }
 
-function makeServo(id) {
-  const regs = new Uint8Array(256);
-  regs[3] = 777 & 0xff;
-  regs[4] = 777 >> 8;
-  regs[5] = id;
-  setWord(regs, 9, 0);
-  setWord(regs, 11, 4095);
-  setWord(regs, 42, 2048);
-  setWord(regs, 56, 2048);
-  setWord(regs, 69, 0);
+function makeServo(id, model) {
+  const info = modelInfoFromNumber(model);
+  const servo = {
+    id,
+    model,
+    info,
+    endian: info.endian,
+    factory: info.factory,
+    pending: null,
+    regs: new Uint8Array(256),
+  };
+  resetServo(servo);
+  return servo;
+}
+
+function resetServo(servo) {
+  const { regs } = servo;
+  regs.fill(0);
+  regs[3] = servo.info.bytes[0];
+  regs[4] = servo.info.bytes[1];
+  regs[5] = servo.id;
+  const mid = Math.round(servo.info.positionMax / 2);
+  setWord(servo, 9, 0);
+  setWord(servo, 11, servo.info.positionMax);
+  setWord(servo, 42, mid);
+  setWord(servo, 56, mid);
   regs[62] = 120;
   regs[63] = 33;
-  return { id, regs };
+  setWord(servo, 69, 0);
 }
 
-function setWord(regs, address, value) {
-  regs[address] = value & 0xff;
-  regs[address + 1] = (value >> 8) & 0xff;
+function setWord(servo, address, value) {
+  const bytes = bytesFromWord(value, servo.endian);
+  servo.regs[address] = bytes[0];
+  servo.regs[address + 1] = bytes[1];
 }
 
-function getWord(regs, address) {
-  return regs[address] | (regs[address + 1] << 8);
+function getWord(servo, address) {
+  return wordFromBytes(servo.regs.slice(address, address + 2), servo.endian);
 }
 
 function readRegister(servo, address, length) {
@@ -432,13 +555,18 @@ function writeRegister(servo, address, values) {
   for (let index = 0; index < values.length; index += 1) {
     if (address + index < regs.length) regs[address + index] = values[index];
   }
+  /* A goal-position write is mirrored to the present position so a simulator
+   * telemetry read reflects the move immediately. */
   if (address <= 43 && address + values.length > 42) {
-    setWord(regs, 56, getWord(regs, 42));
+    const goal = getWord(servo, getMotionStart(servo));
+    setWord(servo, 56, goal);
     regs[66] = 1;
   }
-  if (address <= 40 && address + values.length > 40) {
-    regs[66] = 0;
-  }
+  if (address <= 40 && address + values.length > 40) regs[66] = 0;
+}
+
+function getMotionStart(servo) {
+  return servo.info.family === "scs" ? 42 : 42;
 }
 
 function statusFrame(id, error, data) {

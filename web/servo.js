@@ -19,8 +19,11 @@ import { parseManagementHeader } from "./management_protocol.js";
 import {
   BROADCAST_ID,
   INSTRUCTION,
-  MODEL_NAMES,
-  REGISTERS,
+  FAMILIES,
+  modelInfoFromBytes,
+  registersFor,
+  wordFromBytes,
+  bytesFromWord,
   ServoLink,
   SimulatedBus,
   decodeRegister,
@@ -44,8 +47,6 @@ const THEME_KEY = "linkr-theme";
 const LANG_KEY = "linkr-lang";
 const TAB_KEY = "linkr-servo-tab";
 const UART_ORIGINAL_KEY = "linkr-servo-uart-original";
-const LOCK_ADDRESS = 55; // STS/SMS/HD; SCS uses 48 (model map lands later)
-const OFFSET_ADDRESS = 31;
 const BUS_BAUD = 1000000;
 const UART_OPTIONS = [1000000, 500000, 250000, 115200, 76800];
 const DEFAULT_TIMEOUT_MS = 250;
@@ -152,8 +153,18 @@ const STRINGS = {
     synced: "同步写：{count} 个舵机 → {position}。",
     moveFailed: "移动失败：{message}",
     wheelSpeed: "轮模式速度",
+    motorSpeedLabel: "电机速度",
     wheel: "轮模式",
+    motorMode: "电机模式",
     wheelStarted: "已切到轮模式，速度 {speed}。",
+    motorStarted: "电机模式：{speed}（SCS 时间寄存器 100–1000，+1024 为反向）。",
+    unknownModelBytes: "未知型号（主/次 {bytes}），按 STS 处理。",
+    calibrateUnsupported: "该型号没有偏移寄存器，不支持中位校准。",
+    factoryReset: "恢复出厂",
+    factoryHint: "向 {name} 发送恢复出厂指令（实验性，需真机确认）",
+    factoryConfirm: "将向 {name} 发送恢复出厂指令（SCS=0x0A，STS/HD=0x06）。该操作不可撤销，建议先保存参数。确认？",
+    factoryDone: "恢复出厂指令已发送，正在重新读取参数。",
+    factoryFailed: "恢复出厂失败：{message}",
     torqueSet: "力矩已{state}。",
     torqueFailed: "力矩设置失败：{message}",
     live: "实时监视",
@@ -314,8 +325,18 @@ const STRINGS = {
     synced: "Sync write: {count} servo(s) → {position}.",
     moveFailed: "Move failed: {message}",
     wheelSpeed: "Wheel speed",
+    motorSpeedLabel: "Motor speed",
     wheel: "Wheel mode",
+    motorMode: "Motor mode",
     wheelStarted: "Wheel mode at speed {speed}.",
+    motorStarted: "Motor mode: {speed} (SCS time register 100–1000, +1024 reverses).",
+    unknownModelBytes: "Unknown model (main/sub {bytes}); treating it as STS.",
+    calibrateUnsupported: "This model has no offset register, so midpoint calibration is unavailable.",
+    factoryReset: "Factory reset",
+    factoryHint: "Send the factory-restore instruction to {name} (experimental; verify on hardware)",
+    factoryConfirm: "Send the factory-restore instruction to {name} (SCS=0x0A, STS/HD=0x06). This cannot be undone; save the parameters first. Continue?",
+    factoryDone: "Factory-restore instruction sent; re-reading parameters.",
+    factoryFailed: "Factory reset failed: {message}",
     torqueSet: "Torque {state}.",
     torqueFailed: "Torque change failed: {message}",
     live: "Live monitor",
@@ -453,6 +474,7 @@ const state = {
   link: null,
   simBus: null,
   servos: new Map(),
+  info: null,
   selectedId: null,
   telemetry: {},
   registerValues: new Map(),
@@ -466,6 +488,7 @@ const state = {
   monitorTimer: null,
   monitorTick: 0,
   scanBusy: false,
+  userSelected: false,
   lastScan: null,
   auto: null,
   pendingAsync: false,
@@ -514,6 +537,7 @@ function applyLanguage() {
     $("scanHint").textContent = t("notScanned");
   }
   renderParamsHint();
+  syncFamilyUi();
   store(LANG_KEY, state.lang);
 }
 
@@ -547,10 +571,41 @@ function syncLinkText() {
   }
 }
 
-function modelLabel(model) {
-  if (!model) return t("unknownModel");
-  const name = MODEL_NAMES[model];
-  return `${model}${name ? ` · ${name}` : ""}`;
+function modelLabel(servo) {
+  const info = servo?.info;
+  if (!info || !info.known) return t("unknownModel");
+  return `${info.name} · ${info.label}`;
+}
+
+function lockAddress() {
+  return state.info?.lock ?? 55;
+}
+
+function familyInfo() {
+  return state.info || FAMILIES.sts;
+}
+
+/* Keep the controls and register table in step with the selected family. */
+function syncFamilyUi() {
+  const info = familyInfo();
+  state.limits = { min: 0, max: info.positionMax };
+  for (const id of ["positionSlider", "targetInput", "autoStart", "autoEnd"]) {
+    $(id).max = String(info.positionMax);
+  }
+  $("positionMax").textContent = `/ ${info.positionMax}`;
+  const motorFamily = info.family === "scs";
+  $("wheelButton").textContent = motorFamily ? t("motorMode") : t("wheel");
+  $("wheelSpeedLabel").textContent = motorFamily ? t("motorSpeedLabel") : t("wheelSpeed");
+  $("accInput").closest("label").hidden = motorFamily;
+  for (const id of ["targetInput", "autoStart", "autoEnd"]) {
+    if (Number($(id).value) > info.positionMax) $(id).value = String(info.positionMax);
+  }
+  $("calibrateButton").disabled =
+    state.mode === "off" || state.selectedId == null || !info.offset;
+  $("calibrateButton").title = info.offset ? "" : t("calibrateUnsupported");
+  $("factoryReset").title = t("factoryHint", { name: info.name });
+  renderRegisterTable();
+  scheduleChart();
 }
 
 function requestTimeout() {
@@ -775,7 +830,7 @@ async function releaseControl() {
 function setControlsEnabled(enabled) {
   const ids = [
     "torqueOn", "torqueOff", "torqueAllOff", "refreshButton", "readParams", "saveParams",
-    "restoreParams", "calibrateButton", "writeButton", "moveButton",
+    "restoreParams", "calibrateButton", "factoryReset", "writeButton", "moveButton",
     "wheelButton", "scanButton", "positionSlider", "asyncExecute",
     "autoSweep", "autoStep",
   ];
@@ -792,6 +847,7 @@ function setControlsEnabled(enabled) {
     }
     element.disabled = !enabled;
   }
+  if (!familyInfo().offset) $("calibrateButton").disabled = true;
   $("connectButton").disabled = enabled;
   $("disconnectButton").hidden = !enabled;
   $("baudApply").disabled = !enabled || state.mode === "sim";
@@ -819,6 +875,7 @@ function resetUi() {
   state.simBus = null;
   state.servos.clear();
   state.selectedId = null;
+  state.info = null;
   state.telemetry = {};
   state.registerValues.clear();
   state.loadedParams = null;
@@ -835,6 +892,8 @@ function resetUi() {
   $("scanHint").textContent = t("notScanned");
   $("selectedId").textContent = "—";
   $("selectedModel").textContent = t("noServo");
+  $("positionMax").textContent = `/ ${FAMILIES.sts.positionMax}`;
+  $("wheelButton").textContent = t("wheel");
   $("positionValue").textContent = "—";
   updateMetrics({});
   renderServoList();
@@ -901,7 +960,12 @@ async function connect() {
 
 async function startSimulatedBus() {
   state.mode = "sim";
-  const bus = new SimulatedBus({ ids: [1, 2, 3, 4, 5, 6], echo: true, latencyMs: 3 });
+  const bus = new SimulatedBus({
+    ids: [1, 2, 3, 4, 5, 6],
+    models: { 6: 1029 },
+    echo: true,
+    latencyMs: 3,
+  });
   const link = new ServoLink({ write: (bytes) => bus.write(bytes), echo: true, timeoutMs: requestTimeout() });
   bus.onData = (bytes) => link.feed(bytes);
   state.simBus = bus;
@@ -987,6 +1051,7 @@ async function scan() {
     return;
   }
   state.scanBusy = true;
+  state.userSelected = false;
   state.servos.clear();
   state.selectedId = null;
   renderServoList();
@@ -1001,14 +1066,16 @@ async function scan() {
       await sleep(0);
       const frame = await state.link.request(id, INSTRUCTION.ping, [], { timeoutMs: 90 });
       if (!frame) continue;
-      let model = 0;
+      let info = null;
       const modelData = await state.link.request(id, INSTRUCTION.read, [3, 2], {
         timeoutMs: requestTimeout(),
       });
-      if (modelData) model = decodeWord(modelData.data);
-      state.servos.set(id, { model });
+      if (modelData) info = modelInfoFromBytes(modelData.data);
+      else info = modelInfoFromBytes([0, 0]);
+      state.servos.set(id, { info });
       state.lastScan = { range: rangeText, count: state.servos.size };
-      log("ok", t("servoFound", { id, model: modelLabel(model) }));
+      log("ok", t("servoFound", { id, model: modelLabel({ info }) }));
+      if (!info.known) log("warn", t("unknownModelBytes", { bytes: `${info.bytes[0]}/${info.bytes[1]}` }));
       renderServoList();
     }
     state.lastScan = { range: rangeText, count: state.servos.size };
@@ -1016,8 +1083,10 @@ async function scan() {
       $("scanHint").textContent = t("scanNone");
     } else {
       $("scanHint").textContent = t("scanDone", { count: state.servos.size });
-      const first = [...state.servos.keys()][0];
-      await selectServo(first);
+      if (!state.userSelected) {
+        const first = [...state.servos.keys()][0];
+        await selectServo(first);
+      }
     }
   } catch (error) {
     log("error", t("requestFailed", { message: error.message }));
@@ -1031,13 +1100,18 @@ async function scan() {
 
 async function selectServo(id) {
   state.selectedId = id;
+  state.info = state.servos.get(id)?.info || null;
   state.registerValues.clear();
   state.loadedParams = null;
   state.telemetry = {};
+  state.chart.samples = [];
+  $("chartEmpty").hidden = false;
+  updateChartStats();
   renderServoList();
   renderSelectedHeader();
   renderRegisterTable();
   renderParamsHint();
+  syncFamilyUi();
   $("positionValue").textContent = "—";
   updateMetrics({});
   await refreshSelected({ full: true });
@@ -1059,10 +1133,13 @@ function renderServoList() {
     badge.textContent = `ID ${String(id).padStart(3, "0")}`;
     const model = document.createElement("span");
     model.className = "servo-list-model";
-    model.textContent = modelLabel(servo.model);
+    model.textContent = modelLabel(servo);
     item.append(badge, model);
     item.addEventListener("click", () => {
-      if (state.busy || state.scanBusy) return;
+      /* Selecting during a scan is allowed: the link serializes requests and
+       * the scan keeps filling the list. */
+      if (!state.servos.has(id)) return;
+      state.userSelected = true;
       selectServo(id).catch((error) => log("error", error.message));
     });
     list.append(item);
@@ -1072,7 +1149,7 @@ function renderServoList() {
 function renderSelectedHeader() {
   const servo = selectedServo();
   $("selectedId").textContent = servo ? String(state.selectedId).padStart(3, "0") : "—";
-  $("selectedModel").textContent = servo ? modelLabel(servo.model) : t("noServo");
+  $("selectedModel").textContent = servo ? modelLabel(servo) : t("noServo");
 }
 
 function errorText(error) {
@@ -1113,6 +1190,7 @@ async function refreshSelected({ full = false } = {}) {
   const id = state.selectedId;
   if (id == null || !state.link) return;
   try {
+    const endian = familyInfo().endian;
     const frame = await state.link.request(id, INSTRUCTION.read, [56, 15], {
       timeoutMs: requestTimeout(),
     });
@@ -1125,17 +1203,17 @@ async function refreshSelected({ full = false } = {}) {
     const telemetry = {
       comm: "ok",
       error: frame.error,
-      position: decodeWord(data.slice(0, 2)),
-      speed: toServoWord(decodeWord(data.slice(2, 4)), 15),
-      load: toServoWord(decodeWord(data.slice(4, 6)), 10),
+      position: wordFromBytes(data.slice(0, 2), endian),
+      speed: toServoWord(wordFromBytes(data.slice(2, 4), endian), 15),
+      load: toServoWord(wordFromBytes(data.slice(4, 6), endian), 10),
       voltage: data[6] / 10,
       temperature: data[7],
       moving: data[10],
-      current: Math.round(decodeWord(data.slice(13, 15)) * 6.5),
+      current: Math.round(wordFromBytes(data.slice(13, 15), endian) * 6.5),
     };
     if (full) {
       const goalData = await readRegisters(id, 42, 2);
-      if (goalData) telemetry.goal = decodeWord(goalData);
+      if (goalData) telemetry.goal = wordFromBytes(goalData, endian);
     } else {
       telemetry.goal = state.telemetry.goal;
     }
@@ -1172,14 +1250,18 @@ function stopMonitor() {
 /* --- Motion -------------------------------------------------------------- */
 
 function movePayload(position, speed, acc, timeMs) {
+  if (familyInfo().family === "scs") {
+    return [
+      ...bytesFromWord(position, "big"),
+      ...bytesFromWord(timeMs, "big"),
+      ...bytesFromWord(speed, "big"),
+    ];
+  }
   return [
     acc & 0xff,
-    position & 0xff,
-    (position >> 8) & 0xff,
-    timeMs & 0xff,
-    (timeMs >> 8) & 0xff,
-    speed & 0xff,
-    (speed >> 8) & 0xff,
+    ...bytesFromWord(position, "little"),
+    ...bytesFromWord(timeMs, "little"),
+    ...bytesFromWord(speed, "little"),
   ];
 }
 
@@ -1203,10 +1285,11 @@ async function moveTo(position, { wait = false, silent = false, mode } = {}) {
   const acc = Math.max(0, Math.min(254, Number($("accInput").value) || 0));
   const timeMs = Math.max(0, Math.min(65535, Number($("timeInput").value) || 0));
   const payload = movePayload(target, speed, acc, timeMs);
+  const motion = familyInfo().motion;
   const writeMode = mode || document.querySelector('input[name="writeMode"]:checked')?.value || "normal";
   if (writeMode === "sync") {
     const servoIds = [...state.servos.keys()];
-    const syncParams = [41, 7];
+    const syncParams = [motion.start, motion.length];
     for (const servoId of servoIds) syncParams.push(servoId, ...payload);
     await state.link.send(BROADCAST_ID, INSTRUCTION.syncWrite, syncParams);
     if (!silent) {
@@ -1216,7 +1299,7 @@ async function moveTo(position, { wait = false, silent = false, mode } = {}) {
     return target;
   }
   if (writeMode === "async") {
-    await state.link.request(id, INSTRUCTION.regWrite, [41, ...payload], {
+    await state.link.request(id, INSTRUCTION.regWrite, [motion.start, ...payload], {
       timeoutMs: requestTimeout(),
     });
     state.pendingAsync = true;
@@ -1227,7 +1310,7 @@ async function moveTo(position, { wait = false, silent = false, mode } = {}) {
     }
     return target;
   }
-  const ok = await writeRegisters(id, 41, payload);
+  const ok = await writeRegisters(id, motion.start, payload);
   if (!ok) throw new Error(t("commTimeout"));
   if (!silent) {
     log("ok", t("moved", { position: target }));
@@ -1300,9 +1383,19 @@ async function wheel() {
   }
   const speed = Math.trunc(Number($("wheelSpeed").value) || 0);
   if (!Number.isFinite(speed)) return;
-  const encoded = Math.abs(speed) > 3400 ? Math.sign(speed) * 3400 : speed;
-  const word = toServoWord(encoded, 15);
   try {
+    if (familyInfo().family === "scs") {
+      /* SCS motor mode: zero the angle limits, then the goal-time register
+       * carries 100..1000 for one direction and +1024 for the other. */
+      const magnitude = Math.max(100, Math.min(1000, Math.abs(speed) || 100));
+      const value = speed < 0 ? magnitude + 1024 : magnitude;
+      await writeRegisters(id, 9, [0, 0, 0, 0]);
+      await writeRegisters(id, 44, bytesFromWord(value, "big"));
+      log("ok", t("motorStarted", { speed: speed < 0 ? -magnitude : magnitude }));
+      return;
+    }
+    const encoded = Math.abs(speed) > 3400 ? Math.sign(speed) * 3400 : speed;
+    const word = toServoWord(encoded, 15);
     await writeRegisters(id, 33, [1]);
     await writeRegisters(id, 41, [50, 0, 0, 0, 0, word & 0xff, (word >> 8) & 0xff]);
     log("ok", t("wheelStarted", { speed }));
@@ -1480,7 +1573,10 @@ function renderChart() {
       if (sample.t < start) continue;
       const ratio = (sample.t - start) / windowSeconds;
       const x = pad + ratio * (width - pad * 2);
-      const span = channel.max - channel.min;
+      const channelMax = channel.key === "position"
+        ? (familyInfo().positionMax || channel.max)
+        : channel.max;
+      const span = channelMax - channel.min;
       const normalised = Math.max(0, Math.min(1, (sample[channel.key] - channel.min) / span));
       const y = height - pad - normalised * (height - pad * 2);
       if (!started) {
@@ -1590,7 +1686,7 @@ function renderParamsHint() {
 function renderRegisterTable() {
   const body = $("paramRows");
   body.replaceChildren();
-  for (const register of REGISTERS) {
+  for (const register of registersFor(state.info)) {
     const row = document.createElement("tr");
     row.dataset.writable = String(register.writable);
     const address = document.createElement("td");
@@ -1599,7 +1695,11 @@ function renderRegisterTable() {
     name.textContent = register.name;
     const value = document.createElement("td");
     const storedValue = state.registerValues.get(register.address);
-    value.textContent = storedValue === undefined ? "—" : formatRegister(storedValue, register);
+    if (storedValue !== undefined && register.address === 3 && state.info?.known) {
+      value.textContent = `${state.info.name} (${state.info.bytes[0]}/${state.info.bytes[1]})`;
+    } else {
+      value.textContent = storedValue === undefined ? "—" : formatRegister(storedValue, register);
+    }
     if (storedValue === undefined) value.className = "servo-unread";
     const area = document.createElement("td");
     area.className = "servo-area";
@@ -1626,13 +1726,16 @@ function formatRegister(value, register) {
 }
 
 function applyLimits(minAngle, maxAngle) {
+  const info = familyInfo();
   const min = Number.isFinite(minAngle) && minAngle >= 0 ? minAngle : 0;
-  const max = Number.isFinite(maxAngle) && maxAngle > min ? maxAngle : MAX_POSITION;
+  const fallback = info.positionMax;
+  const max = Number.isFinite(maxAngle) && maxAngle > min ? maxAngle : fallback;
   state.limits = { min, max };
   for (const id of ["positionSlider", "targetInput", "autoStart", "autoEnd"]) {
     $(id).min = "0";
-    $(id).max = String(MAX_POSITION);
+    $(id).max = String(info.positionMax);
   }
+  $("positionMax").textContent = `/ ${info.positionMax}`;
   if (Number($("targetInput").value) > max || Number($("targetInput").value) < min) {
     $("targetInput").value = String(clampPosition($("targetInput").value));
     $("positionSlider").value = $("targetInput").value;
@@ -1646,18 +1749,23 @@ async function readParameters() {
     return;
   }
   $("readParams").disabled = true;
-  $("paramsHint").textContent = t("paramsReading", { count: REGISTERS.length });
+  const registers = registersFor(state.info);
+  const endian = familyInfo().endian;
+  $("paramsHint").textContent = t("paramsReading", { count: registers.length });
   let read = 0;
   try {
-    for (const register of REGISTERS) {
+    for (const register of registers) {
       const data = await readRegisters(id, register.address, register.length);
       if (data) {
-        const value = decodeRegister(register, data);
+        const value = decodeRegister(register, data, endian);
         state.registerValues.set(register.address, value);
         read += 1;
         if (register.address === 3) {
+          const info = modelInfoFromBytes(data);
           const servo = state.servos.get(id);
-          if (servo) servo.model = value;
+          if (servo) servo.info = info;
+          state.info = info;
+          syncFamilyUi();
           renderSelectedHeader();
           renderServoList();
         }
@@ -1682,7 +1790,7 @@ async function readParameters() {
 
 function parameterFileName() {
   const servo = selectedServo();
-  const name = MODEL_NAMES[servo?.model] || "servo";
+  const name = servo?.info?.name || "servo";
   return `${name}_ID${state.selectedId ?? "x"}.json`;
 }
 
@@ -1695,7 +1803,7 @@ async function saveParameters() {
   if (state.registerValues.size === 0) await readParameters();
   const servo = selectedServo();
   const registers = {};
-  for (const register of REGISTERS) {
+  for (const register of registersFor(state.info)) {
     if (state.registerValues.has(register.address)) {
       registers[register.address] = state.registerValues.get(register.address);
     }
@@ -1703,9 +1811,9 @@ async function saveParameters() {
   const payload = {
     format: "linkr-servo-params",
     version: 1,
-    model: servo?.model ?? 0,
-    modelName: MODEL_NAMES[servo?.model] || "unknown",
-    family: state.family,
+    model: servo?.info?.model ?? 0,
+    modelName: servo?.info?.name || "unknown",
+    family: familyInfo().key,
     servoId: id,
     savedAt: new Date().toISOString(),
     registers,
@@ -1745,7 +1853,8 @@ async function restoreParameters() {
     log("warn", t("selectServo"));
     return;
   }
-  const entries = REGISTERS.filter(
+  const endian = familyInfo().endian;
+  const entries = registersFor(state.info).filter(
     (register) => register.writable && register.area === "eeprom" &&
       loaded.registers[register.address] != null,
   );
@@ -1753,15 +1862,37 @@ async function restoreParameters() {
   if (!window.confirm(t("restoreConfirm", { count: entries.length, id }))) return;
   try {
     await setTorque(false, { silent: true });
-    await writeRegisters(id, LOCK_ADDRESS, [0]);
+    await writeRegisters(id, lockAddress(), [0]);
     for (const register of entries) {
-      await writeRegisters(id, register.address, encodeRegister(register, loaded.registers[register.address]));
+      await writeRegisters(
+        id,
+        register.address,
+        encodeRegister(register, loaded.registers[register.address], endian),
+      );
     }
-    await writeRegisters(id, LOCK_ADDRESS, [1]);
+    await writeRegisters(id, lockAddress(), [1]);
     await readParameters();
     log("ok", t("restoreDone"));
   } catch (error) {
     log("error", t("restoreFailed", { message: error.message }));
+  }
+}
+
+async function factoryReset() {
+  const id = state.selectedId;
+  if (id == null) {
+    log("warn", t("selectServo"));
+    return;
+  }
+  const info = familyInfo();
+  if (!window.confirm(t("factoryConfirm", { name: info.name }))) return;
+  try {
+    const frame = await state.link.request(id, info.factory, [], { timeoutMs: 2000 });
+    if (!frame) throw new Error(t("commTimeout"));
+    log("ok", t("factoryDone"));
+    await readParameters();
+  } catch (error) {
+    log("error", t("factoryFailed", { message: error.message }));
   }
 }
 
@@ -1771,22 +1902,28 @@ async function calibrateMidpoint() {
     log("warn", t("selectServo"));
     return;
   }
+  const info = familyInfo();
+  if (!info.offset) {
+    log("warn", t("calibrateUnsupported"));
+    return;
+  }
+  const endian = info.endian;
   try {
     const positionData = await readRegisters(id, 56, 2);
-    const offsetData = await readRegisters(id, OFFSET_ADDRESS, 2);
+    const offsetData = await readRegisters(id, info.offset, 2);
     if (!positionData || !offsetData) throw new Error(t("commTimeout"));
-    const before = decodeWord(positionData);
-    const oldOffset = toServoWord(decodeWord(offsetData), 11);
+    const before = wordFromBytes(positionData, endian);
+    const oldOffset = toServoWord(wordFromBytes(offsetData, endian), 11);
     if (!window.confirm(t("calibrateConfirm", { position: before, old: oldOffset }))) return;
     let newOffset = oldOffset + (before - 2048);
     if (newOffset > 1023) newOffset -= 2048;
     if (newOffset < -1024) newOffset += 2048;
     const word = toServoWord(newOffset, 11);
-    await writeRegisters(id, LOCK_ADDRESS, [0]);
-    await writeRegisters(id, OFFSET_ADDRESS, [word & 0xff, (word >> 8) & 0xff]);
-    await writeRegisters(id, LOCK_ADDRESS, [1]);
+    await writeRegisters(id, info.lock, [0]);
+    await writeRegisters(id, info.offset, bytesFromWord(word, endian));
+    await writeRegisters(id, info.lock, [1]);
     const afterData = await readRegisters(id, 56, 2);
-    const after = afterData ? decodeWord(afterData) : NaN;
+    const after = afterData ? wordFromBytes(afterData, endian) : NaN;
     if (Number.isFinite(after) && Math.abs(after - 2048) > Math.abs(before - 2048)) {
       log("warn", t("calibrateWorse", { before, after, old: oldOffset }));
     } else {
@@ -1819,6 +1956,7 @@ async function writeParameter() {
     log("warn", t("selectServo"));
     return;
   }
+  const endian = familyInfo().endian;
   const address = parseNumber($("writeAddress").value);
   const length = Number($("writeLength").value);
   const value = parseNumber($("writeValue").value);
@@ -1828,26 +1966,31 @@ async function writeParameter() {
     log("warn", t("invalidAddress"));
     return;
   }
-  const bytes = [];
-  let remaining = value < 0 ? value + 2 ** (length * 8) : value;
-  for (let index = 0; index < length; index += 1) {
-    bytes.push(remaining & 0xff);
-    remaining = Math.floor(remaining / 256);
-  }
   try {
     const eeprom = address < 40;
+    const register = registersFor(state.info).find((item) => item.address === address);
+    const bytes = register
+      ? encodeRegister(register, value, endian)
+      : (() => {
+        const raw = [];
+        let remaining = value < 0 ? value + 2 ** (length * 8) : value;
+        for (let index = 0; index < length; index += 1) {
+          raw.push(remaining & 0xff);
+          remaining = Math.floor(remaining / 256);
+        }
+        return raw;
+      })();
     if (eeprom) {
       await setTorque(false, { silent: true });
-      await writeRegisters(id, LOCK_ADDRESS, [0]);
+      await writeRegisters(id, lockAddress(), [0]);
     }
     await writeRegisters(id, address, bytes);
-    if (eeprom) await writeRegisters(id, LOCK_ADDRESS, [1]);
+    if (eeprom) await writeRegisters(id, lockAddress(), [1]);
     log("ok", t("writeDone", { address: `0x${address.toString(16)}` }));
-    const register = REGISTERS.find((item) => item.address === address);
     if (register) {
       const data = await readRegisters(id, register.address, register.length);
       if (data) {
-        state.registerValues.set(register.address, decodeRegister(register, data));
+        state.registerValues.set(register.address, decodeRegister(register, data, endian));
         renderRegisterTable();
         renderParamsHint();
       }
@@ -1945,6 +2088,9 @@ function wireUi() {
   });
   $("restoreParams").addEventListener("click", () => {
     restoreParameters().catch((error) => log("error", error.message));
+  });
+  $("factoryReset").addEventListener("click", () => {
+    factoryReset().catch((error) => log("error", t("factoryFailed", { message: error.message })));
   });
   $("calibrateButton").addEventListener("click", () => {
     calibrateMidpoint().catch((error) => log("error", error.message));

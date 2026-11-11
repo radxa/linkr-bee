@@ -129,7 +129,7 @@
 
             <div class="servo-position">
               <div class="servo-position-value">
-                <span id="positionValue">—</span><small>/ 4095</small>
+                <span id="positionValue">—</span><small id="positionMax">/ 4095</small>
               </div>
               <div class="servo-track" role="presentation">
                 <div id="positionNeedle" class="servo-needle"></div>
@@ -182,7 +182,7 @@
 
             <div class="servo-row servo-row-tight">
               <label class="servo-field" for="wheelSpeed">
-                <span data-i18n="wheelSpeed">轮模式速度</span>
+                <span id="wheelSpeedLabel" data-i18n="wheelSpeed">轮模式速度</span>
                 <input id="wheelSpeed" type="number" step="1" value="600" />
               </label>
               <button id="wheelButton" class="btn btn-soft" type="button" disabled data-i18n="wheel">轮模式</button>
@@ -261,6 +261,7 @@
               <button id="loadParams" class="btn btn-soft" type="button" data-i18n="loadParams">载入参数</button>
               <button id="restoreParams" class="btn btn-soft" type="button" disabled data-i18n="restoreParams">恢复参数</button>
               <button id="calibrateButton" class="btn btn-soft" type="button" disabled data-i18n="calibrate">中位校准</button>
+              <button id="factoryReset" class="btn btn-quiet" type="button" disabled data-i18n="factoryReset">恢复出厂</button>
               <input id="paramFile" type="file" accept=".json,application/json" hidden />
             </div>
             <p class="field-hint" id="paramsHint" data-i18n="paramsHint">先选择舵机。</p>

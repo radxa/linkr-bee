@@ -67,7 +67,7 @@ test("register read, move and servo selection hit the bus", async ({ page }) => 
     .filter({ has: page.locator("td", { hasText: /^model$/ }) })
     .locator("td")
     .nth(2);
-  await expect(modelCell).toHaveText("777");
+  await expect(modelCell).toHaveText("STS3215 (9/3)");
 
   await page.locator("#tabBench").click();
   await page.locator("#targetInput").fill("1024");
@@ -112,6 +112,42 @@ test("all torque off broadcasts a sync write to every scanned servo", async ({ p
   await expect(page.locator("#torqueAllOff")).toBeEnabled();
   await page.locator("#torqueAllOff").click();
   await expect(page.locator("#logList")).toContainText("Torque released on 6 servo");
+});
+
+test("an SCS model switches range, register map and motor mode", async ({ page }) => {
+  await page.goto(`${base}/servo.html?demo=servo&lang=en&theme=dark`);
+  await page.waitForFunction(() => (window.__servoBench?.servos.size || 0) === 6);
+  await page.locator('.servo-list-item[data-id="6"]').click();
+  await expect(page.locator("#selectedModel")).toContainText("SCS0009");
+  await expect(page.locator("#positionMax")).toHaveText("/ 1023");
+  await expect(page.locator("#wheelButton")).toHaveText("Motor mode");
+  await expect(page.locator("#calibrateButton")).toBeDisabled();
+  await page.locator("#tabProgram").click();
+  await expect(page.locator("#paramRows tr")).toHaveCount(19);
+  const lockRow = page
+    .locator("#paramRows tr")
+    .filter({ has: page.locator("td", { hasText: /^lock$/ }) })
+    .locator("td")
+    .first();
+  await expect(lockRow).toHaveText("48");
+
+  await page.locator("#tabBench").click();
+  await page.locator("#targetInput").fill("700");
+  await page.locator("#moveButton").click();
+  await expect(page.locator("#positionValue")).toHaveText("700");
+  await page.locator("#wheelSpeed").fill("-300");
+  await page.locator("#wheelButton").click();
+  await expect(page.locator("#logList")).toContainText("Motor mode: -300");
+});
+
+test("factory reset is available and re-reads the servo", async ({ page }) => {
+  await page.goto(`${base}/servo.html?demo=servo&lang=en&theme=dark`);
+  await page.locator("#tabProgram").click();
+  await expect(page.locator("#selectedId")).toHaveText("001");
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.locator("#factoryReset").click();
+  await expect(page.locator("#logList")).toContainText("Factory-restore instruction sent");
+  await expect(page.locator("#selectedId")).toHaveText("001");
 });
 
 test("parameter save downloads a JSON file with the EEPROM map", async ({ page }) => {

@@ -52,6 +52,16 @@ try {
         await page.click("#tabProgram");
         await page.waitForTimeout(400);
         await page.screenshot({ path: new URL(`${viewport.name}-${appearance.lang}-${appearance.theme}-program.png`, outDir).pathname, fullPage: true });
+        if (appearance.lang === "zh" && appearance.theme === "dark") {
+          await page.click("#tabBench");
+          await page.waitForFunction(() => (window.__servoBench?.servos.size || 0) === 6);
+          await page.click('.servo-list-item[data-id="6"]');
+          await page.waitForTimeout(400);
+          await page.screenshot({ path: new URL("desktop-1440-scs-bench.png", outDir).pathname, fullPage: true });
+          await page.click("#tabProgram");
+          await page.waitForTimeout(300);
+          await page.screenshot({ path: new URL("desktop-1440-scs-program.png", outDir).pathname, fullPage: true });
+        }
       }
       await page.close();
     }
