@@ -83,20 +83,23 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          mkdir -p build-demo/flash-release
+          mkdir -p .firmware-release
           gh release download "${{ steps.release.outputs.tag }}" \
             --repo "${GITHUB_REPOSITORY}" \
             --pattern '*firmware-*.zip' \
-            --dir build-demo/flash-release
+            --dir .firmware-release
 
-      # The manifest names the version, and build_flasher.py refuses a bundle
-      # whose firmware.json disagrees with it. A release that carries the wrong
-      # version therefore fails here instead of publishing a page that lies.
-      - name: Build the flashing page data
+      # Stage the images beside the page so it fetches them same-origin: release
+      # assets do not send the CORS headers a cross-origin fetch would need. The
+      # manifest names the tag and repository, and the page falls back to the
+      # GitHub API only when this file is absent.
+      - name: Stage the flashing page firmware
         run: |
-          python3 tools/build_flasher.py \
-            --release-dir build-demo/flash-release \
-            --version-from web/about-data.js
+          python3 tools/build_firmware_manifest.py \
+            --source .firmware-release \
+            --output web/firmware \
+            --tag "${{ steps.release.outputs.tag }}" \
+            --repo "${GITHUB_REPOSITORY}"
 
       # Jekyll is skipped for artifacts, but an empty .nojekyll also keeps a
       # future switch to branch-based publishing from silently dropping paths.

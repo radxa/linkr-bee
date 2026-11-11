@@ -325,26 +325,28 @@ WiFi, networking, Bluetooth, or binary-output configuration is absent.
 
 ### The browser flashing page
 
-`web/flash/` is a static page that writes the same release images over USB with
-[esp-web-tools](https://github.com/esphome/esp-web-tools) (Web Serial, so Chrome
-or Edge on a desktop). It is published with the rest of the site at `/flash/`;
-a repository has one Pages deployment, so this is a page rather than a second
-site.
+`web/flash.html` writes the same release images over USB from the browser. It
+uses esptool-js (Web Serial, so Chrome or Edge on a desktop) and JSZip to read
+the release bundles, and it reuses the terminal's `style.css` / `skin-v2.css`
+rather than introducing a second design system. It is published with the rest
+of the site as `/flash.html`: a repository has one Pages deployment, so this is
+a page rather than a second site.
 
 The images are not checked in. `.github/workflows/pages.yml` downloads the
-current release's `*firmware-*.zip`, then runs:
+current release's `*firmware-*.zip` and runs:
 
 ```sh
-python3 tools/build_flasher.py --release-dir build-demo/flash-release \
-    --version-from web/about-data.js
+python3 tools/build_firmware_manifest.py --source .firmware-release \
+    --output web/firmware --tag "$tag" --repo "$GITHUB_REPOSITORY"
 ```
 
-which writes `web/flash/firmware/<board>.bin`, one esp-web-tools manifest per
-board, and the `index.json` the page renders. `tools/build_flasher.py` refuses a
-bundle whose `firmware.json` disagrees with the version the tree ships, and
-refuses a board the page has no entry for — a flasher that silently drops a
-board is worse than one that fails. To preview locally without a release, pass
-`--image <slug>=build-.../zephyr/zephyr.bin` instead of `--release-dir`.
+which writes `web/firmware/<board>/<image>.bin` and one `manifest.json` naming
+the chip, flash address, size and SHA-256 of each board. The page fetches that
+manifest same-origin, because release assets do not send the CORS headers a
+cross-origin fetch would need; if the manifest is absent it falls back to the
+GitHub API for the latest release. Boards are listed in the order of
+`BOARD_NAMES` in the generator, which puts the Bee itself first. To preview
+locally without a release, point `--source` at a directory holding the zips.
 
 ## UART selection
 

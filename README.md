@@ -135,7 +135,7 @@ The UART side is 3.3 V logic, not RS-232. See the
 
    The script finds the image and the serial port, verifies `SHA256SUMS` when it is
    present, and keeps the saved settings. If you would rather not install anything,
-   the [flashing page](https://radxa.github.io/linkr-bee/flash/) writes the same
+   the [flashing page](https://radxa.github.io/linkr-bee/flash.html) writes the same
    images from Chrome or Edge over USB. Building from source is covered in the
    [development guide](docs/DEVELOPMENT.md#build).
 

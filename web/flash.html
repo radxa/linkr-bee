@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Linkr Bee Firmware Flasher</title>
+    <meta name="theme-color" id="themeColorMeta" content="#05080D" />
+    <meta name="linkr-repo" content="radxa/linkr-bee" />
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <script>
+      (() => {
+        try {
+          const saved = localStorage.getItem("linkr-theme");
+          const theme =
+            saved === "light" || saved === "dark"
+              ? saved
+              : window.matchMedia?.("(prefers-color-scheme: light)").matches
+                ? "light"
+                : "dark";
+          document.documentElement.dataset.theme = theme;
+        } catch {
+          // Storage can be unavailable in an embedded webview; keep the default.
+        }
+      })();
+    </script>
+    <link rel="stylesheet" href="./style.css?v=20261024-copybg" />
+    <link rel="stylesheet" href="./skin-v2.css?v=20261021-cross-browser" />
+    <link rel="stylesheet" href="./flash.css?v=20261026-16" />
+  </head>
+  <body>
+    <main class="flash-shell">
+      <header class="topbar">
+        <div class="brand">
+          <span class="logo" aria-hidden="true">
+            <svg viewBox="30 30 452 452" width="30" height="30" aria-hidden="true">
+              <path d="M256 76 L412 166 L412 346 L256 436 L100 346 L100 166 Z" fill="none" stroke="currentColor" stroke-width="30" stroke-linejoin="round" />
+              <path d="M180 210 L270 256 L180 302" fill="none" stroke="currentColor" stroke-width="26" stroke-linecap="round" stroke-linejoin="round" />
+              <rect x="306" y="214" width="36" height="84" rx="7" fill="currentColor" />
+            </svg>
+          </span>
+          <div>
+            <h1>Linkr Bee Flasher</h1>
+            <p class="support-text">固件刷机 · 自动跟随仓库最新 Release</p>
+          </div>
+        </div>
+
+        <div class="top-right">
+          <div class="top-actions">
+            <span class="status-pill release-pill" id="releasePill">正在读取最新固件…</span>
+            <button id="themeButton" class="icon-btn" type="button" title="切换主题 / Toggle theme" aria-label="Toggle theme">
+              <svg class="icon-sun" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="4"></circle>
+                <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path>
+              </svg>
+              <svg class="icon-moon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z"></path>
+              </svg>
+              <span id="themeLabel" class="btn-label">浅色</span>
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <section id="unsupported" class="notice notice-error" hidden>
+        当前浏览器不支持 Web Serial。请使用桌面版 Chrome / Edge，并通过 USB 连接开发板。Android APK 不包含刷机功能。
+      </section>
+
+      <section id="insecure" class="notice notice-error" hidden>
+        当前页面不是安全上下文，Web Serial 无法使用。请打开
+        <code>https://novice-pg.github.io/linkr-bee/flash.html</code>，
+        或通过 <code>http://localhost</code> 访问；不要直接双击本地 HTML 文件。
+      </section>
+
+      <section class="flash-hero">
+        <div class="flash-hero-copy">
+          <span class="eyebrow">USB · Web Serial</span>
+          <h2>给开发板刷入最新固件</h2>
+          <p>
+            页面自动读取仓库最新一次发布的固件。选择板型，连接 USB 串口，浏览器直接烧录，
+            不需要安装 esptool。
+          </p>
+        </div>
+        <div class="hero-meta">
+          <div class="hero-meta-item">
+            <span>固件版本</span>
+            <strong id="heroVersion">—</strong>
+          </div>
+          <div class="hero-meta-item">
+            <span>可选板型</span>
+            <strong id="heroBoards">—</strong>
+          </div>
+          <div class="hero-meta-item">
+            <span>构建标记</span>
+            <strong>official</strong>
+          </div>
+        </div>
+      </section>
+
+      <div class="flash-grid">
+        <div class="flash-main">
+          <section class="card flash-setup">
+          <div class="card-title"><span class="dot"></span><span>选择固件</span></div>
+
+          <div class="field-grid">
+            <label class="field">
+              <span>板型 / Board</span>
+              <select id="boardSelect" disabled>
+                <option>正在读取…</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>烧录波特率 / Baud</span>
+              <select id="baudSelect">
+                <option value="115200">115200（最稳）</option>
+                <option value="460800" selected>460800（推荐）</option>
+                <option value="921600">921600（最快）</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="field port-field">
+            <span>串口 / COM Port</span>
+            <div class="port-row">
+              <select id="portSelect">
+                <option value="">尚未选择串口</option>
+              </select>
+              <button id="pickPortButton" class="btn" type="button">选择串口</button>
+              <button id="refreshPortsButton" class="btn" type="button">刷新</button>
+            </div>
+            <small id="portHint" class="port-hint">点击“选择串口”，在浏览器弹窗里选中开发板的 USB 串口。</small>
+          </div>
+
+          <section id="camPrep" class="notice cam-note" hidden>
+            <strong>ESP32-CAM 烧录方式（单板 + CH340 USB-TTL）</strong>
+            <ol>
+              <li>拔掉摄像头和 SD 卡。</li>
+              <li>按下面的接线表连接 CH340，烧录时把 <b>GPIO0 接到 GND</b>。</li>
+              <li>给 CH340 插上 USB，确认电脑出现串口。</li>
+              <li>波特率选 115200，点“连接串口并烧录”。烧录完成后断开 GPIO0，再复位运行。</li>
+              <li><b>运行前必须拔掉 CH340 的 USB</b>，CAM 改用独立 5V 供电。CH340 继续插着时，它的 TX 会和目标 TX 抢 GPIO3，表现为 BLE 能连上但串口没有输出。</li>
+            </ol>
+            <ul>
+              <li>CH340 <b>5V</b> → CAM <b>5V</b></li>
+              <li>CH340 <b>GND</b> → CAM <b>GND</b></li>
+              <li>CH340 <b>TX</b> → CAM <b>U0R（GPIO3）</b></li>
+              <li>CH340 <b>RX</b> → CAM <b>U0T（GPIO1）</b></li>
+              <li>CAM <b>GPIO0</b> → <b>GND</b>（只在下载时短接）</li>
+            </ul>
+            <p>使用稳定的 <b>5V 2A</b> 电源或带供电的 USB HUB，线尽量短。连接失败时确认 GPIO0 已接地并重新上电，再点“已进入下载模式，重试连接”。</p>
+            <p>把 CAM 当 BLE 串口桥使用时：目标 <b>TX</b> → CAM <b>U0R（GPIO3）</b>，目标 <b>RX</b> → CAM <b>U0T（GPIO1）</b>，并共地。烧录用的 CH340 必须完全断开。</p>
+          </section>
+
+          <dl class="board-facts" id="boardFacts">
+            <div><dt>芯片</dt><dd id="factChip">—</dd></div>
+            <div><dt>烧录地址</dt><dd id="factAddress">—</dd></div>
+            <div><dt>镜像大小</dt><dd id="factSize">—</dd></div>
+            <div><dt>SHA-256</dt><dd id="factHash" class="mono">—</dd></div>
+          </dl>
+
+          <div class="actions">
+            <button id="connectButton" class="btn btn-primary" type="button" disabled>
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M12 3v12"></path>
+                <path d="m7 10 5 5 5-5"></path>
+                <path d="M5 21h14"></path>
+              </svg>
+              连接串口并烧录
+            </button>
+            <button id="retryButton" class="btn" type="button" hidden>
+              已进入下载模式，重试连接
+            </button>
+            <button id="downloadButton" class="btn" type="button" disabled>
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M12 3v12"></path>
+                <path d="m7 10 5 5 5-5"></path>
+                <path d="M5 21h14"></path>
+              </svg>
+              下载固件 ZIP
+            </button>
+            <button id="resetButton" class="btn" type="button" disabled>
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M21 12a9 9 0 1 1-3-6.7"></path>
+                <path d="M21 3v6h-6"></path>
+              </svg>
+              重启设备
+            </button>
+          </div>
+
+          <div class="progress" aria-hidden="true">
+            <div id="progressBar" class="progress-bar"></div>
+          </div>
+          <p id="status" class="status" role="status" aria-live="polite">等待选择板型。</p>
+          <p class="muted small setup-note">使用能传输数据的线，不要用只能充电的线。</p>
+          </section>
+
+          <section class="card release-card">
+            <div class="card-title"><span class="dot"></span><span>最新发布</span></div>
+            <dl class="release-facts">
+              <div><dt>版本</dt><dd id="releaseVersion">—</dd></div>
+              <div><dt>标签</dt><dd id="releaseTag" class="mono">—</dd></div>
+              <div><dt>固件来源</dt><dd id="releaseRepo" class="mono">—</dd></div>
+            </dl>
+            <p class="muted small">
+              刷机不会擦除已保存的设置分区。需要恢复出厂设置时，请按板型说明用 esptool 擦除设置区。
+            </p>
+          </section>
+        </div>
+      </div>
+
+      <section class="card log-panel">
+        <div class="log-head">
+          <span>烧录日志 / Log</span>
+          <span class="log-actions">
+            <button id="copyLog" class="link-button" type="button">复制</button>
+            <button id="clearLog" class="link-button" type="button">清空</button>
+          </span>
+        </div>
+        <pre id="log" class="log" aria-live="polite"></pre>
+      </section>
+
+      <footer class="foot">
+        <span>固件来源：<a id="releaseLink" href="https://github.com/radxa/linkr-bee/releases/latest" target="_blank" rel="noreferrer">GitHub Releases</a></span>
+        <span>Linkr Bee · Web Serial Firmware Flasher</span>
+      </footer>
+    </main>
+
+    <script src="./vendor/jszip/jszip.min.js"></script>
+    <script type="module" src="./flash.js?v=20261105-uart"></script>
+  </body>
+</html>
