@@ -596,14 +596,21 @@ for (const clipboard of ["missing", "rejected"]) {
   }
 }
 
-test("native Android keeps keyboard resizes local instead of sending stty", async ({ page }) => {
+test("native Android syncs once before keeping keyboard resizes local", async ({ page }) => {
   await openTerminal(page, { android: true });
   await page.evaluate(() => {
     const { handleIncomingBytes } = window.__terminalTest;
     handleIncomingBytes(new TextEncoder().encode("root@target:~# "));
   });
-  await page.waitForTimeout(700);
-  expect(await page.evaluate(() => window.sent.filter((text) => text.startsWith("stty ")))).toEqual([]);
+  const sizeCommands = () => page.evaluate(() => window.sent.filter((text) => text.startsWith("stty ")));
+  await expect.poll(sizeCommands).toHaveLength(1);
+  const command = (await sizeCommands())[0];
+  const [, rows, cols] = /^stty rows (\d+) cols (\d+)/.exec(command);
+  const nonce = /LinkrTTY=([a-f0-9]{32})/.exec(command)[1];
+  await page.evaluate(receipt => window.__terminalTest.handleIncomingBytes(new TextEncoder().encode(receipt)),
+    `\x1b]633;P;LinkrTTY=${nonce};${rows} ${cols}\x07\r\nroot@target:~# `);
+  await expect.poll(() => page.evaluate(() => window.__terminalTest.state.terminalGeometrySynced)).toBe(`${cols}x${rows}`);
+  const fullRows = await page.evaluate(() => window.__terminalTest.state.term.rows);
 
   await page.evaluate(() => {
     Object.defineProperty(visualViewport, "height", {
@@ -614,6 +621,16 @@ test("native Android keeps keyboard resizes local instead of sending stty", asyn
     window.__terminalTest.state.term.focus();
   });
   await expect(page.locator("html")).toHaveClass(/soft-keyboard-open/);
-  await expect.poll(() => page.evaluate(() => window.__terminalTest.state.term.rows)).toBeLessThan(40);
-  expect(await page.evaluate(() => window.sent.filter((text) => text.startsWith("stty ")))).toEqual([]);
+  await expect.poll(() => page.evaluate(() => window.__terminalTest.state.term.rows)).toBeLessThan(fullRows);
+  expect(await sizeCommands()).toHaveLength(1);
+  expect(await page.evaluate(() => window.__terminalTest.state.terminalGeometrySynced)).toBe(`${cols}x${rows}`);
+
+  await page.evaluate(() => {
+    delete visualViewport.height;
+    visualViewport.dispatchEvent(new Event("resize"));
+  });
+  await expect(page.locator("html")).not.toHaveClass(/soft-keyboard-open/);
+  await expect.poll(() => page.evaluate(() => window.__terminalTest.state.term.rows)).toBe(fullRows);
+  await page.waitForTimeout(400);
+  expect(await sizeCommands()).toHaveLength(1);
 });

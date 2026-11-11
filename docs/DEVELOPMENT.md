@@ -1451,12 +1451,27 @@ Terminal layout and touch behavior intentionally differ by surface:
 | --- | --- | --- | --- |
 | Browser Web / Pages | Synchronized with `stty` after login and on layout changes | Follows the browser viewport | Wheel, trackpad, or touch drag; select and copy |
 | Desktop Rust TUI | Synchronized with the same `stty rows <rows> cols <cols>` command at the next idle shell prompt; re-sent when the window, the rail or the assistant panel changes the pane's width | The pane follows the terminal window | Pane scrollback, drag selection, and the copy chord; see `tools/linkr-tui/README.md` |
-| Android / iOS / HarmonyOS native shell | Android never sends `stty`; other native shells also keep the tty unchanged when the keyboard opens or closes | Local WebView shrinks and refits its rows; restored on close; the settings drawer closes the IME before sliding and composites on the GPU | Swipe scrolls `term.scrollLines()`; tap opens the keyboard; long press selects the word under the finger and shows two draggable handles, one per edge, to adjust the selection character by character or across lines; a floating Copy pill copies it, and a long hold never opens the keyboard. Copy keeps the selected text even when the WebView drops its own DOM selection, and copying does not steal focus. With the keyboard open the same long press/drag still selects and copies, and the same swipe still scrolls. The keyboard button follows the IME actually on screen |
+| Android / iOS / HarmonyOS native shell | One `stty` per connection at the first idle prompt, so a full-screen program starts at the size the pane has with the keyboard away; "Automatically sync target size" keeps it following later resizes. The keyboard itself never moves the tty | Local WebView shrinks and refits its rows; restored on close; the settings drawer closes the IME before sliding and composites on the GPU | Swipe scrolls `term.scrollLines()`; tap opens the keyboard; long press selects the word under the finger and shows two draggable handles, one per edge, to adjust the selection character by character or across lines; a floating Copy pill copies it, and a long hold never opens the keyboard. Copy keeps the selected text even when the WebView drops its own DOM selection, and copying does not steal focus. With the keyboard open the same long press/drag still selects and copies, and the same swipe still scrolls. The keyboard button follows the IME actually on screen |
 
-The native shells deliberately skip `scheduleTerminalGeometrySync()`: a soft-keyboard
-resize is local display state, not a request to reflow the remote console. On
-Android this means no `stty rows/cols` is sent at all. The browser build keeps the
-existing `stty rows <rows> cols <cols>` behavior.
+A native shell resizes its own viewport for the soft keyboard, so a keyboard
+open/close is local display state and never a request to reflow the remote
+console: `onTerminalResize` ignores a pane that shrank while the keyboard is up,
+and `scheduleTerminalGeometrySync` holds while it is open. What a native shell
+does send is one `stty` per connection, at the first idle prompt — the size a
+full-screen program reads when it starts, which is otherwise the tty's boot-time
+80x24. Turning on "Automatically sync target size" (Terminal settings, native shells only)
+keeps the target following later resizes as well; the switch is hidden in a
+browser build, which always syncs. Changing this preference preserves the
+confirmed size and any pending readback; turning it off cancels queued automatic
+resizes, including the resize normally sent after a full-screen program exits.
+
+Both surfaces offer **Sync to current window** in Terminal settings. It requests
+one resize without changing the automatic-sync preference. A busy shell,
+alternate-screen program or open soft keyboard holds the request until a safe
+idle prompt; disconnect, reboot and ownership changes discard it. Completion is
+shown only after the current nonce's `stty size` readback, and an unconfirmed
+request is never automatically retried. Another click explicitly requests a
+fresh readback, including when the window size itself has not changed.
 
 The desktop TUI sends the same command as the web and Python clients, and only
 at an idle shell prompt: local typing, a pending line-mode buffer, or any target

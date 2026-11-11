@@ -328,6 +328,19 @@
               <span data-i18n="debugIO">Debug I/O</span>
             </label>
           </div>
+          <div class="field">
+            <button id="terminalResizeButton" class="btn btn-soft" type="button" aria-describedby="terminalResizeStatus" disabled>
+              <span class="btn-label" data-i18n="resizeTarget">Sync to current window</span>
+            </button>
+            <span id="terminalResizeStatus" class="field-hint" role="status"></span>
+          </div>
+          <div id="remoteSizeField" hidden>
+            <label class="check">
+              <input id="remoteSizeInput" type="checkbox">
+              <span data-i18n="remoteSize">Automatically sync target size</span>
+            </label>
+            <span class="field-hint" data-i18n="remoteSizeHint">A native app sends the window size once after connecting. Turn this on to follow later window changes. The soft keyboard never resizes the target tty.</span>
+          </div>
         </section>
 
         <section id="logViewCard" class="card" data-settings-page="terminal" aria-labelledby="logViewTitle">

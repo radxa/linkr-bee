@@ -55,3 +55,32 @@ test("the demo board keeps a renamed signal like the real NVS", async ({ page })
   await expect(page.locator('#boardSlotList .board-slot-row[data-slot="0"] .board-slot-name'))
     .toHaveText("客厅 电源");
 });
+
+test("the remote-size switch is a native-shell control and keeps its value", async ({ page }) => {
+  await page.goto("/?demo=board");
+  await expect(page.locator("#statusText")).toContainText(/Connected|已连接/);
+
+  // A desktop browser always syncs the target, so the switch would do nothing.
+  await expect(page.locator("#remoteSizeField")).toHaveJSProperty("hidden", true);
+
+  // The preference itself survives a reload (the native shell reads it back).
+  await page.evaluate(() => localStorage.setItem("linkr-remote-size", "1"));
+  await page.reload();
+  await expect(page.locator("#statusText")).toContainText(/Connected|已连接/);
+  await expect(page.locator("#remoteSizeInput")).toBeChecked();
+});
+
+test("a native shell is offered the remote-size switch", async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  await context.addInitScript(() => {
+    window.LinkrNativeBle = { platform: "android" };
+  });
+  const page = await context.newPage();
+  await page.goto("/?demo=board");
+  await expect(page.locator("#statusText")).toContainText(/Connected|已连接/);
+  // The switch lives on the terminal settings page and is offered here.
+  await expect(page.locator("#remoteSizeField")).toHaveJSProperty("hidden", false);
+  await expect(page.locator("#remoteSizeHint, [data-i18n=\"remoteSizeHint\"]").first())
+    .toContainText(/tty/);
+  await context.close();
+});

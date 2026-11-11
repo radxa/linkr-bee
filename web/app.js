@@ -336,9 +336,16 @@ const state = {
   terminalGeometrySyncInFlight: "",
   terminalGeometrySyncTimer: null,
   terminalGeometrySession: 0,
-  /* A new link has not been told a size yet, so its first idle prompt syncs
-   * immediately instead of waiting for the resize debounce. */
+  /* New sessions, explicit requests and alternate-screen exits may skip the
+   * resize debounce; this priority flag never grants sync permission. */
   terminalGeometryUrgent: false,
+  /* Eligibility is separate from debounce priority: leaving an alternate
+   * screen must not opt a native shell back into automatic resizing. */
+  terminalGeometryInitialSync: false,
+  terminalGeometryRequested: false,
+  /* Native shells keep the target's size unless this is on; see
+   * syncsTargetGeometry(). */
+  remoteSizeSync: false,
   /* A full-screen program owns the tty: the pane can change but the target
    * cannot be told until it exits, which the status bar explains. */
   alternateScreen: false,
@@ -410,6 +417,10 @@ const elements = {
   fontSelect: $("fontSelect"),
   fontPreview: $("fontPreview"),
   localEchoInput: $("localEchoInput"),
+  remoteSizeInput: $("remoteSizeInput"),
+  remoteSizeField: $("remoteSizeField"),
+  terminalResizeButton: $("terminalResizeButton"),
+  terminalResizeStatus: $("terminalResizeStatus"),
   debugInput: $("debugInput"),
   wifiSsidInput: $("wifiSsidInput"),
   wifiPasswordInput: $("wifiPasswordInput"),
@@ -513,6 +524,7 @@ const FONT_FAMILY_KEY = "linkr-font-family";
 const LAST_DEVICE_ID_KEY = "linkr-last-device-id";
 const TRANSPORT_KEY = "linkr-transport";
 const UART_MODE_KEY = "linkr-uart-mode";
+const REMOTE_SIZE_KEY = "linkr-remote-size";
 const WS_HOST_KEY = "linkr-ws-host";
 const lanTokens = createLanTokenStore(localStorage);
 /* LAN access handshake. The bridge announces whether a token is required, so
@@ -863,6 +875,13 @@ const I18N = {
     ttyUnsynced: "Not yet synced; the target is told at its next idle shell prompt",
     ttyUnconfirmed: "Size request sent; the requested target tty size is not yet confirmed",
     ttyDisconnected: "Not connected",
+    remoteSize: "Automatically sync target size",
+    remoteSizeHint: "A native app sends the window size once after connecting. Turn this on to follow later window changes. The soft keyboard never resizes the target tty.",
+    resizeTarget: "Sync to current window",
+    ttyPane: "Window",
+    ttySyncing: "Synchronizing target size…",
+    ttyKeyboard: "Close the keyboard to synchronize the target size",
+    ttyFixed: "Automatic sync is off; use Sync to current window to resize once",
     welcome: "Linkr Bee Terminal ready. Press Connect to open a device.",
     connecting: "Connecting…",
     pairingHint: "New host: press the Bee pairing key once (Linkr Bee X1.0: USER_KEY/GPIO3; C3/C5: GPIO1), then connect within 30 s. Bonded hosts reconnect without a key press.",
@@ -1179,6 +1198,13 @@ const I18N = {
     ttyUnsynced: "尚未同步；目标会在下一个空闲 shell 提示符处收到尺寸",
     ttyUnconfirmed: "尺寸请求已发送；目标尚未确认所请求的 tty 尺寸",
     ttyDisconnected: "未连接",
+    remoteSize: "自动同步目标尺寸",
+    remoteSizeHint: "原生应用连接后同步一次窗口尺寸。开启后随窗口变化继续同步；软键盘开关不会改变目标 tty 尺寸。",
+    resizeTarget: "同步到当前窗口",
+    ttyPane: "窗口",
+    ttySyncing: "正在同步目标尺寸…",
+    ttyKeyboard: "请收起软键盘后同步目标尺寸",
+    ttyFixed: "自动同步已关闭；可手动同步到当前窗口一次",
     welcome: "Linkr Bee 终端已就绪，点击「连接」打开设备。",
     connecting: "连接中…",
     pairingHint: "首次连接新主机：先按一下 Bee 的配对键（Linkr Bee X1.0：USER_KEY/GPIO3；C3/C5：GPIO1），并在 30 秒内发起连接。已绑定主机无需按键。",
@@ -1619,6 +1645,8 @@ function invalidateTerminalGeometrySync() {
   state.terminalGeometrySyncInFlight = "";
   state.shellPromptVisible = false;
   state.terminalGeometryUrgent = true;
+  state.terminalGeometryInitialSync = true;
+  state.terminalGeometryRequested = false;
   renderTerminalGeometryStatus();
 }
 
@@ -1639,12 +1667,38 @@ function markTerminalBusy() {
   clearTerminalGeometrySyncTimer();
 }
 
+/* Native shells are the one place a soft keyboard can resize the pane, and a
+ * TUI there is otherwise stuck with whatever size the board booted with. One
+ * sync per connection always goes out — that is what a TUI reads when it
+ * starts — and the "Sync target size" preference keeps it following later
+ * resizes. Either way the keyboard itself never moves the target's size. */
+function syncsTargetGeometry() {
+  return (
+    !handlesTerminalGeometryLocally() ||
+    state.remoteSizeSync ||
+    state.terminalGeometryInitialSync ||
+    state.terminalGeometryRequested
+  );
+}
+
+function requestTerminalGeometrySync() {
+  if (terminalReplay || !canSerialInput() || state.uartWriteError ||
+      state.terminalGeometrySyncInFlight || state.terminalGeometryRequested) return;
+  state.terminalGeometryRequested = true;
+  state.terminalGeometryUrgent = true;
+  renderTerminalGeometryStatus();
+  scheduleTerminalGeometrySync();
+}
+
 function scheduleTerminalGeometrySync() {
+  clearTerminalGeometrySyncTimer();
   if (terminalReplay || !canSerialInput()) return;
-  if (handlesTerminalGeometryLocally()) {
+  if (!syncsTargetGeometry()) {
     return;
   }
-  clearTerminalGeometrySyncTimer();
+  if (softKeyboardLayout.active) {
+    return;
+  }
   const geometry = state.terminalGeometry;
   const session = state.terminalGeometrySession;
   if (
@@ -1653,8 +1707,8 @@ function scheduleTerminalGeometrySync() {
     agentPanel?.isBusy?.() ||
     !state.shellPromptVisible ||
     !geometry ||
-    geometry.key === state.terminalGeometrySynced ||
-    geometry.key === state.terminalGeometrySent ||
+    (!state.terminalGeometryRequested &&
+      (geometry.key === state.terminalGeometrySynced || geometry.key === state.terminalGeometrySent)) ||
     state.terminalGeometrySyncInFlight
   ) {
     return;
@@ -1670,6 +1724,9 @@ function scheduleTerminalGeometrySync() {
     state.terminalGeometrySyncTimer = null;
     if (
       terminalReplay ||
+      !canSerialInput() ||
+      !syncsTargetGeometry() ||
+      softKeyboardLayout.active ||
       !state.connected ||
       serialInputPending ||
       session !== state.terminalGeometrySession ||
@@ -1677,8 +1734,8 @@ function scheduleTerminalGeometrySync() {
       !state.shellPromptVisible ||
       !terminalHasIdleShellPrompt() ||
       geometry.key !== state.terminalGeometry?.key ||
-      geometry.key === state.terminalGeometrySynced ||
-      geometry.key === state.terminalGeometrySent ||
+      (!state.terminalGeometryRequested &&
+        (geometry.key === state.terminalGeometrySynced || geometry.key === state.terminalGeometrySent)) ||
       state.terminalGeometrySyncInFlight
     ) {
       return;
@@ -1686,26 +1743,35 @@ function scheduleTerminalGeometrySync() {
 
     state.shellPromptVisible = false;
     state.terminalGeometrySyncInFlight = geometry.key;
+    // A manual request permits one explicit retry, never automatic replay.
+    const manualRequest = state.terminalGeometryRequested;
+    state.terminalGeometryRequested = false;
     // getRandomValues also works on HTTP LAN pages where randomUUID is absent.
     const nonce = Array.from(crypto.getRandomValues(new Uint8Array(16)),
       byte => byte.toString(16).padStart(2, "0")).join("");
     const probe = state.terminalGeometryProbe = { nonce, session };
+    renderTerminalGeometryStatus();
     writeText(terminalGeometryProbeCommand(geometry.cols, geometry.rows, nonce), { claim: false })
       .then(() => {
         if (session === state.terminalGeometrySession) {
           state.terminalGeometrySent = geometry.key;
           state.terminalGeometryUrgent = false;
+          state.terminalGeometryInitialSync = false;
           renderTerminalGeometryStatus();
         }
       })
       .catch((error) => {
         if (state.terminalGeometryProbe === probe) state.terminalGeometryProbe = null;
         debugLine(`[terminal-size] ${error.message}`);
+        if (manualRequest && session === state.terminalGeometrySession) {
+          toast(`${t("resizeTarget")}: ${error.message}`, "error");
+        }
       })
       .finally(() => {
         if (session === state.terminalGeometrySession &&
             state.terminalGeometrySyncInFlight === geometry.key) {
           state.terminalGeometrySyncInFlight = "";
+          renderTerminalGeometryStatus();
           scheduleTerminalGeometrySync();
         }
       });
@@ -1713,6 +1779,10 @@ function scheduleTerminalGeometrySync() {
 }
 
 function onTerminalResize({ cols, rows }) {
+  /* A soft keyboard shrinking the WebView is local display state: the target
+   * keeps the size the pane has when the keyboard is away, which is the size a
+   * full-screen program is drawn in once the person stops typing. */
+  if (softKeyboardLayout.active) return;
   state.terminalGeometry = normalizeTerminalGeometry(cols, rows);
   renderTerminalGeometryStatus();
   scheduleTerminalGeometrySync();
@@ -1726,13 +1796,6 @@ function renderTerminalGeometryStatus() {
   const label = elements.ttySizeLabel;
   if (!label) return;
   const item = label.closest(".sb-tty");
-  /* Native shells keep their own tty size on purpose (a soft-keyboard resize is
-   * local display state), so there is no target size for this to report. */
-  if (handlesTerminalGeometryLocally()) {
-    if (item) item.hidden = true;
-    return;
-  }
-  if (item) item.hidden = false;
   const synced = state.terminalGeometrySynced;
   const pane = state.terminalGeometry?.key || "";
   const pending = Boolean(state.connected && pane && pane !== synced);
@@ -1743,16 +1806,31 @@ function renderTerminalGeometryStatus() {
 
   let hint = "";
   if (!state.connected) hint = t("ttyDisconnected");
-  else if (state.alternateScreen && pending) hint = t("ttyFullscreen");
+  else if (!canSerialInput()) hint = t("serialReadonlyError");
+  else if (state.terminalGeometryRequested && softKeyboardLayout.active) hint = t("ttyKeyboard");
+  else if (state.alternateScreen && syncsTargetGeometry() &&
+      (pending || state.terminalGeometryRequested)) hint = t("ttyFullscreen");
+  else if (state.terminalGeometryRequested) hint = t("ttyPending");
+  else if (state.terminalGeometrySyncInFlight) hint = t("ttySyncing");
+  else if (state.terminalGeometryProbe) hint = t("ttyUnconfirmed");
+  else if (pending && !syncsTargetGeometry()) hint = t("ttyFixed");
   else if (pending && state.terminalGeometrySent === pane) hint = t("ttyUnconfirmed");
   else if (pending) hint = t("ttyPending");
   else if (synced) hint = t("ttySynced");
   else hint = t("ttyUnsynced");
   if (item) {
-    item.classList.toggle("sb-pending", pending && !state.alternateScreen);
-    item.classList.toggle("sb-fullscreen", state.alternateScreen && pending);
+    item.classList.toggle("sb-pending", pending && syncsTargetGeometry() && !state.alternateScreen);
+    item.classList.toggle("sb-fullscreen", state.alternateScreen && pending && syncsTargetGeometry());
     item.title = hint;
     item.setAttribute("aria-label", hint ? `${t("tty")} ${label.textContent} · ${hint}` : `${t("tty")} ${label.textContent}`);
+  }
+  if (elements.terminalResizeStatus) {
+    elements.terminalResizeStatus.textContent =
+      `${t("tty")} ${label.textContent} · ${t("ttyPane")} ${pane.replace("x", "×") || "—"} · ${hint}`;
+  }
+  if (elements.terminalResizeButton) {
+    elements.terminalResizeButton.disabled = !canSerialInput() || terminalReplay ||
+      Boolean(state.uartWriteError || state.terminalGeometrySyncInFlight || state.terminalGeometryRequested);
   }
 }
 
@@ -2436,6 +2514,7 @@ function applySerialControl(control) {
   serialControlPending = false;
   renderSerialControl();
   renderShellIntegration();
+  renderTerminalGeometryStatus();
   if (control.mode === "control") scheduleTerminalGeometrySync();
 }
 
@@ -2511,6 +2590,7 @@ async function claimIdleControl() {
 }
 
 function setAgentLedActive(active) {
+  if (!active && state.terminalGeometryRequested) scheduleTerminalGeometrySync();
   if (agentLedActive === active) return;
   agentLedActive = active;
   const action = agentLedAction(state.serialControl, active);
@@ -6293,6 +6373,7 @@ function replayTerminalView() {
   clearTerminalGeometrySyncTimer();
   flushTerminalWrites();
   terminalReplay = true;
+  renderTerminalGeometryStatus();
   const disabled = state.term.options.disableStdin;
   state.term.options.disableStdin = true;
   elements.terminalOutput.setAttribute("aria-busy", "true");
@@ -6307,6 +6388,7 @@ function replayTerminalView() {
         if (revision !== replayRevision || replayTailBytes > WRITE_BACKLOG_LIMIT) { render(); return; }
         const tail = replayTail; replayTail = []; replayTailBytes = 0;
         terminalReplay = false; state.term.options.disableStdin = disabled;
+        renderTerminalGeometryStatus();
         elements.terminalOutput.removeAttribute("aria-busy");
         // Only the retained snapshot is historical. Live bytes arriving during
         // replay go through normal parsing once, after protocol replies unlock.
@@ -6401,6 +6483,7 @@ function loadPersisted() {
   state.logView = localStorage.getItem("linkr-log-view") === "raw" ? "raw" : "reading";
   elements.logViewSelect.value = state.logView;
   state.uartMode = normalizeUartMode(localStorage.getItem(UART_MODE_KEY));
+  state.remoteSizeSync = localStorage.getItem(REMOTE_SIZE_KEY) === "1";
   renderUartMode();
   const uart = localStorage.getItem("linkr-uart");
   if (uart) {
@@ -6416,6 +6499,15 @@ function loadPersisted() {
   }
   if (localStorage.getItem("linkr-echo") === "1") {
     elements.localEchoInput.checked = true;
+  }
+  if (elements.remoteSizeInput) {
+    elements.remoteSizeInput.checked = state.remoteSizeSync;
+  }
+  /* A desktop browser always syncs the target, so the preference would be a
+   * control with no effect there; it belongs to the shells that resize their
+   * own viewport. */
+  if (elements.remoteSizeField) {
+    elements.remoteSizeField.hidden = !handlesTerminalGeometryLocally();
   }
   if (localStorage.getItem("linkr-debug") === "1") {
     elements.debugInput.checked = true;
@@ -6547,12 +6639,15 @@ function syncSoftKeyboardLayout() {
   }
 
   softKeyboardLayout.active = active;
+  if (active) clearTerminalGeometrySyncTimer();
   if (active) terminalKeyPreferences?.collapse();
   document.documentElement.classList.toggle("soft-keyboard-open", active);
   // The button must follow the keyboard the user actually sees, including a
   // keyboard dismissed from Android's own hide button.
   syncKeyboardButtonState();
   scheduleFit();
+  renderTerminalGeometryStatus();
+  if (!active) scheduleTerminalGeometrySync();
 }
 
 function scheduleSoftKeyboardLayout() {
@@ -7265,6 +7360,16 @@ function bind() {
   elements.debugInput.addEventListener("change", () =>
     saveSetting("linkr-debug", elements.debugInput.checked ? "1" : "0"),
   );
+  elements.remoteSizeInput?.addEventListener("change", () => {
+    state.remoteSizeSync = elements.remoteSizeInput.checked;
+    saveSetting(REMOTE_SIZE_KEY, state.remoteSizeSync ? "1" : "0");
+    // A preference change is not a new target session. Preserve the observed
+    // prompt, confirmed size and pending receipt; turning off cancels timers.
+    if (state.remoteSizeSync) state.terminalGeometryUrgent = true;
+    scheduleTerminalGeometrySync();
+    renderTerminalGeometryStatus();
+  });
+  elements.terminalResizeButton?.addEventListener("click", requestTerminalGeometrySync);
 }
 
 function accessoryCapability() {
