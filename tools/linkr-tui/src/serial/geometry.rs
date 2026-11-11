@@ -75,7 +75,10 @@ pub fn looks_like_shell_prompt(text: &str) -> bool {
     if chars[chars.len() - 1] != ' ' {
         return false;
     }
-    if !matches!(chars[chars.len() - 2], '$' | '#' | '%' | '>' | '→' | '❯' | '›') {
+    if !matches!(
+        chars[chars.len() - 2],
+        '$' | '#' | '%' | '>' | '→' | '❯' | '›'
+    ) {
         return false;
     }
     let prefix: String = chars[..chars.len() - 2].iter().collect();
