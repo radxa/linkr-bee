@@ -1,6 +1,6 @@
 # Third-party components
 
-Linkr Bee Terminal 1.1.5 is licensed under Apache-2.0.
+Linkr Bee Terminal 1.2.0 is licensed under Apache-2.0.
 
 This file is generated from the crate's `Cargo.lock`, `cargo metadata` and
 `cargo tree`. It lists the normal-dependency closure across all targets

@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.2.0
+
+The published cut of the Harness plugin after the 1.1.5 baseline. Versions
+continue to follow the Linkr Bee main line.
+
+- The link heals instead of wedging: a synchronous spawn failure, a session
+  that dies mid-command and a config write that races the link are all
+  recovered, and a `resize` the session could not take is no longer reported
+  as applied.
+- "Link lost" is no longer treated as "nothing was sent": only the pre-dispatch
+  refusals (`not_connected`, `bad_request`) say a command never ran, so an
+  outcome that cannot be known is never retried automatically.
+- `linkr_bee_exec --dry-run` answers offline instead of scanning for a board
+  first, which used to fail with "No Linkr Bee board found" when none was in
+  range.
+- Command configuration is bound to the session it was edited for and retained
+  events are bounded, so a reconnect cannot apply the previous board's settings.
+- Settings say what saves what: the UART card is "Write to board", the footer is
+  the only "Save settings", and the card is disabled while connection fields are
+  dirty.
+- A `bee-cli` built in the checkout this plugin is linked from is found again,
+  so a profile whose package manager pruned `linkr-bee-cli` no longer fails
+  every link with "bee-cli was not found".
+
 ## 1.1.5
 
 The published cut of the Harness plugin after the 1.1.4 baseline. Versions
