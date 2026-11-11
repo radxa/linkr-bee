@@ -68,10 +68,14 @@ pub fn looks_like_shell_prompt(text: &str) -> bool {
     }
     // One space, then a prompt terminator. `%` is zsh and `>` is fish; without
     // them a board whose prompt ends that way never got the `stty` line at all.
+    // The arrow family is what a starship or powerline prompt ends with — the
+    // shape most developer boards ship — and it was the one missing here: a
+    // `user@host ~ ->` prompt never looked idle, so the `stty` was never sent
+    // and every full-screen program drew at the tty's 80x24.
     if chars[chars.len() - 1] != ' ' {
         return false;
     }
-    if !matches!(chars[chars.len() - 2], '$' | '#' | '%' | '>') {
+    if !matches!(chars[chars.len() - 2], '$' | '#' | '%' | '>' | '→' | '❯' | '›') {
         return false;
     }
     let prefix: String = chars[..chars.len() - 2].iter().collect();
@@ -361,6 +365,19 @@ mod tests {
         ] {
             assert!(!looks_like_shell_prompt(text), "{text:?}");
         }
+    }
+
+    #[test]
+    fn a_starship_prompt_ending_in_an_arrow_is_idle() {
+        // The shape most development boards ship: timestamp, user@host, path,
+        // then an arrow. It used to look busy forever, so no `stty` was sent.
+        assert!(looks_like_shell_prompt(
+            "08:57:55 radxa@radxa-cubie-a7z ~ → "
+        ));
+        assert!(looks_like_shell_prompt("bob@host /srv › "));
+        assert!(looks_like_shell_prompt("❯ "));
+        // An arrow in prose is not a prompt terminator on its own line.
+        assert!(!looks_like_shell_prompt("reboot → done"));
     }
 
     #[test]

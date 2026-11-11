@@ -97,6 +97,12 @@ fn wait_for_request(
     app.take_output();
     loop {
         app.pump();
+        // A size the caller asked for is owed until an idle prompt can take it.
+        // The resize request itself only gets one chance, and that chance often
+        // arrives while a full-screen program owns the tty or a line is half
+        // typed; without this retry the size stayed owed forever and the target
+        // kept drawing at its boot-time 80x24 inside a much wider panel.
+        app.sync_terminal_geometry();
         // Pushed here and nowhere else: this is the only moment the session is
         // between frames, so a caller reading it sees stream lines only
         // between answers and never inside one.

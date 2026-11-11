@@ -407,9 +407,10 @@ def looks_like_shell_prompt(text: str) -> bool:
     """Port of looksLikeShellPrompt() from web/terminal_geometry.js."""
     if not isinstance(text, str) or len(text) < 2:
         return False
-    # One space, then a prompt terminator. `%` is zsh and `>` is fish; without
-    # them a board whose prompt ends that way never got the `stty` line at all.
-    if text[-1] != " " or text[-2] not in "$#%>":
+    # One space, then a prompt terminator. `%` is zsh, `>` is fish, and the
+    # arrows are what starship and powerline prompts end with — the shape most
+    # development boards ship, and the one that used to never look idle.
+    if text[-1] != " " or text[-2] not in "$#%>→❯›":
         return False
 
     prefix = text[:-2].strip()

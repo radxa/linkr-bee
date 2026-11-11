@@ -70,6 +70,10 @@ test("common Linux shell prompts are recognized", () => {
     // a host with no user@, the buildroot prompt
     "buildroot:~# ",
     "buildroot:/etc# ",
+    // starship / powerline: the shape most development boards ship
+    "08:57:55 radxa@radxa-cubie-a7z ~ → ",
+    "bob@host /srv ❯ ",
+    "❯ ",
     // an activated environment is part of the prompt
     "(venv) user@host:~# ",
   ]) {

@@ -46,12 +46,14 @@ export function parseTerminalGeometryConfirmation(data, nonce) {
 
 /* Prompt terminators, each followed by one space.
  *
- * `%` is zsh's default and fish uses `>`; both were missing, so a board whose
- * prompt ends that way never received the `stty` line at all and every
- * full-screen program kept the tty's boot-time size. `>` is the riskiest of the
- * four because ordinary output can end with it, which is why the prefix has to
- * look like a prompt too — a bare `=>` (U-Boot) or `echo hi >` still fails. */
-const PROMPT_TERMINATORS = new Set(["$", "#", "%", ">"]);
+ * `%` is zsh and `>` is fish; the arrows are what starship and powerline prompts
+ * end with, which is the shape most development boards ship. Every one of them
+ * was missing at some point, and a prompt nobody recognises is never idle: the
+ * `stty` line is never sent, and every full-screen program keeps drawing at the
+ * tty's boot-time 80x24. `>` and the arrows are the riskiest because ordinary
+ * output can end with them, which is why the prefix has to look like a prompt
+ * too — a bare `=>` (U-Boot) or `echo hi >` still fails. */
+const PROMPT_TERMINATORS = new Set(["$", "#", "%", ">", "→", "❯", "›"]);
 
 /* A prompt on its own line, without the terminator. */
 function looksLikePromptPrefix(prefix) {

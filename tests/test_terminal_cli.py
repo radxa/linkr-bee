@@ -942,6 +942,10 @@ class TerminalGeometryTests(unittest.TestCase):
             # a host with no user@, the buildroot prompt
             "buildroot:~# ",
             "buildroot:/etc# ",
+            # starship / powerline: the shape most development boards ship
+            "08:57:55 radxa@radxa-cubie-a7z ~ → ",
+            "bob@host /srv ❯ ",
+            "❯ ",
             # an activated environment is part of the prompt
             "(venv) user@host:~# ",
         ]:
@@ -966,7 +970,7 @@ class TerminalGeometryTests(unittest.TestCase):
                 self.assertFalse(terminal.looks_like_shell_prompt(text))
 
         web = (ROOT / "web/terminal_geometry.js").read_text()
-        self.assertIn('new Set(["$", "#", "%", ">"])', web)
+        self.assertIn('new Set(["$", "#", "%", ">", "→", "❯", "›"])', web)
         self.assertIn('line[line.length - 2]', web)
 
     def test_geometry_sync_waits_for_an_idle_prompt_and_dedupes(self):

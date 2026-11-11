@@ -4691,7 +4691,7 @@ impl App {
     /// Sent straight down the session rather than through [`Self::send_bytes`]:
     /// this is housekeeping, not user input. A send that fails leaves the
     /// size owed, so the next parsed idle prompt offers another chance.
-    fn sync_terminal_geometry(&mut self) {
+    pub(crate) fn sync_terminal_geometry(&mut self) {
         // A script run owns the line from its first byte to its last answer.
         // A prompt-looking tail in its output — a banner, an echo, the shell
         // waiting for a password — is not an idle pane, and an `stty` typed
