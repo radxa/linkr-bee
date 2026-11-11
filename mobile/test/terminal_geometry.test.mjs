@@ -56,6 +56,20 @@ test("common Linux shell prompts are recognized", () => {
     "[root@linkr tmp]# ",
     "$ ",
     "# ",
+    // zsh and fish terminators: a board whose prompt ends this way used to
+    // never receive the stty line, so every full-screen program stayed at the
+    // tty's boot-time size.
+    "user@host ~ % ",
+    "user@host ~/src % ",
+    "user@host:~/src% ",
+    "user@host ~> ",
+    "user@host ~/src> ",
+    "sh-5.2> ",
+    // a host with no user@, the buildroot prompt
+    "buildroot:~# ",
+    "buildroot:/etc# ",
+    // an activated environment is part of the prompt
+    "(venv) user@host:~# ",
   ]) {
     assert.equal(looksLikeShellPrompt(prompt), true, prompt);
   }
@@ -70,6 +84,12 @@ test("login prompts and command output do not trigger shell synchronization", ()
     "printf '# '",
     "root@linkr:~# command",
     "",
+    // `>` appears in ordinary output, so the prefix must look like a prompt.
+    "=> ",
+    "U-Boot> ",
+    "echo hi > ",
+    "100% ",
+    "select> ",
   ]) {
     assert.equal(looksLikeShellPrompt(output), false, output);
   }

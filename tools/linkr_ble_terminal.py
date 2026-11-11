@@ -405,19 +405,62 @@ def terminal_geometry_command(cols, rows) -> str:
 
 def looks_like_shell_prompt(text: str) -> bool:
     """Port of looksLikeShellPrompt() from web/terminal_geometry.js."""
-    if not isinstance(text, str) or not re.search(r"[$#] $", text):
+    if not isinstance(text, str) or len(text) < 2:
+        return False
+    # One space, then a prompt terminator. `%` is zsh and `>` is fish; without
+    # them a board whose prompt ends that way never got the `stty` line at all.
+    if text[-1] != " " or text[-2] not in "$#%>":
         return False
 
     prefix = text[:-2].strip()
     if not prefix:
         return True
 
-    return bool(
-        re.search(r"@\S+(?::\S*)?$", prefix)
-        or re.match(r"^(?:ba|da|a|z)?sh(?:-[\d.]+)?$", prefix)
-        or re.match(r"^(?:~|/\S*)$", prefix)
-        or re.match(r"^\[[^\]]+\]$", prefix)
-    )
+    # `(venv) user@host:~` — an activated environment is part of the prompt.
+    wrapper = re.match(r"^\([^)]*\)\s+", prefix)
+    if wrapper:
+        prefix = prefix[wrapper.end():].strip()
+        if not prefix:
+            return False
+
+    if re.match(r"^\[[^\]]+\]$", prefix):
+        return True
+    if re.match(r"^(?:ba|da|a|z)?sh(?:-[\d.]+)?$", prefix):
+        return True
+    if re.match(r"^(?:~|~?/\S*|/\S*)$", prefix):
+        return True
+
+    # `user@host`, `user@host:path`, `user@host ~/dir` — zsh and fish place the
+    # working directory after a space instead of a colon.
+    at = prefix.rfind("@")
+    if at > 0:
+        # The last token before `@` is the user. observe() concatenates a prompt
+        # redrawn without a newline, so an earlier prompt may sit to its left.
+        user = prefix[:at].split()[-1] if prefix[:at].split() else ""
+        if not user:
+            return False
+        rest = prefix[at + 1:]
+        split = re.search(r"[\s:]", rest)
+        host = rest if split is None else rest[: split.start()]
+        if not host:
+            return False
+        if split is None:
+            return True
+        tail = rest[split.start():]
+        if tail.startswith(":"):
+            return not re.search(r"\s", tail)
+        path = tail.strip()
+        return path == "~" or path.startswith("~/") or path.startswith("/")
+
+    # `buildroot:~#`, `host:/etc#` — a host name with no `user@`.
+    colon = prefix.find(":")
+    if colon > 0:
+        host = prefix[:colon]
+        path = prefix[colon + 1:]
+        if not re.search(r"[\s@:]", host) and not re.search(r"\s", path):
+            return path == "~" or path.startswith("~/") or path.startswith("/")
+
+    return False
 
 
 class TerminalGeometrySync:

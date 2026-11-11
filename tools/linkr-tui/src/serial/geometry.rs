@@ -61,24 +61,45 @@ pub fn command(cols: u16, rows: u16) -> String {
 /// A custom prompt that looks like nothing here is not synced rather than
 /// guessed at.
 pub fn looks_like_shell_prompt(text: &str) -> bool {
-    if !text.ends_with("$ ") && !text.ends_with("# ") {
-        return false;
-    }
-
     let chars: Vec<char> = text.chars().collect();
     if chars.len() < 2 {
         return false;
     }
+    // One space, then a prompt terminator. `%` is zsh and `>` is fish; without
+    // them a board whose prompt ends that way never got the `stty` line at all.
+    if chars[chars.len() - 1] != ' ' {
+        return false;
+    }
+    if !matches!(chars[chars.len() - 2], '$' | '#' | '%' | '>') {
+        return false;
+    }
     let prefix: String = chars[..chars.len() - 2].iter().collect();
-    let prefix = prefix.trim();
+    looks_like_prompt_prefix(prefix.trim())
+}
+
+/// A prompt on its own line, without the terminator.
+fn looks_like_prompt_prefix(prefix: &str) -> bool {
     if prefix.is_empty() {
         return true;
     }
 
-    // `@\S+(?::\S*)?$`: an address or a user@host, with an optional path.
-    if let Some(at) = prefix.rfind('@') {
-        let tail = &prefix[at + 1..];
-        if !tail.is_empty() && !tail.chars().any(char::is_whitespace) {
+    // `(venv) user@host:~` — an activated environment is part of the prompt.
+    let prefix = if prefix.starts_with('(') {
+        match prefix.find(") ") {
+            Some(close) => prefix[close + 2..].trim_start(),
+            None => prefix,
+        }
+    } else {
+        prefix
+    };
+    if prefix.is_empty() {
+        return false;
+    }
+
+    // `^\[[^\]]+\]$`: `[user@host dir]`, the root prompt several boards use.
+    if prefix.starts_with('[') && prefix.ends_with(']') {
+        let inner = &prefix[1..prefix.len() - 1];
+        if !inner.is_empty() && !inner.contains(']') {
             return true;
         }
     }
@@ -88,19 +109,51 @@ pub fn looks_like_shell_prompt(text: &str) -> bool {
         return true;
     }
 
-    // `^(?:~|/\S*)$`: a bare home or an absolute path.
+    // `^(?:~|~?/\S*|/\S*)$`: a bare home or a path.
     if prefix == "~" {
         return true;
     }
-    if prefix.starts_with('/') && !prefix.chars().any(char::is_whitespace) {
+    if (prefix.starts_with("~/") || prefix.starts_with('/'))
+        && !prefix.chars().any(char::is_whitespace)
+    {
         return true;
     }
 
-    // `^\[[^\]]+\]$`: `[user@host dir]`, the root prompt several boards use.
-    if prefix.starts_with('[') && prefix.ends_with(']') {
-        let inner = &prefix[1..prefix.len() - 1];
-        if !inner.is_empty() && !inner.contains(']') {
-            return true;
+    // `user@host`, `user@host:path`, `user@host ~/dir` — zsh and fish place the
+    // working directory after a space instead of a colon.
+    if let Some(at) = prefix.rfind('@') {
+        // The last token before `@` is the user: a prompt redrawn without a
+        // newline can leave an earlier one to the left of this one.
+        let user = prefix[..at].split_whitespace().last().unwrap_or("");
+        if !user.is_empty() {
+            let rest = &prefix[at + 1..];
+            let split = rest.find([':', ' ', '\t']).unwrap_or(rest.len());
+            let host = &rest[..split];
+            if !host.is_empty() {
+                if split == rest.len() {
+                    return true;
+                }
+                let tail = &rest[split..];
+                if tail.starts_with(':') {
+                    return !tail.chars().any(char::is_whitespace);
+                }
+                let path = tail.trim();
+                return path == "~"
+                    || path.starts_with("~/")
+                    || path.starts_with('/');
+            }
+        }
+    }
+
+    // `buildroot:~#`, `host:/etc#` — a host name with no `user@`.
+    if let Some(colon) = prefix.find(':') {
+        let host = &prefix[..colon];
+        let path = &prefix[colon + 1..];
+        if !host.is_empty()
+            && !host.chars().any(|c| c.is_whitespace() || c == '@' || c == ':')
+            && !path.chars().any(char::is_whitespace)
+        {
+            return path == "~" || path.starts_with("~/") || path.starts_with('/');
         }
     }
 
@@ -269,6 +322,18 @@ mod tests {
             "# ",
             "bash-5.2$ ",
             "sh-5.2# ",
+            // zsh and fish terminators: without these a board whose prompt
+            // ends this way never received the stty line at all.
+            "user@target ~ % ",
+            "user@target ~/src % ",
+            "user@target ~> ",
+            "user@target ~/src> ",
+            "sh-5.2> ",
+            // a host with no user@, the buildroot prompt
+            "buildroot:~# ",
+            "buildroot:/etc# ",
+            // an activated environment is part of the prompt
+            "(venv) user@target:~# ",
         ] {
             assert!(looks_like_shell_prompt(text), "{text:?}");
         }
@@ -280,6 +345,13 @@ mod tests {
             "root@target:~$ echo hello",
             "running",
             "Loading kernel...",
+            // `>` is common in ordinary output: the prefix has to be a prompt.
+            "=> ",
+            "U-Boot> ",
+            "echo hi > ",
+            "100% ",
+            "select> ",
+            "cost $ ",
         ] {
             assert!(!looks_like_shell_prompt(text), "{text:?}");
         }

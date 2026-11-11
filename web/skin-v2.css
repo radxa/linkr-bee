@@ -1424,6 +1424,21 @@ html.settings-drawer-layout .settings-tabs,
   color: var(--muted);
 }
 
+/* The target tty's size, and whether it still matches this pane. `--warn`
+ * marks a size the client owes the board; it never means an error. */
+.statusbar .sb-tty b {
+  font-variant-numeric: tabular-nums;
+}
+
+.statusbar .sb-tty.sb-pending b {
+  color: var(--warn);
+}
+
+.statusbar .sb-tty.sb-fullscreen b {
+  color: var(--warn);
+  font-style: italic;
+}
+
 /* ---------- Boot failure notice ---------- */
 
 /* This strip only appears when a vendor script failed to load, which is exactly

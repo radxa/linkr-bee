@@ -926,16 +926,46 @@ class TerminalGeometryTests(unittest.TestCase):
         )
 
     def test_prompt_detection_matches_the_web_client_rules(self):
-        for text in ["user@host:~$ ", "# ", "/srv/app$ ", "sh-5.1$ ", "[root@host]# "]:
+        for text in [
+            "user@host:~$ ",
+            "# ",
+            "/srv/app$ ",
+            "sh-5.1$ ",
+            "[root@host]# ",
+            # zsh and fish terminators, previously never recognised: a board
+            # whose prompt ends this way never received the stty line.
+            "user@host ~ % ",
+            "user@host ~/src % ",
+            "user@host ~> ",
+            "user@host ~/src> ",
+            "sh-5.1> ",
+            # a host with no user@, the buildroot prompt
+            "buildroot:~# ",
+            "buildroot:/etc# ",
+            # an activated environment is part of the prompt
+            "(venv) user@host:~# ",
+        ]:
             with self.subTest(text=text):
                 self.assertTrue(terminal.looks_like_shell_prompt(text))
-        for text in ["", "$ x", "running", "Loading kernel..."]:
+        for text in [
+            "",
+            "$ x",
+            "running",
+            "Loading kernel...",
+            # `>` appears in ordinary output, so the prefix must look like one.
+            "=> ",
+            "U-Boot> ",
+            "echo hi > ",
+            "100% ",
+            "select> ",
+            "cost $ ",
+        ]:
             with self.subTest(text=text):
                 self.assertFalse(terminal.looks_like_shell_prompt(text))
 
         web = (ROOT / "web/terminal_geometry.js").read_text()
-        self.assertIn(r"/[$#] $/", web)
-        self.assertIn(r"/@\S+(?::\S*)?$/", web)
+        self.assertIn('new Set(["$", "#", "%", ">"])', web)
+        self.assertIn('line[line.length - 2]', web)
 
     def test_geometry_sync_waits_for_an_idle_prompt_and_dedupes(self):
         sync = terminal.TerminalGeometrySync(80, 24)

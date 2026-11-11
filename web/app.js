@@ -333,6 +333,12 @@ const state = {
   terminalGeometrySyncInFlight: "",
   terminalGeometrySyncTimer: null,
   terminalGeometrySession: 0,
+  /* A new link has not been told a size yet, so its first idle prompt syncs
+   * immediately instead of waiting for the resize debounce. */
+  terminalGeometryUrgent: false,
+  /* A full-screen program owns the tty: the pane can change but the target
+   * cannot be told until it exits, which the status bar explains. */
+  alternateScreen: false,
   shellPromptVisible: false,
 };
 
@@ -473,6 +479,8 @@ const elements = {
   rxCount: $("rxCount"),
   txCount: $("txCount"),
   baudLabel: $("baudLabel"),
+  ttySizeLabel: $("ttySizeLabel"),
+  ttySizeItem: $("ttySizeItem"),
   connStateText: $("connStateText"),
   themeButton: $("themeButton"),
   langButton: $("langButton"),
@@ -845,6 +853,12 @@ const I18N = {
     rx: "RX",
     tx: "TX",
     baud: "Baud",
+    tty: "TTY",
+    ttySynced: "Target tty matches this pane",
+    ttyPending: "Pane resized; the target tty is told at the next idle shell prompt",
+    ttyFullscreen: "A full-screen program owns the tty; it is resized after you exit",
+    ttyUnsynced: "Not yet synced; the target is told at its next idle shell prompt",
+    ttyDisconnected: "Not connected",
     welcome: "Linkr Bee Terminal ready. Press Connect to open a device.",
     connecting: "Connecting…",
     pairingHint: "New host: press the Bee pairing key once (Linkr Bee X1.0: USER_KEY/GPIO3; C3/C5: GPIO1), then connect within 30 s. Bonded hosts reconnect without a key press.",
@@ -1154,6 +1168,12 @@ const I18N = {
     rx: "收",
     tx: "发",
     baud: "波特率",
+    tty: "TTY",
+    ttySynced: "目标 tty 与当前面板一致",
+    ttyPending: "面板已改变，目标 tty 将在下一个空闲提示符处同步",
+    ttyFullscreen: "全屏程序占用 tty，退出后才会同步尺寸",
+    ttyUnsynced: "尚未同步；目标会在下一个空闲 shell 提示符处收到尺寸",
+    ttyDisconnected: "未连接",
     welcome: "Linkr Bee 终端已就绪，点击「连接」打开设备。",
     connecting: "连接中…",
     pairingHint: "首次连接新主机：先按一下 Bee 的配对键（Linkr Bee X1.0：USER_KEY/GPIO3；C3/C5：GPIO1），并在 30 秒内发起连接。已绑定主机无需按键。",
@@ -1538,6 +1558,7 @@ function applyLang() {
   updateToggleLabels();
   renderRefLists();
   refreshDynamicTexts();
+  renderTerminalGeometryStatus();
   renderDiagnostics();
   refreshCardToggleLabels();
   refreshBoardLabels();
@@ -1577,6 +1598,11 @@ function resetTerminalGeometrySync() {
   state.terminalGeometry = state.term
     ? normalizeTerminalGeometry(state.term.cols, state.term.rows)
     : null;
+  /* A new link has never been told a size. The first idle prompt is the one
+   * moment the target can still be resized before the person types `htop`, so
+   * that sync skips the debounce a later resize needs. */
+  state.terminalGeometryUrgent = true;
+  state.alternateScreen = false;
 }
 
 function invalidateTerminalGeometrySync() {
@@ -1612,6 +1638,12 @@ function scheduleTerminalGeometrySync() {
     return;
   }
 
+  /* A fresh link skips the debounce: the first idle prompt is the last moment
+   * the target can be resized before a full-screen program starts. Later
+   * resizes wait 180 ms so a drag or a panel animation sends one size. The
+   * flag clears only once a size actually went out, so a cancelled timer or a
+   * prompt that vanished does not push the first sync back. */
+  const delay = state.terminalGeometryUrgent ? 0 : 180;
   state.terminalGeometrySyncTimer = setTimeout(() => {
     state.terminalGeometrySyncTimer = null;
     if (
@@ -1635,6 +1667,8 @@ function scheduleTerminalGeometrySync() {
       .then(() => {
         if (session === state.terminalGeometrySession) {
           state.terminalGeometrySynced = geometry.key;
+          state.terminalGeometryUrgent = false;
+          renderTerminalGeometryStatus();
         }
       })
       .catch((error) => {
@@ -1646,12 +1680,50 @@ function scheduleTerminalGeometrySync() {
           state.terminalGeometrySyncInFlight = "";
         }
       });
-  }, 180);
+  }, delay);
 }
 
 function onTerminalResize({ cols, rows }) {
   state.terminalGeometry = normalizeTerminalGeometry(cols, rows);
+  renderTerminalGeometryStatus();
   scheduleTerminalGeometrySync();
+}
+
+/* What the target's tty believes its size is, next to the pane's own size when
+ * the two differ. A full-screen program is the one case where the gap cannot be
+ * closed from here: the client may only write `stty` at an idle shell prompt,
+ * and the pane says so rather than claiming a size the target never took. */
+function renderTerminalGeometryStatus() {
+  const label = elements.ttySizeLabel;
+  if (!label) return;
+  const item = label.closest(".sb-tty");
+  /* Native shells keep their own tty size on purpose (a soft-keyboard resize is
+   * local display state), so there is no target size for this to report. */
+  if (handlesTerminalGeometryLocally()) {
+    if (item) item.hidden = true;
+    return;
+  }
+  if (item) item.hidden = false;
+  const synced = state.terminalGeometrySynced;
+  const pane = state.terminalGeometry?.key || "";
+  const pending = Boolean(state.connected && pane && synced && pane !== synced);
+  /* Only a size the target acknowledged is reported as its size. Showing the
+   * pane's own size before the first sync would be the same false claim the
+   * `stty` gate exists to avoid. */
+  label.textContent = synced ? synced.replace("x", "×") : "—";
+
+  let hint = "";
+  if (!state.connected) hint = t("ttyDisconnected");
+  else if (state.alternateScreen && pending) hint = t("ttyFullscreen");
+  else if (pending) hint = t("ttyPending");
+  else if (synced) hint = t("ttySynced");
+  else hint = t("ttyUnsynced");
+  if (item) {
+    item.classList.toggle("sb-pending", pending && !state.alternateScreen);
+    item.classList.toggle("sb-fullscreen", state.alternateScreen && pending);
+    item.title = hint;
+    item.setAttribute("aria-label", hint ? `${t("tty")} ${label.textContent} · ${hint}` : `${t("tty")} ${label.textContent}`);
+  }
 }
 
 function terminalHasIdleShellPrompt() {
@@ -1671,6 +1743,16 @@ function terminalHasIdleShellPrompt() {
 
 function onTerminalWriteParsed() {
   if (terminalReplay) return;
+  const alternate = state.term?.buffer?.active?.type === "alternate";
+  if (alternate !== state.alternateScreen) {
+    state.alternateScreen = alternate;
+    if (!alternate) {
+      /* Leaving a full-screen program is the first chance to move the tty to
+       * the size the pane grew to while it owned the screen. */
+      state.terminalGeometryUrgent = true;
+    }
+    renderTerminalGeometryStatus();
+  }
   state.shellPromptVisible = terminalHasIdleShellPrompt();
   if (state.shellPromptVisible) {
     scheduleTerminalGeometrySync();
@@ -4741,6 +4823,7 @@ function setConnected(connected, { preserveJournal = false } = {}) {
   if (connectionChanged) {
     resetTerminalGeometrySync();
   }
+  renderTerminalGeometryStatus();
   elements.statusDot.classList.toggle("connected", connected);
   elements.statusText.textContent = t(
     connected ? "connected" : "disconnected",
