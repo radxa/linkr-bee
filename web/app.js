@@ -876,7 +876,7 @@ const I18N = {
     ttyUnconfirmed: "Size request sent; the requested target tty size is not yet confirmed",
     ttyDisconnected: "Not connected",
     remoteSize: "Automatically sync target size",
-    remoteSizeHint: "A native app sends the window size once after connecting. Turn this on to follow later window changes. The soft keyboard never resizes the target tty.",
+    remoteSizeHint: "Send the new size when this window changes. Off sends only when you press \"Sync to current window\" above.",
     resizeTarget: "Sync to current window",
     ttyPane: "Window",
     ttySyncing: "Synchronizing target size…",
@@ -1199,7 +1199,7 @@ const I18N = {
     ttyUnconfirmed: "尺寸请求已发送；目标尚未确认所请求的 tty 尺寸",
     ttyDisconnected: "未连接",
     remoteSize: "自动同步目标尺寸",
-    remoteSizeHint: "原生应用连接后同步一次窗口尺寸。开启后随窗口变化继续同步；软键盘开关不会改变目标 tty 尺寸。",
+    remoteSizeHint: "窗口尺寸变化时自动把新尺寸发给板子；关掉后只在点上面「同步到当前窗口」时发送。",
     resizeTarget: "同步到当前窗口",
     ttyPane: "窗口",
     ttySyncing: "正在同步目标尺寸…",
@@ -1667,14 +1667,16 @@ function markTerminalBusy() {
   clearTerminalGeometrySyncTimer();
 }
 
-/* Native shells are the one place a soft keyboard can resize the pane, and a
- * TUI there is otherwise stuck with whatever size the board booted with. One
- * sync per connection always goes out — that is what a TUI reads when it
- * starts — and the "Sync target size" preference keeps it following later
- * resizes. Either way the keyboard itself never moves the target's size. */
+/* Whether a pane resize may reach the target.
+ *
+ * The first sync of a connection always goes out — that is what a TUI reads
+ * when it starts — and the "Sync to current window" button asks for one
+ * regardless of the switch, so a person who turned automatic syncing off can
+ * still send a size on purpose. Everything in between follows the switch. A
+ * native shell additionally never lets the soft keyboard move the target (see
+ * onTerminalResize). */
 function syncsTargetGeometry() {
   return (
-    !handlesTerminalGeometryLocally() ||
     state.remoteSizeSync ||
     state.terminalGeometryInitialSync ||
     state.terminalGeometryRequested
@@ -6495,7 +6497,13 @@ function loadPersisted() {
   state.logView = localStorage.getItem("linkr-log-view") === "raw" ? "raw" : "reading";
   elements.logViewSelect.value = state.logView;
   state.uartMode = normalizeUartMode(localStorage.getItem(UART_MODE_KEY));
-  state.remoteSizeSync = localStorage.getItem(REMOTE_SIZE_KEY) === "1";
+  /* Desktop windows follow their own size by default; a native shell does
+   * not, because its soft keyboard would otherwise reflow the target twice a
+   * second. The switch itself is offered everywhere. */
+  const savedRemoteSize = localStorage.getItem(REMOTE_SIZE_KEY);
+  state.remoteSizeSync = savedRemoteSize === null
+    ? !handlesTerminalGeometryLocally()
+    : savedRemoteSize === "1";
   renderUartMode();
   const uart = localStorage.getItem("linkr-uart");
   if (uart) {
@@ -6515,12 +6523,7 @@ function loadPersisted() {
   if (elements.remoteSizeInput) {
     elements.remoteSizeInput.checked = state.remoteSizeSync;
   }
-  /* A desktop browser always syncs the target, so the preference would be a
-   * control with no effect there; it belongs to the shells that resize their
-   * own viewport. */
-  if (elements.remoteSizeField) {
-    elements.remoteSizeField.hidden = !handlesTerminalGeometryLocally();
-  }
+
   if (localStorage.getItem("linkr-debug") === "1") {
     elements.debugInput.checked = true;
   }

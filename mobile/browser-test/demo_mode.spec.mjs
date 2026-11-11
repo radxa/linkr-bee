@@ -56,18 +56,26 @@ test("the demo board keeps a renamed signal like the real NVS", async ({ page })
     .toHaveText("客厅 电源");
 });
 
-test("the remote-size switch is a native-shell control and keeps its value", async ({ page }) => {
+test("the auto-sync switch is offered on a desktop browser and keeps its value", async ({ page }) => {
   await page.goto("/?demo=board");
   await expect(page.locator("#statusText")).toContainText(/Connected|已连接/);
 
-  // A desktop browser always syncs the target, so the switch would do nothing.
-  await expect(page.locator("#remoteSizeField")).toHaveJSProperty("hidden", true);
+  // A desktop window follows its own size by default, and the switch that
+  // turns that off is offered here too — not only in a native shell.
+  await expect(page.locator("#remoteSizeField")).toHaveJSProperty("hidden", false);
+  await expect(page.locator("#remoteSizeInput")).toBeChecked();
 
-  // The preference itself survives a reload (the native shell reads it back).
-  await page.evaluate(() => localStorage.setItem("linkr-remote-size", "1"));
+  // Turning it off must survive a reload: the next session starts quiet.
+  // The card is folded by default, so drive the control through the DOM rather
+  // than through a visibility-dependent click.
+  await page.evaluate(() => {
+    const box = document.getElementById("remoteSizeInput");
+    box.checked = false;
+    box.dispatchEvent(new Event("change"));
+  });
   await page.reload();
   await expect(page.locator("#statusText")).toContainText(/Connected|已连接/);
-  await expect(page.locator("#remoteSizeInput")).toBeChecked();
+  await expect(page.locator("#remoteSizeInput")).not.toBeChecked();
 });
 
 test("a native shell is offered the remote-size switch", async ({ browser }) => {
@@ -80,6 +88,8 @@ test("a native shell is offered the remote-size switch", async ({ browser }) => 
   await expect(page.locator("#statusText")).toContainText(/Connected|已连接/);
   // The switch lives on the terminal settings page and is offered here.
   await expect(page.locator("#remoteSizeField")).toHaveJSProperty("hidden", false);
+  // A native shell starts with automatic syncing off.
+  await expect(page.locator("#remoteSizeInput")).not.toBeChecked();
   await expect(page.locator("#remoteSizeHint, [data-i18n=\"remoteSizeHint\"]").first())
     .toContainText(/tty/);
   await context.close();
