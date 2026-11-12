@@ -74,6 +74,10 @@ pub enum Query {
     /// and sent through `send_accessory`; this variant only names the shape of
     /// the answer.
     BondLabel,
+    /// `@c?` and its `@c claim`/`@c release` siblings — which session may type
+    /// into the shared console. Asked only when the board advertises the
+    /// multi-session capability.
+    Control,
 }
 
 impl Query {
@@ -88,6 +92,7 @@ impl Query {
             Query::BleName => crate::accessory::BLE_NAME_QUERY_COMMAND,
             Query::Lan => crate::accessory::LAN_QUERY_COMMAND,
             Query::Bonds => crate::accessory::BONDS_QUERY_COMMAND,
+            Query::Control => "@c?",
             Query::BondLabel => {
                 unreachable!(
                     "bond label commands carry an address; send them through send_accessory"
@@ -129,6 +134,7 @@ impl Query {
             | Query::BleName
             | Query::Lan
             | Query::Bonds
+            | Query::Control
             | Query::BondLabel => {
                 // One parse: either half of the verdict ends the question.
                 let status = crate::accessory::reply_status(&lines.join("\n"));
@@ -159,6 +165,100 @@ impl Query {
             _ => REPLY_TIMEOUT,
         }
     }
+}
+
+/// Which side of the console a session is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlMode {
+    /// This session may type and change settings.
+    Control,
+    /// Another session owns the console; this one may watch and ask.
+    Readonly,
+    /// Nobody owns it, so the first session to claim it gets it.
+    Available,
+}
+
+/// What `@c?` answered: who this session is, who owns the console, and how
+/// many sessions are attached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControlStatus {
+    pub self_id: u32,
+    pub owner: u32,
+    pub mode: ControlMode,
+    /// The ownership epoch. It changes on every hand-over, so a queued action
+    /// from before a change can be told apart from one after it.
+    pub epoch: u32,
+    /// How many sessions are attached, this one included.
+    pub peers: u32,
+}
+
+/// Parse the bridge's ownership answer:
+/// `OK control self=2 owner=1 mode=readonly epoch=5 peers=2 ble_max=2 …`.
+///
+/// Half an answer is not trusted: the mode has to agree with the owner, and a
+/// status with no session, no epoch or no peer is not a status at all. That is
+/// the same rule the web client applies, and it keeps a truncated line from
+/// painting a wrong ownership badge.
+pub fn parse_control_status(text: &str) -> Option<ControlStatus> {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("OK control "))?;
+    let mut self_id = None;
+    let mut owner = None;
+    let mut mode = None;
+    let mut epoch = None;
+    let mut peers = None;
+    for field in line["OK control ".len()..].split_whitespace() {
+        let Some((key, value)) = field.split_once('=') else {
+            continue;
+        };
+        match key {
+            "self" => self_id = value.parse::<u32>().ok(),
+            "owner" => owner = value.parse::<u32>().ok(),
+            "mode" => {
+                mode = Some(match value {
+                    "control" => ControlMode::Control,
+                    "readonly" => ControlMode::Readonly,
+                    "available" => ControlMode::Available,
+                    _ => return None,
+                })
+            }
+            "epoch" => epoch = value.parse::<u32>().ok(),
+            "peers" => peers = value.parse::<u32>().ok(),
+            _ => {}
+        }
+    }
+    let (self_id, owner, mode, epoch, peers) = (self_id?, owner?, mode?, epoch?, peers?);
+    if self_id == 0 || epoch == 0 || peers == 0 {
+        return None;
+    }
+    let expected = if owner == self_id {
+        ControlMode::Control
+    } else if owner != 0 {
+        ControlMode::Readonly
+    } else {
+        ControlMode::Available
+    };
+    if mode != expected {
+        return None;
+    }
+    Some(ControlStatus {
+        self_id,
+        owner,
+        mode,
+        epoch,
+        peers,
+    })
+}
+
+/// The reason a control command was refused, as the firmware spells it:
+/// `ERR control=busy` becomes `busy`.
+pub fn control_refusal(text: &str) -> Option<&str> {
+    text.lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix("ERR control="))
+        .map(str::trim)
 }
 
 /// A whole answer, once one has arrived.
@@ -674,6 +774,65 @@ mod tests {
         let (header, body) = response(id, "OK uart=115200,8,N,1,none", MGMT_FLAG_FINAL);
         assert!(!talk.offer(&header, &body));
         assert!(talk.abandon(start + REPLY_TIMEOUT).is_none());
+    }
+
+    /// The firmware's ownership status, exactly as `serial_session.c` writes it.
+    #[test]
+    fn an_ownership_answer_names_who_may_type() {
+        let owner = parse_control_status(
+            "OK control self=1 owner=1 mode=control epoch=7 peers=2 ble_max=2 \
+             linkr_reserved=0 agent_led=1",
+        )
+        .expect("a whole status");
+        assert_eq!(owner.self_id, 1);
+        assert_eq!(owner.owner, 1);
+        assert_eq!(owner.mode, ControlMode::Control);
+        assert_eq!(owner.epoch, 7);
+        assert_eq!(owner.peers, 2);
+
+        let watcher =
+            parse_control_status("OK control self=2 owner=1 mode=readonly epoch=7 peers=2")
+                .expect("a read-only status");
+        assert_eq!(watcher.mode, ControlMode::Readonly);
+
+        let free = parse_control_status("OK control self=2 owner=0 mode=available epoch=8 peers=2")
+            .expect("an unowned console");
+        assert_eq!(free.mode, ControlMode::Available);
+    }
+
+    /// Half a status is not a status: a mode that disagrees with the owner, a
+    /// zero id, or a truncated line would paint a badge nobody can trust.
+    #[test]
+    fn a_contradictory_ownership_answer_is_refused() {
+        assert!(
+            parse_control_status("OK control self=1 owner=1 mode=readonly epoch=7 peers=2")
+                .is_none()
+        );
+        assert!(
+            parse_control_status("OK control self=1 owner=0 mode=control epoch=7 peers=2")
+                .is_none()
+        );
+        assert!(
+            parse_control_status("OK control self=0 owner=1 mode=readonly epoch=7 peers=2")
+                .is_none()
+        );
+        assert!(
+            parse_control_status("OK control self=1 owner=1 mode=control epoch=0 peers=2")
+                .is_none()
+        );
+        assert!(
+            parse_control_status("OK control self=1 owner=1 mode=control epoch=7 peers=0")
+                .is_none()
+        );
+        assert!(parse_control_status("OK control self=1 owner=1 mode=control").is_none());
+        assert!(parse_control_status("OK uart=115200").is_none());
+    }
+
+    #[test]
+    fn a_control_refusal_keeps_its_reason() {
+        assert_eq!(control_refusal("ERR control=busy"), Some("busy"));
+        assert_eq!(control_refusal("ERR control=not_owner"), Some("not_owner"));
+        assert_eq!(control_refusal("ERR uart=-22"), None);
     }
 
     /// The encoder and the parser are the two ends of one wire: anything this

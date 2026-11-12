@@ -2127,6 +2127,7 @@ fn query_name(query: crate::device::Query) -> &'static str {
         crate::device::Query::Lan => "lan",
         crate::device::Query::Bonds => "bonds",
         crate::device::Query::BondLabel => "bond-label",
+        crate::device::Query::Control => "control",
     }
 }
 
@@ -2180,6 +2181,13 @@ fn answer_of(app: &App, query: crate::device::Query) -> Result<String, String> {
         return Err(why.clone());
     }
     Ok(match query {
+        crate::device::Query::Control => match app.control {
+            Some(control) => format!(
+                "control self={} owner={} mode={:?} epoch={} peers={}",
+                control.self_id, control.owner, control.mode, control.epoch, control.peers
+            ),
+            None => String::new(),
+        },
         crate::device::Query::Diagnostics => app.diagnostics.raw.join("\n"),
         crate::device::Query::Uart => app
             .uart_settings

@@ -92,6 +92,13 @@ pub trait LinkReader: Send {
         None
     }
 
+    /// What the board's Management service advertised when this link was
+    /// wired, when the bearer read it. A pipe has nothing to say here, and the
+    /// callers that care about a capability treat `None` as "the old way".
+    fn board_capabilities(&self) -> Option<u32> {
+        None
+    }
+
     /// Read into `buf`. `Ok(0)` means the far end closed cleanly.
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize>;
 
@@ -233,6 +240,8 @@ pub struct OpenedLink {
     /// How the sidebar and the notices name it, e.g. `ble:EE:C7:42:34:48:CF`.
     pub description: String,
     pub ble_device_id: Option<String>,
+    /// The Management capability word, when the board advertised one.
+    pub board_capabilities: Option<u32>,
     /// The LAN address this link talks to, empty for links that are not LAN.
     pub lan_host: String,
     /// Whether this LAN link went out with a token.
@@ -257,6 +266,7 @@ impl OpenedLink {
         let (lan_host, lan_secured) = link.lan_details().unwrap_or_default();
         let (reader, writer) = link.open()?;
         let ble_device_id = reader.ble_device_id();
+        let board_capabilities = reader.board_capabilities();
         let description = ble_device_id
             .as_ref()
             .map(|id| format!("ble:{id}"))
@@ -265,6 +275,7 @@ impl OpenedLink {
             kind,
             description,
             ble_device_id,
+            board_capabilities,
             lan_host,
             lan_secured,
             reader,
@@ -520,6 +531,9 @@ pub mod testing {
         /// different request from dropping the writer: see
         /// [`LinkWriter::hangup`].
         hung_up: Arc<Mutex<bool>>,
+        /// The Management capability word a Bluetooth pair reports, when a
+        /// test needs the link to look like a board that advertises one.
+        capabilities: Option<u32>,
     }
 
     /// A memory pair announces itself as `Stdio` rather than taking
@@ -538,6 +552,7 @@ pub mod testing {
                 description: "memory".to_string(),
                 closed: Arc::new(Mutex::new(false)),
                 hung_up: Arc::new(Mutex::new(false)),
+                capabilities: None,
             }
         }
     }
@@ -566,6 +581,12 @@ pub mod testing {
                 description: format!("ble:{}", address.to_ascii_uppercase()),
                 ..MemoryLink::default()
             }
+        }
+
+        /// A memory pair whose board advertises `capabilities`.
+        pub fn with_capabilities(mut self, capabilities: u32) -> MemoryLink {
+            self.capabilities = Some(capabilities);
+            self
         }
 
         /// Build the `Link` the session opens.
@@ -753,6 +774,10 @@ pub mod testing {
     impl LinkReader for MemoryReader {
         fn side_channel(&mut self, events: Sender<LinkEvent>) {
             self.events = Some(events);
+        }
+
+        fn board_capabilities(&self) -> Option<u32> {
+            self.link.capabilities
         }
 
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {

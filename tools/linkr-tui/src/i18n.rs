@@ -458,6 +458,36 @@ pub struct Strings {
     /// over. A silent drop reads as success, which for `reboot` is the worst
     /// possible lie.
     pub not_connected: &'static str,
+    /// The top bar's badge when this session owns the shared console.
+    pub control_owned: &'static str,
+    /// The top bar's badge when another session owns it.
+    pub control_readonly: &'static str,
+    /// The top bar's badge when nobody owns it.
+    pub control_available: &'static str,
+    /// The notice after asking for the console.
+    pub control_requested: &'static str,
+    /// The notice after giving the console up.
+    pub control_released: &'static str,
+    /// The notice when another session took the console from this one.
+    pub control_taken: &'static str,
+    /// The notice when typing could not take an idle console from an active
+    /// typist.
+    pub control_busy: &'static str,
+    /// The notice when the bridge refused an ownership command; the reason
+    /// follows.
+    pub control_refused: &'static str,
+    /// The notice when releasing or handing over without control.
+    pub control_not_owner: &'static str,
+    /// The notice when there is no earlier controller to hand back to.
+    pub control_no_handover: &'static str,
+    /// The notice before handing the console to another session; the number
+    /// follows.
+    pub control_handover: &'static str,
+    /// The notice on a board that does not arbitrate ownership.
+    pub control_unsupported: &'static str,
+    /// The notice when a control command had to wait for the bridge's answer
+    /// to a question already in flight.
+    pub control_wait: &'static str,
 
     // --- the switches ------------------------------------------------------
     /// Prefix of the notice raised when the interface language changes.
@@ -675,6 +705,19 @@ const ZH: Strings = Strings {
     auto_reconnect_attempt: "自动重连尝试",
     auto_reconnect_gave_up: "自动重连 6 次后失败；请按“重新连接”再试",
     not_connected: "未连接——没有发送任何内容。",
+    control_owned: "控制中",
+    control_readonly: "只读",
+    control_available: "无人控制",
+    control_requested: "正在申请控制…",
+    control_released: "已释放控制。",
+    control_taken: "其他会话已接管控制；输入时会在对方空闲后自动申请。",
+    control_busy: "对方正在输入，未发送；Ctrl+P →「申请控制」可立即接管。",
+    control_refused: "控制权操作被拒绝：",
+    control_not_owner: "当前会话没有控制权。",
+    control_no_handover: "没有记录到可交接的上一个控制方。",
+    control_handover: "正在把控制权交接给会话 #",
+    control_unsupported: "这块板子的固件不支持控制权仲裁。",
+    control_wait: "桥接板还在回答另一个查询，请稍后再试。",
     language_switched_prefix: "界面语言",
     language_zh: "中文",
     language_en: "English",
@@ -891,6 +934,19 @@ const EN: Strings = Strings {
     auto_reconnect_gave_up:
         "automatic reconnect failed after 6 attempts; press Reconnect to try again",
     not_connected: "Not connected — nothing was sent.",
+    control_owned: "In control",
+    control_readonly: "Read only",
+    control_available: "No controller",
+    control_requested: "Requesting console control…",
+    control_released: "Console control released.",
+    control_taken: "Another session took the console; typing asks for control once it is idle.",
+    control_busy: "The other session is typing, so nothing was sent; use Ctrl+P → Take control to preempt.",
+    control_refused: "Console control was refused: ",
+    control_not_owner: "This session does not hold the console.",
+    control_no_handover: "No earlier controller is known, so there is nobody to hand back to.",
+    control_handover: "Handing the console to session #",
+    control_unsupported: "This board's firmware does not arbitrate console control.",
+    control_wait: "The bridge is still answering another question; try again in a moment.",
     language_switched_prefix: "Interface language",
     language_zh: "中文",
     language_en: "English",

@@ -508,7 +508,7 @@ enum Frame {
 /// kind of event would describe the plumbing instead of the link. `outbound` is
 /// the one that carries commands in; the rest carry bytes and words out.
 struct Outbox {
-    ready: Sender<io::Result<String>>,
+    ready: Sender<io::Result<(String, Option<u32>)>>,
     inbound: Sender<Option<Vec<u8>>>,
     outbound: tokio::sync::mpsc::Receiver<Frame>,
     management: Sender<Vec<u8>>,
@@ -589,7 +589,7 @@ impl Link for BleLink {
         // stream that had to stop — ride beside the bytes rather than through
         // them, for the same reason management answers do.
         let (notice_tx, notice_rx) = mpsc::channel::<String>();
-        let (ready_tx, ready_rx) = mpsc::channel::<io::Result<String>>();
+        let (ready_tx, ready_rx) = mpsc::channel::<io::Result<(String, Option<u32>)>>();
         let (to_radio_tx, to_radio_rx) = tokio::sync::mpsc::channel::<Frame>(WRITE_BACKLOG);
         // What the board carries, shared between the reactor that finds out
         // and the writer that has to answer for it. See [`BleWriter`].
@@ -641,9 +641,10 @@ impl Link for BleLink {
                 ),
             )),
             Ok(Err(why)) => Err(why),
-            Ok(Ok(device_id)) => Ok((
+            Ok(Ok((device_id, capabilities))) => Ok((
                 Box::new(BleReader {
                     device_id,
+                    capabilities,
                     inbound: inbound_rx,
                     management: Some(management_rx),
                     notices: Some(notice_rx),
@@ -806,7 +807,7 @@ fn radio(
             .map(|properties| properties.address.to_string())
             .unwrap_or_default();
         let device_id = connection_identifier(&peripheral.id().to_string(), &address);
-        if ready.send(Ok(device_id)).is_err() {
+        if ready.send(Ok((device_id, wiring.capabilities))).is_err() {
             // The caller gave up (or went away) while this dial was still
             // working, so there is no reader for the bytes below and a link
             // left open is a radio the next dial has to fight for. Hanging it
@@ -1382,6 +1383,8 @@ struct ReliableState {
 /// What [`wire`] had to say about the link beyond "it is up".
 struct Wiring {
     uart: Uart,
+    /// The Management capability word, when the board advertised one.
+    capabilities: Option<u32>,
 }
 
 /// Discover the service and subscribe to the characteristic that carries the
@@ -1432,13 +1435,18 @@ async fn wire(peripheral: &Peripheral) -> Result<Wiring, String> {
     }
 
     let mut uart = Uart::Nus;
-    if let Some(state) = reliable_state_of(peripheral, has_management, &characteristics).await {
-        if let Some(out) = characteristics.iter().find(|c| c.uuid == RELIABLE_TX) {
-            if retry_busy(|| async { peripheral.subscribe(out).await })
-                .await
-                .is_ok()
-            {
-                uart = Uart::Reliable(state);
+    // The capability word, read once: the transport and the session features
+    // both come from it, and a second read could disagree with the first.
+    let protocol = protocol_info_of(peripheral, has_management, &characteristics).await;
+    if let Some(info) = protocol {
+        if let Some(state) = reliable_state_of(peripheral, info, &characteristics).await {
+            if let Some(out) = characteristics.iter().find(|c| c.uuid == RELIABLE_TX) {
+                if retry_busy(|| async { peripheral.subscribe(out).await })
+                    .await
+                    .is_ok()
+                {
+                    uart = Uart::Reliable(state);
+                }
             }
         }
     }
@@ -1475,7 +1483,31 @@ async fn wire(peripheral: &Peripheral) -> Result<Wiring, String> {
             .await
             .map_err(|why| format!("the management channel could not be subscribed to: {why}"))?;
     }
-    Ok(Wiring { uart })
+    Ok(Wiring {
+        uart,
+        capabilities: protocol.map(|info| info.capabilities),
+    })
+}
+
+/// Read the Management protocol word, when the board has one.
+///
+/// This is what says which features the bridge offers — the Reliable UART
+/// service and console ownership arbitration — so it is read before either is
+/// used rather than assumed. A board without the characteristic, or with a word
+/// this client cannot parse, keeps the historical NUS-only behaviour.
+async fn protocol_info_of(
+    peripheral: &Peripheral,
+    has_management: bool,
+    characteristics: &std::collections::BTreeSet<btleplug::api::Characteristic>,
+) -> Option<crate::protocol::ProtocolInfo> {
+    if !has_management {
+        return None;
+    }
+    let protocol = characteristics.iter().find(|c| c.uuid == MGMT_PROTOCOL)?;
+    let value = retry_busy(|| async { peripheral.read(protocol).await })
+        .await
+        .ok()?;
+    crate::protocol::parse_protocol_info(&value)
 }
 
 /// Whether the board offers the Reliable UART channel, and where its two
@@ -1489,17 +1521,9 @@ async fn wire(peripheral: &Peripheral) -> Result<Wiring, String> {
 /// old way rather than a link to refuse.
 async fn reliable_state_of(
     peripheral: &Peripheral,
-    has_management: bool,
+    info: crate::protocol::ProtocolInfo,
     characteristics: &std::collections::BTreeSet<btleplug::api::Characteristic>,
 ) -> Option<ReliableState> {
-    if !has_management {
-        return None;
-    }
-    let protocol = characteristics.iter().find(|c| c.uuid == MGMT_PROTOCOL)?;
-    let value = retry_busy(|| async { peripheral.read(protocol).await })
-        .await
-        .ok()?;
-    let info = crate::protocol::parse_protocol_info(&value)?;
     if info.capabilities & crate::protocol::MGMT_CAP_RELIABLE_UART == 0 {
         return None;
     }
@@ -1899,6 +1923,8 @@ async fn carry(
 /// Bytes from the device, in order.
 struct BleReader {
     device_id: String,
+    /// The Management capability word the link read at wiring time, if any.
+    capabilities: Option<u32>,
     inbound: Receiver<Option<Vec<u8>>>,
     /// Responses from the bridge's management channel, until [`Self::
     /// side_channel`] takes them over. `Option` because that happens exactly
@@ -1916,6 +1942,10 @@ struct BleReader {
 impl LinkReader for BleReader {
     fn ble_device_id(&self) -> Option<String> {
         Some(self.device_id.clone())
+    }
+
+    fn board_capabilities(&self) -> Option<u32> {
+        self.capabilities
     }
 
     /// Management responses are not target output, so they leave by the side
@@ -2425,6 +2455,7 @@ mod tests {
         let (tx, rx) = mpsc::channel::<Option<Vec<u8>>>();
         let mut reader = BleReader {
             device_id: "EE:C7:42:34:48:CF".into(),
+            capabilities: None,
             inbound: rx,
             management: None,
             notices: None,
@@ -2451,6 +2482,7 @@ mod tests {
         let (tx, rx) = mpsc::channel::<Option<Vec<u8>>>();
         let mut reader = BleReader {
             device_id: "EE:C7:42:34:48:CF".into(),
+            capabilities: None,
             inbound: rx,
             management: None,
             notices: None,
