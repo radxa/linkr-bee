@@ -392,18 +392,29 @@ impl Link for LanLink {
         let (outbound_tx, outbound_rx) = mpsc::channel::<Outbound>();
         let (ready_tx, ready_rx) = mpsc::channel::<io::Result<()>>();
         let (to_socket_tx, to_socket_rx) = tokio::sync::mpsc::channel::<Outbound>(UPLINK_MESSAGES);
+        // Ownership commands get their own reactor queue. Sharing the target
+        // queue would put a Release behind up to eight seconds of paced paste,
+        // and a hand-over that late is a hand-over the user has already given
+        // up on.
+        let (control_tx, control_rx) = tokio::sync::mpsc::channel::<String>(UPLINK_MESSAGES);
 
         let url = normalize_url(&host);
         let token = self.token.clone();
         thread::spawn(move || {
-            serve(&url, token, ready_tx, inbound_tx, to_socket_rx);
+            serve(&url, token, ready_tx, inbound_tx, to_socket_rx, control_rx);
         });
         // The interface's writer is synchronous and sits outside every runtime,
         // so the hand-off to the reactor gets a thread of its own: this is the
         // one place `blocking_send` is legal.
         thread::spawn(move || {
-            while let Ok(bytes) = outbound_rx.recv() {
-                if to_socket_tx.blocking_send(bytes).is_err() {
+            while let Ok(message) = outbound_rx.recv() {
+                let sent = match message {
+                    Outbound::Bytes(bytes) => {
+                        to_socket_tx.blocking_send(Outbound::Bytes(bytes)).is_ok()
+                    }
+                    Outbound::Control(command) => control_tx.blocking_send(command).is_ok(),
+                };
+                if !sent {
                     break;
                 }
             }
@@ -506,6 +517,7 @@ fn serve(
     ready: Sender<io::Result<()>>,
     inbound: Sender<Inbound>,
     outbound: tokio::sync::mpsc::Receiver<Outbound>,
+    control: tokio::sync::mpsc::Receiver<String>,
 ) {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -552,7 +564,7 @@ fn serve(
             // the connection, instead of carrying a link whose reader has gone.
             return;
         }
-        carry(socket, &inbound, outbound).await;
+        carry(socket, &inbound, outbound, control).await;
     });
     drop(runtime);
 }
@@ -665,11 +677,29 @@ async fn carry(
     mut socket: WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
     inbound: &Sender<Inbound>,
     mut outbound: tokio::sync::mpsc::Receiver<Outbound>,
+    mut control: tokio::sync::mpsc::Receiver<String>,
 ) {
     let mut pending: VecDeque<u8> = VecDeque::new();
     let mut pacer = Pacer::uplink();
 
     loop {
+        // Ownership first, whenever one is waiting: it is one small frame and
+        // the user is watching for its effect, while the pacer below may be
+        // holding seconds of paste. `try_recv` keeps this from blocking the
+        // paced send.
+        match control.try_recv() {
+            Ok(command) => {
+                if !send_control_frame(&mut socket, Some(command), inbound).await {
+                    return;
+                }
+                continue;
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                let _ = inbound.send(Inbound::End);
+                return;
+            }
+        }
         // Send first, and outside the wait below, so the socket is never
         // borrowed by two futures at once.
         let chunk_len = pending.len().min(FRAME_MAX_BYTES);
@@ -696,7 +726,12 @@ async fn carry(
                     }
                 }
                 message = outbound.recv(), if pending.len() < UPLINK_BACKLOG => {
-                    if !send_outbound(&mut socket, message, &mut pending, inbound).await {
+                    if !send_outbound(message, &mut pending, inbound) {
+                        return;
+                    }
+                }
+                command = control.recv() => {
+                    if !send_control_frame(&mut socket, command, inbound).await {
                         return;
                     }
                 }
@@ -715,7 +750,12 @@ async fn carry(
                 }
             }
             message = outbound.recv() => {
-                if !send_outbound(&mut socket, message, &mut pending, inbound).await {
+                if !send_outbound(message, &mut pending, inbound) {
+                    return;
+                }
+            }
+            command = control.recv() => {
+                if !send_control_frame(&mut socket, command, inbound).await {
                     return;
                 }
             }
@@ -723,13 +763,9 @@ async fn carry(
     }
 }
 
-/// Put one outgoing message on the socket, or hold target bytes for the pacer.
-///
-/// Ownership frames are text and go out at once: they must not wait behind a
-/// paste that the pacer is still metering, and they must never be merged into
-/// the binary stream, because the bridge would type them into the target.
-async fn send_outbound(
-    socket: &mut WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
+/// Put one outgoing target message on the socket, or hold its bytes for the
+/// pacer.
+fn send_outbound(
     message: Option<Outbound>,
     pending: &mut VecDeque<u8>,
     inbound: &Sender<Inbound>,
@@ -739,7 +775,24 @@ async fn send_outbound(
             pending.extend(bytes);
             true
         }
-        Some(Outbound::Control(command)) => {
+        // Ownership never travels on this channel; if it ever did, refusing it
+        // is better than typing `@control …` into somebody's shell prompt.
+        Some(Outbound::Control(_)) => true,
+        None => {
+            let _ = inbound.send(Inbound::End);
+            false
+        }
+    }
+}
+
+/// Send one ownership frame as a text message. `false` means the pump is over.
+async fn send_control_frame(
+    socket: &mut WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
+    command: Option<String>,
+    inbound: &Sender<Inbound>,
+) -> bool {
+    match command {
+        Some(command) => {
             if socket.send(Message::Text(command.into())).await.is_err() {
                 let _ = inbound.send(Inbound::End);
                 return false;

@@ -132,8 +132,9 @@ bluetoothctl disconnect CD:A2:F6:29:D3:12
 主机只需要可执行文件，不必安装 Rust。两种方式任选：
 
 1. 从 [Releases](https://github.com/radxa/linkr-bee/releases) 下载与本机架构匹配的
-   `linkr-bee-<target>` 压缩包（aarch64 主机用 `aarch64-unknown-linux-gnu`），
-   校验 `SHA256SUMS` 后解压，把 `bee` 放到任意目录；
+   `linkr-bee-<version>-<target>` 压缩包（aarch64 主机用 `aarch64-unknown-linux-gnu`，
+   文件名形如 `linkr-bee-1.2.0-aarch64-unknown-linux-gnu.tar.gz`），校验
+   `SHA256SUMS` 后解压，把 `bee` 放到任意目录；
 2. 在开发机上按[主机终端说明](../tools/linkr-tui/README.md)执行
    `cargo build --release -p linkr-tui`，再把 `target/release/bee` 复制到目标主机。
    目标机的 glibc 版本不能低于构建机。

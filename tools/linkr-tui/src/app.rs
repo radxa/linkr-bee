@@ -3064,8 +3064,9 @@ impl App {
                             self.control_announced = true;
                             // A free console on arrival is taken, the way the
                             // web client takes it. A console somebody is using
-                            // stays theirs until the next status says it was
-                            // released or this session asks.
+                            // stays theirs until this session asks; a keystroke
+                            // is the other path, and it asks for an idle
+                            // hand-over rather than a preemptive claim.
                             self.control_auto_claim =
                                 status.mode == crate::device::ControlMode::Available;
                         }
@@ -3912,6 +3913,13 @@ impl App {
                         }
                     }
                 }
+            }
+            // The automatic claim belongs to the connect-time answer only: a
+            // console somebody was using is theirs until this session asks.
+            // Without this, a later `available` poll would hand it over on a
+            // claim the user never made. The web client decides the same way.
+            if status.mode != crate::device::ControlMode::Available {
+                self.control_auto_claim = false;
             }
             self.control_yield = false;
             return;
@@ -10064,6 +10072,40 @@ mod tests {
     /// draining the queue as `take_control` does.
     fn take_control_contains(wire: &crate::transport::testing::MemoryLink, command: &str) -> bool {
         wire.take_control().iter().any(|sent| sent == command)
+    }
+
+    /// A session that joins while somebody else owns the console watches it,
+    /// it does not inherit an automatic claim: when the owner later releases,
+    /// taking the console is still the user's decision or the first keystroke's
+    /// idle request. The web client decides the same way.
+    #[test]
+    fn a_connect_into_a_busy_console_does_not_claim_it_later() {
+        let (mut app, wire, query) = connected_with_ownership(Lang::En);
+        wire.feed_management(answer(
+            query,
+            "OK control self=2 owner=1 mode=readonly epoch=3 peers=2\r\n",
+        ));
+        assert!(pump_until(&mut app, |app| app.control.is_some()));
+        settle_connect_reads(&mut app, &wire);
+
+        // The owner releases and the next poll says so.
+        app.control_poll_due = Some(Instant::now());
+        let poll = next_control_frame(&mut app, &wire, b"@c?");
+        wire.feed_management(answer(
+            poll,
+            "OK control self=2 owner=0 mode=available epoch=4 peers=2\r\n",
+        ));
+        assert!(pump_until(&mut app, |app| {
+            app.control
+                .is_some_and(|status| status.mode == crate::device::ControlMode::Available)
+        }));
+        for _ in 0..10 {
+            app.pump();
+        }
+        assert!(
+            !crate::transport::testing::asked_includes(&wire, b"@c claim"),
+            "the console became free; the user never asked for it"
+        );
     }
 
     /// Answer the two background reads a Bluetooth link asks after ownership,
