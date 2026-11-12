@@ -60,8 +60,9 @@ test("the demo bus fills the servo list and live values", async ({ page }) => {
 test("register read, move and servo selection hit the bus", async ({ page }) => {
   await page.goto(`${base}/servo.html?demo=servo&lang=en&theme=dark`);
   await page.locator("#tabProgram").click();
-  await page.locator("#readParams").click();
+  // Entering the page reads the selected servo automatically.
   await expect(page.locator("#paramsHint")).toContainText("Read 22 registers");
+  await expect(page.locator("#saveParams")).toBeEnabled();
   const modelCell = page
     .locator("#paramRows tr")
     .filter({ has: page.locator("td", { hasText: /^model$/ }) })
@@ -192,7 +193,6 @@ test("chart zoom, offset and manual bounds drive the view", async ({ page }) => 
 test("parameter save downloads a JSON file with the EEPROM map", async ({ page }) => {
   await page.goto(`${base}/servo.html?demo=servo&lang=en&theme=dark`);
   await page.locator("#tabProgram").click();
-  await page.locator("#readParams").click();
   await expect(page.locator("#paramsHint")).toContainText("Read 22 registers");
   const downloadPromise = page.waitForEvent("download");
   await page.locator("#saveParams").click();

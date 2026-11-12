@@ -15,7 +15,7 @@
  * presentation for screenshot runs.
  */
 
-import { parseManagementHeader } from "./management_protocol.js";
+import { parseManagementHeader } from "./management_protocol.js?v=20261112";
 import {
   BROADCAST_ID,
   INSTRUCTION,
@@ -31,7 +31,7 @@ import {
   encodeRegister,
   parseIdRange,
   toServoWord,
-} from "./servo_protocol.js";
+} from "./servo_protocol.js?v=20261112";
 
 const NUS_SERVICE = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
 const NUS_RX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
@@ -202,14 +202,23 @@ const STRINGS = {
     restoreParams: "恢复参数",
     calibrate: "中位校准",
     paramsHint: "先选择舵机。",
+    programStateOff: "未连接 Bee：先回到上面连接，再选择舵机。",
+    programStateIdle: "已连接 · 尚未选择舵机。",
+    programStateReady: "已连接 ID {id} · {model} · 已载入 {count} 项参数。",
+    paramsConnectHint: "连接 Bee 并选择舵机后，这里会自动读取参数。",
+    paramsSelectHint: "在左侧选择舵机后自动读取参数。",
     paramsIdle: "读取 ID {id} 的寄存器。",
     paramsReading: "正在读取 {count} 个寄存器…",
     paramsDone: "已读取 {count} 个寄存器。",
+    paramsPartial: "已读取 {count}/{total} 个寄存器，{failed} 个无应答。",
+    paramsNoResponse: "没有寄存器应答：检查波特率、接线和舵机供电后再试。",
     paramsFailed: "读取参数失败。",
     paramsSaved: "已保存 {count} 项参数：{name}。",
     paramsLoaded: "已载入 {name}，共 {count} 项；点“恢复参数”写回。",
     paramsLoadFailed: "参数文件无效：{message}",
     restoreConfirm: "将把 {count} 项 EEPROM 参数写回 ID {id}（先松力矩、自动解锁/加锁）。确认？",
+    restoreFamilyMismatch: "参数文件属于 {loaded} 家族，当前舵机是 {current}，已拒绝写回。",
+    writeVerifyFailed: "地址 {address} 写入后回读不一致（可能被锁存或舵机自行调整）。",
     restoreDone: "参数已写回并重新读取。",
     restoreFailed: "恢复参数失败：{message}",
     calibrateConfirm: "把当前位置 {position} 设为中位 2048 会改写偏移寄存器（旧值 {old}，可写回恢复）。确认？",
@@ -235,6 +244,9 @@ const STRINGS = {
     invalidAddress: "地址或数值无效。",
     mgmtTimeout: "Bee 没有回应管理命令。",
     controlClaimed: "已取得控制权。",
+    controlClaiming: "正在取得 Bee 的控制权…",
+    controlRefused: "无法取得控制权（owner={owner}）：另一个终端可能正占用，请关闭它的输入或点“释放”后再试。",
+    controlRefusedShort: "无法取得 Bee 控制权：请关闭其他终端上的输入或点“释放”后重新连接。",
     controlOther: "另一个客户端正在控制 Bee，写操作可能被拒绝。",
     controlFailed: "无法取得控制权：{message}",
     requestFailed: "请求失败：{message}",
@@ -381,14 +393,23 @@ const STRINGS = {
     restoreParams: "Restore params",
     calibrate: "Midpoint calibrate",
     paramsHint: "Select a servo first.",
+    programStateOff: "No Bee connected: connect above, then select a servo.",
+    programStateIdle: "Connected · no servo selected yet.",
+    programStateReady: "Connected to ID {id} · {model} · {count} parameters loaded.",
+    paramsConnectHint: "Connect a Bee and select a servo; the parameters load here automatically.",
+    paramsSelectHint: "Select a servo on the left; its parameters load automatically.",
     paramsIdle: "Read the registers of ID {id}.",
     paramsReading: "Reading {count} registers…",
     paramsDone: "Read {count} registers.",
+    paramsPartial: "Read {count}/{total} registers; {failed} did not answer.",
+    paramsNoResponse: "No register answered: check baud, wiring and servo power, then retry.",
     paramsFailed: "Reading registers failed.",
     paramsSaved: "Saved {count} parameters: {name}.",
     paramsLoaded: "Loaded {name} with {count} entries; press Restore params to write.",
     paramsLoadFailed: "Invalid parameter file: {message}",
     restoreConfirm: "Write {count} EEPROM parameters back to ID {id} (torque off, unlock/lock automatic)?",
+    restoreFamilyMismatch: "The file belongs to the {loaded} family and the servo is {current}; restore refused.",
+    writeVerifyFailed: "Read-back after writing address {address} does not match (locked or adjusted by the servo).",
     restoreDone: "Parameters restored and re-read.",
     restoreFailed: "Restore failed: {message}",
     calibrateConfirm: "Set the current position {position} as midpoint 2048 by changing the offset register (old {old}, writable back)?",
@@ -414,6 +435,9 @@ const STRINGS = {
     invalidAddress: "Invalid address or value.",
     mgmtTimeout: "The Bee did not answer the management command.",
     controlClaimed: "Console control claimed.",
+    controlClaiming: "Claiming Bee console control…",
+    controlRefused: "Could not claim control (owner={owner}): another terminal may be using it; close its input or release it and retry.",
+    controlRefusedShort: "Could not claim Bee control: close input in other terminals or release it, then reconnect.",
     controlOther: "Another client controls the Bee; writes may be refused.",
     controlFailed: "Could not claim control: {message}",
     requestFailed: "Request failed: {message}",
@@ -503,6 +527,7 @@ const state = {
   monitorTick: 0,
   scanBusy: false,
   userSelected: false,
+  paramsLoading: false,
   lastScan: null,
   auto: null,
   pendingAsync: false,
@@ -826,18 +851,30 @@ async function restoreUart() {
 }
 
 async function claimControl() {
-  if (!(state.caps & MGMT_CAP_MULTI_SESSION)) return;
+  if (!(state.caps & MGMT_CAP_MULTI_SESSION)) return true;
   try {
     const status = await managementCommand("@c?");
     const self = /self=(\d+)/.exec(status)?.[1];
     const owner = /owner=(\d+)/.exec(status)?.[1];
-    if (owner && owner !== "0" && owner !== self) {
-      log("warn", t("controlOther"));
+    /* "owner=0" still needs an explicit claim before a management mutation
+     * such as @u= is accepted; otherwise the firmware answers ERR readonly
+     * and the bus never reaches the servo baud rate. */
+    if (owner !== self) {
+      log("info", t("controlClaiming"));
       await managementCommand("@c claim");
     }
+    const verify = await managementCommand("@c?");
+    const verifySelf = /self=(\d+)/.exec(verify)?.[1];
+    const verifyOwner = /owner=(\d+)/.exec(verify)?.[1];
+    if (verifyOwner !== verifySelf) {
+      log("error", t("controlRefused", { owner: verifyOwner || "?" }));
+      return false;
+    }
     log("ok", t("controlClaimed"));
+    return true;
   } catch (error) {
-    log("warn", t("controlFailed", { message: error.message }));
+    log("error", t("controlFailed", { message: error.message }));
+    return false;
   }
 }
 
@@ -882,6 +919,7 @@ function setControlsEnabled(enabled) {
 function onConnected() {
   syncLinkText();
   setControlsEnabled(true);
+  renderParamsHint();
   $("linkHint").textContent = state.mode === "sim" ? t("uartSim") : t("linkHint");
   $("disconnectButton").hidden = false;
   $("connectButton").hidden = true;
@@ -965,7 +1003,8 @@ async function connect() {
     state.link = new ServoLink({ write: sendUart, echo: true, timeoutMs: requestTimeout() });
     onConnected();
     log("ok", t("connectedTo", { name: state.deviceName }));
-    await claimControl();
+    const owns = await claimControl();
+    if (!owns) throw new Error(t("controlRefusedShort"));
     await readUart();
     await applyUart(BUS_BAUD, { automatic: true });
     await scan();
@@ -1143,6 +1182,10 @@ async function selectServo(id) {
   updateMetrics({});
   await refreshSelected({ full: true });
   startMonitor();
+  const programVisible = !document.querySelector('[data-servo-page="program"]').hidden;
+  if (programVisible) {
+    readParameters({ auto: true }).catch((error) => log("error", error.message));
+  }
 }
 
 function renderServoList() {
@@ -1755,9 +1798,28 @@ function exportChart() {
 
 /* --- Parameter table, save/load, calibration ----------------------------- */
 
+function renderProgramState() {
+  const stateLine = $("programState");
+  if (!stateLine) return;
+  if (state.mode === "off") stateLine.textContent = t("programStateOff");
+  else if (state.selectedId == null) stateLine.textContent = t("programStateIdle");
+  else {
+    stateLine.textContent = t("programStateReady", {
+      id: String(state.selectedId).padStart(3, "0"),
+      model: modelLabel(selectedServo()),
+      count: state.registerValues.size,
+    });
+  }
+}
+
 function renderParamsHint() {
+  renderProgramState();
+  if (state.mode === "off") {
+    $("paramsHint").textContent = t("paramsConnectHint");
+    return;
+  }
   if (state.selectedId == null) {
-    $("paramsHint").textContent = t("paramsHint");
+    $("paramsHint").textContent = t("paramsSelectHint");
     return;
   }
   if (state.loadedParams) {
@@ -1835,20 +1897,32 @@ function applyLimits(minAngle, maxAngle) {
   }
 }
 
-async function readParameters() {
+async function readParameters({ auto = false } = {}) {
   const id = state.selectedId;
   if (id == null) {
-    log("warn", t("selectServo"));
+    if (!auto) log("warn", t("selectServo"));
     return;
   }
+  if (state.paramsLoading) return;
+  state.paramsLoading = true;
   $("readParams").disabled = true;
   const registers = registersFor(state.info);
   const endian = familyInfo().endian;
   $("paramsHint").textContent = t("paramsReading", { count: registers.length });
   let read = 0;
+  const failed = [];
   try {
     for (const register of registers) {
-      const data = await readRegisters(id, register.address, register.length);
+      let data = await readRegisters(id, register.address, register.length);
+      if (!data) {
+        /* One transient BLE miss should not leave a blank cell. */
+        data = await readRegisters(
+          id,
+          register.address,
+          register.length,
+          Math.max(400, requestTimeout() * 2),
+        );
+      }
       if (data) {
         const value = decodeRegister(register, data, endian);
         state.registerValues.set(register.address, value);
@@ -1864,19 +1938,38 @@ async function readParameters() {
         }
       } else {
         state.registerValues.delete(register.address);
+        failed.push(register.address);
       }
     }
     renderRegisterTable();
-    renderParamsHint();
+    renderProgramState();
     applyLimits(
       state.registerValues.get(9),
       state.registerValues.get(11),
     );
-    log("ok", t("paramsDone", { count: read }));
+    if (read === 0) {
+      $("paramsHint").textContent = t("paramsNoResponse");
+      log("error", t("paramsNoResponse"));
+    } else if (failed.length) {
+      $("paramsHint").textContent = t("paramsPartial", {
+        count: read,
+        total: registers.length,
+        failed: failed.length,
+      });
+      log("warn", t("paramsPartial", {
+        count: read,
+        total: registers.length,
+        failed: failed.length,
+      }));
+    } else {
+      renderParamsHint();
+      log("ok", t("paramsDone", { count: read }));
+    }
   } catch (error) {
     $("paramsHint").textContent = t("paramsFailed");
     log("error", t("paramsFailed"));
   } finally {
+    state.paramsLoading = false;
     $("readParams").disabled = state.mode === "off";
   }
 }
@@ -1893,7 +1986,11 @@ async function saveParameters() {
     log("warn", t("selectServo"));
     return;
   }
-  if (state.registerValues.size === 0) await readParameters();
+  if (state.registerValues.size === 0) await readParameters({ auto: true });
+  if (state.registerValues.size === 0) {
+    log("warn", t("paramsNoResponse"));
+    return;
+  }
   const servo = selectedServo();
   const registers = {};
   for (const register of registersFor(state.info)) {
@@ -1944,6 +2041,13 @@ async function restoreParameters() {
   const loaded = state.loadedParams;
   if (id == null || !loaded) {
     log("warn", t("selectServo"));
+    return;
+  }
+  if (loaded.family && loaded.family !== familyInfo().key) {
+    log("error", t("restoreFamilyMismatch", {
+      loaded: loaded.family,
+      current: familyInfo().key,
+    }));
     return;
   }
   const endian = familyInfo().endian;
@@ -2083,9 +2187,20 @@ async function writeParameter() {
     if (register) {
       const data = await readRegisters(id, register.address, register.length);
       if (data) {
-        state.registerValues.set(register.address, decodeRegister(register, data, endian));
+        const actual = decodeRegister(register, data, endian);
+        state.registerValues.set(register.address, actual);
         renderRegisterTable();
         renderParamsHint();
+        if (register.address === address && register.length === length) {
+          const expected = decodeRegister(
+            register,
+            encodeRegister(register, value, endian),
+            endian,
+          );
+          if (actual !== expected) {
+            log("warn", t("writeVerifyFailed", { address: `0x${address.toString(16)}` }));
+          }
+        }
       }
     }
   } catch (error) {
@@ -2105,7 +2220,14 @@ function setTab(name) {
     page.hidden = page.dataset.servoPage !== name;
   }
   store(TAB_KEY, name);
-  if (name === "bench") scheduleChart();
+  if (name === "bench") {
+    scheduleChart();
+  } else if (state.mode !== "off" && state.selectedId != null &&
+      state.registerValues.size === 0 && !state.paramsLoading) {
+    /* The vendor tool reads the selected servo on entering its page; do the
+     * same so the table is never an empty grid with disabled buttons. */
+    readParameters({ auto: true }).catch((error) => log("error", error.message));
+  }
 }
 
 /* --- Wiring -------------------------------------------------------------- */

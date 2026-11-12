@@ -851,16 +851,17 @@ class Session:
         )
         self_id = fields.get("self", "")
         owner = fields.get("owner", "0")
-        if owner not in ("0", self_id, ""):
-            log(f"console is owned by session {owner}; claiming control")
+        # owner=0 still needs an explicit claim: a management mutation such as
+        # @u= is refused with ERR readonly until this session owns the console.
+        if owner != self_id:
+            if owner not in ("0", ""):
+                log(f"console is owned by session {owner}; claiming control")
             try:
                 self.link.command("@c claim")
-                self.claimed = True
             except BeeError as exc:
                 log(f"could not claim console control: {exc}")
                 return
-        else:
-            self.claimed = True
+        self.claimed = True
         try:
             status = self.link.command("@c?")
         except BeeError:

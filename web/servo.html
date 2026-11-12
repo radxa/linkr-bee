@@ -24,7 +24,7 @@
     </script>
     <link rel="stylesheet" href="./style.css?v=20261024-copybg" />
     <link rel="stylesheet" href="./skin-v2.css?v=20261021-cross-browser" />
-    <link rel="stylesheet" href="./servo.css?v=20261111b" />
+    <link rel="stylesheet" href="./servo.css?v=20261112" />
   </head>
   <body class="servo-app">
     <header class="servo-topbar">
@@ -290,6 +290,7 @@
               <button id="factoryReset" class="btn btn-quiet" type="button" disabled data-i18n="factoryReset">恢复出厂</button>
               <input id="paramFile" type="file" accept=".json,application/json" hidden />
             </div>
+            <p class="field-hint" id="programState" role="status"></p>
             <p class="field-hint" id="paramsHint" data-i18n="paramsHint">先选择舵机。</p>
             <div class="servo-table-wrap">
               <table class="servo-table">
@@ -326,8 +327,8 @@
       </section>
     </main>
 
-    <script type="module" src="./native-bootstrap.js"></script>
-    <script type="module" src="./ble_transport.js"></script>
-    <script type="module" src="./servo.js"></script>
+    <script type="module" src="./native-bootstrap.js?v=20261112"></script>
+    <script type="module" src="./ble_transport.js?v=20261112"></script>
+    <script type="module" src="./servo.js?v=20261112"></script>
   </body>
 </html>
