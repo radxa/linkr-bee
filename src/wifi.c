@@ -506,6 +506,12 @@ static int linkr_settings_set(const char *name, size_t len,
         }
         return 0;
     }
+    /* Bond labels are stored as linkr/bond/<addr> and read on demand by
+     * bond_label.c; there is nothing to load at boot. Claim the subtree so
+     * settings_load() does not report every stored label as a failed set. */
+    if (settings_name_steq(name, "bond", NULL)) {
+        return 0;
+    }
     return -ENOENT;
 }
 
