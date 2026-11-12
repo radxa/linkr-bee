@@ -3320,9 +3320,17 @@ impl App {
         quiet: bool,
     ) {
         let selection = crate::transport::ble::Selection::Address(address.to_string());
-        if !self.dial_async(&crate::session::Dial::Ble(selection, None), quiet) {
+        let dial = crate::session::Dial::Ble(selection, None);
+        if !self.dial_async(&dial, quiet) {
             return;
         }
+        // The picker's answer to "which one" is the board Connect must aim at
+        // next, even if this attempt fails. A successful link remembers itself
+        // in `poll_dial`; a failed one would otherwise leave `last_dial` on
+        // the board the user just disconnected from, so pressing Connect
+        // again would silently dial the old board while the row still showed
+        // the new one.
+        self.last_dial = Some(dial);
         // Set *after* the dial, so the dial's own naming of its target cannot
         // undo it: the name the scan heard is a better answer than the address
         // the dial was aimed with, and it is not known to the dial. The name
@@ -6262,6 +6270,36 @@ mod tests {
         assert!(!app.transport_locked, "the choice is given back");
         assert_eq!(app.state, ConnectionState::Failed);
         assert!(app.last_dial.is_none(), "nothing was remembered");
+    }
+
+    /// Picking a board that then fails must not leave Connect aiming at the
+    /// board the user just left: the row shows the new pick, so pressing
+    /// Connect again has to retry it instead of silently dialling the old one.
+    #[test]
+    fn a_failed_pick_is_still_what_connect_aims_at() {
+        use crate::transport::ble::Selection;
+
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        app.last_dial = Some(Dial::Ble(
+            Selection::Address("FB:F6:91:14:33:3A".into()),
+            None,
+        ));
+        app.connect_to_board("nonsense", None, None, false);
+        assert!(
+            pump_until(&mut app, |app| app.dialing.is_none()),
+            "the dial comes back"
+        );
+        assert_eq!(app.state, ConnectionState::Failed);
+        assert!(
+            matches!(
+                app.dial_for_connect(),
+                Ok(Dial::Ble(Selection::Address(address), _)) if address == "nonsense"
+            ),
+            "Connect must aim at the board on screen, not the previous link"
+        );
     }
 
     /// Connect pressed twice dials once: the second press is answered with a
