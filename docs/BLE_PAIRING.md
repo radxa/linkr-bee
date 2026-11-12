@@ -65,6 +65,93 @@ autobaud 时作按键，GPIO2 为活动 LED）。Linkr Bee X1.0 上 GPIO3 同时
   提示；失败或 60 秒内未完成则断开，不继续访问服务。已绑定主机跳过配对，不删除已有绑定。
   自动配对弹窗及恢复流程仍需真机验证。
 
+## Linux 主机（Armbian/BlueZ）接入实例
+
+以下步骤在一台 Armbian 26.11（trixie，aarch64）主机上实际执行通过。该主机使用
+板载 SDIO 蓝牙控制器和 BlueZ 5.82，没有额外安装蓝牙驱动或图形工具。
+
+### 主机自带组件
+
+Armbian 基础镜像已经包含 `bluez`（`bluetoothd`、`bluetoothctl`）、`btmgmt` 和
+已启用的 `bluetooth.service`。先用下面几条命令确认；最小化镜像缺少时执行
+`sudo apt install bluez` 即可，`btmgmt` 随 `bluez` 一起安装。
+
+```sh
+systemctl is-active bluetooth
+bluetoothctl --version
+command -v bluetoothctl btmgmt
+```
+
+`hciconfig -a` 或 `bluetoothctl show` 应能看到一个 `UP RUNNING` 的控制器。
+主机有多个控制器时，用 `bluetoothctl select <MAC>` 固定要用的那个。
+
+### 让控制器可绑定
+
+部分发行版默认不设置 `bondable`，主机侧会表现为配对立即失败。设为可绑定并
+保持上电：
+
+```sh
+sudo btmgmt power off
+sudo btmgmt bondable on
+sudo btmgmt power on
+btmgmt info | grep "current settings"   # 应包含 bondable
+```
+
+### 用默认代理完成配对
+
+`bluetoothctl` 的 `pair` 需要在会话内注册代理，否则系统确认请求无人应答，
+BlueZ 会直接回绝。主机侧能看到 `new_auth() No agent available for request`，
+最终报 `org.bluez.Error.AuthenticationFailed` 或 `Numeric comparison failed`。
+无屏主机用 `NoInputNoOutput` 代理即可：
+
+```sh
+bluetoothctl
+[bluetooth]# agent NoInputNoOutput
+[bluetooth]# default-agent
+[bluetooth]# scan on
+# 看到 Bee 的地址后
+[bluetooth]# pair CD:A2:F6:29:D3:12
+[bluetooth]# trust CD:A2:F6:29:D3:12
+[bluetooth]# info CD:A2:F6:29:D3:12
+```
+
+`info` 中出现 `Paired: yes`、`Bonded: yes`、`Trusted: yes` 即完成。首次配对需要
+按板子的配对 GPIO 打开 30 秒授权窗口（见上一节）；已绑定后重连不再需要按键。
+如果之前删除过设备记录，先 `scan on` 重新发现再 `pair`，否则会报
+`Device ... not available`。
+
+配对完成后建议先 `disconnect`，让 CLI/TUI 自己建立连接，避免两个进程争用同一条
+LE 链路：
+
+```sh
+bluetoothctl disconnect CD:A2:F6:29:D3:12
+```
+
+### 安装 CLI/TUI
+
+主机只需要可执行文件，不必安装 Rust。两种方式任选：
+
+1. 从 [Releases](https://github.com/radxa/linkr-bee/releases) 下载与本机架构匹配的
+   `linkr-bee-<target>` 压缩包（aarch64 主机用 `aarch64-unknown-linux-gnu`），
+   校验 `SHA256SUMS` 后解压，把 `bee` 放到任意目录；
+2. 在开发机上按[主机终端说明](../tools/linkr-tui/README.md)执行
+   `cargo build --release -p linkr-tui`，再把 `target/release/bee` 复制到目标主机。
+   目标机的 glibc 版本不能低于构建机。
+
+本实例采用第二种：把同架构的 aarch64 `bee` 复制到主机的临时目录后直接运行，
+目标机没有安装 Rust 或交叉工具链。
+
+### 连接与验证
+
+```sh
+./bee --ble-address CD:A2:F6:29:D3:12 --query-info --no-terminal
+./bee --ble-address CD:A2:F6:29:D3:12        # 打开 TUI
+```
+
+`--query-info` 返回 `fw version=…` 即链路可用。未指定 `--ble-address` 时会扫描
+并列出附近设备；有多台同名 Bee 时必须用地址指定。TUI 的完整按键见
+[主机终端说明](../tools/linkr-tui/README.md)。
+
 ## 绑定丢失、存储与恢复
 
 - Bee 使用 Zephyr `BT_SETTINGS` 在 NVS 中保存绑定密钥，并在开始广播前恢复。
