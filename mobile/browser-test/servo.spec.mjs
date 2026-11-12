@@ -117,7 +117,9 @@ test("all torque off broadcasts a sync write to every scanned servo", async ({ p
 
 test("an SCS model switches range, register map and motor mode", async ({ page }) => {
   await page.goto(`${base}/servo.html?demo=servo&lang=en&theme=dark`);
-  await page.waitForFunction(() => (window.__servoBench?.servos.size || 0) === 6);
+  await page.waitForFunction(
+    () => (window.__servoBench?.servos.size || 0) === 6 && !window.__servoBench.scanBusy,
+  );
   await page.locator('.servo-list-item[data-id="6"]').click();
   await expect(page.locator("#selectedModel")).toContainText("SCS0009");
   await expect(page.locator("#positionMax")).toHaveText("/ 1023");

@@ -94,6 +94,10 @@
             </label>
             <button id="scanButton" class="btn btn-soft" type="button" data-i18n="scan">扫描</button>
           </div>
+          <div class="servo-row">
+            <button id="loopbackTest" class="btn btn-quiet servo-small" type="button" disabled data-i18n="loopbackTest">线路自检</button>
+            <span class="field-hint" data-i18n="loopbackHint">验证 J7.1 与 J7.2 是否短接：没有回环字节就查接线。</span>
+          </div>
           <p class="field-hint" id="scanHint" role="status" data-i18n="notScanned">尚未扫描。</p>
           <div id="servoList" class="servo-list" role="listbox" data-i18n-aria="servoList" aria-label="Servo list"></div>
         </article>
@@ -329,6 +333,6 @@
 
     <script type="module" src="./native-bootstrap.js?v=20261112"></script>
     <script type="module" src="./ble_transport.js?v=20261112"></script>
-    <script type="module" src="./servo.js?v=20261112b"></script>
+    <script type="module" src="./servo.js?v=20261112c"></script>
   </body>
 </html>

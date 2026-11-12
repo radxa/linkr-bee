@@ -110,7 +110,12 @@ const STRINGS = {
     uartFailed: "UART 参数修改失败：{message}",
     scanRange: "扫描 ID 范围",
     scan: "扫描",
-    notScanned: "尚未扫描。",
+    loopbackTest: "线路自检",
+    loopbackHint: "验证 J7.1 与 J7.2 是否短接：没有回环字节就查接线。",
+    loopbackOk: "回环正常：J7.1 与 J7.2 已短接，Bee 的 UART 收发通路工作。",
+    loopbackMissing: "没有收到回环字节：J7.1 与 J7.2 可能未短接，或 RX 没有接到舵机信号线。",
+    loopbackSim: "模拟总线不需要线路自检。",
+    scanNoAnswerHint: "扫描为 0：先点“线路自检”确认 TX/RX 短接，再查舵机供电、共地、波特率和 ID。",
     scanStart: "扫描 {range}…",
     scanningId: "正在探测 ID {id}…",
     scanDone: "扫描完成：{count} 个舵机。",
@@ -302,7 +307,12 @@ const STRINGS = {
     uartFailed: "UART change failed: {message}",
     scanRange: "Scan ID range",
     scan: "Scan",
-    notScanned: "Not scanned yet.",
+    loopbackTest: "Line test",
+    loopbackHint: "Checks that J7.1 and J7.2 are tied: no loopback bytes means a wiring fault.",
+    loopbackOk: "Loopback OK: J7.1 and J7.2 are tied; the Bee UART path works.",
+    loopbackMissing: "No loopback bytes: J7.1/J7.2 may not be tied, or RX is not on the servo signal wire.",
+    loopbackSim: "The simulated bus needs no line test.",
+    scanNoAnswerHint: "Nothing found: run Line test to confirm TX/RX are tied, then check servo power, ground, baud and ID.",
     scanStart: "Scanning {range}…",
     scanningId: "Probing ID {id}…",
     scanDone: "Scan finished: {count} servo(s).",
@@ -530,6 +540,7 @@ const state = {
   monitorTick: 0,
   scanBusy: false,
   userSelected: false,
+  loopback: null,
   paramsLoading: false,
   lastScan: null,
   auto: null,
@@ -692,8 +703,20 @@ async function sendUart(bytes) {
 }
 
 function onUartData(value) {
+  const bytes = toBytes(value);
+  if (state.loopback) {
+    state.loopback.received = concatBytes(state.loopback.received, bytes);
+    return;
+  }
   if (!state.link) return;
-  state.link.feed(toBytes(value));
+  state.link.feed(bytes);
+}
+
+function concatBytes(left, right) {
+  const merged = new Uint8Array(left.length + right.length);
+  merged.set(left, 0);
+  merged.set(right, left.length);
+  return merged;
 }
 
 /* Management v1 request/response on its own framed characteristic. */
@@ -895,7 +918,7 @@ function setControlsEnabled(enabled) {
   const ids = [
     "torqueOn", "torqueOff", "torqueAllOff", "refreshButton", "readParams", "saveParams",
     "restoreParams", "calibrateButton", "factoryReset", "writeButton", "moveButton",
-    "wheelButton", "scanButton", "positionSlider", "asyncExecute",
+    "wheelButton", "scanButton", "loopbackTest", "positionSlider", "asyncExecute",
     "autoSweep", "autoStep",
   ];
   for (const id of ids) {
@@ -949,6 +972,7 @@ function resetUi() {
   state.currentUart = null;
   state.uartTouched = false;
   state.pendingAsync = false;
+  state.loopback = null;
   state.chart.samples = [];
   resetChartView();
   syncLinkText();
@@ -1153,6 +1177,7 @@ async function scan() {
     state.lastScan = { range: rangeText, count: state.servos.size };
     if (state.servos.size === 0) {
       $("scanHint").textContent = t("scanNone");
+      log("warn", t("scanNoAnswerHint"));
     } else {
       $("scanHint").textContent = t("scanDone", { count: state.servos.size });
       if (!state.userSelected) {
@@ -1439,6 +1464,34 @@ async function setTorque(on, { silent = false } = {}) {
     if (!silent) log("ok", t("torqueSet", { state: on ? "on" : "off" }));
   } catch (error) {
     log("error", t("torqueFailed", { message: error.message }));
+  }
+}
+
+async function loopbackTest() {
+  if (state.mode === "sim") {
+    log("info", t("loopbackSim"));
+    return;
+  }
+  if (!state.link) {
+    log("warn", t("needConnection"));
+    return;
+  }
+  /* A PING frame is harmless if a servo is listening; with the documented
+   * half-duplex wiring its bytes come straight back into the Bee RX. */
+  const frame = Uint8Array.from([0xff, 0xff, 0x01, 0x02, 0x01, 0xfb]);
+  state.loopback = { received: new Uint8Array(0) };
+  try {
+    await sendUart(frame);
+    await sleep(400);
+    const received = state.loopback.received;
+    const matched = received.length >= frame.length &&
+      frame.every((byte, index) => received[index] === byte);
+    if (matched) log("ok", t("loopbackOk"));
+    else log("warn", t("loopbackMissing"));
+  } catch (error) {
+    log("error", t("requestFailed", { message: error.message }));
+  } finally {
+    state.loopback = null;
   }
 }
 
@@ -2256,6 +2309,9 @@ function wireUi() {
   });
   $("scanButton").addEventListener("click", () => {
     scan().catch((error) => log("error", error.message));
+  });
+  $("loopbackTest").addEventListener("click", () => {
+    loopbackTest().catch((error) => log("error", error.message));
   });
   $("baudApply").addEventListener("click", () => {
     applyUart(Number($("baudSelect").value)).catch((error) =>
