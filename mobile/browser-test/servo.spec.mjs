@@ -150,6 +150,45 @@ test("factory reset is available and re-reads the servo", async ({ page }) => {
   await expect(page.locator("#selectedId")).toHaveText("001");
 });
 
+test("chart zoom, offset and manual bounds drive the view", async ({ page }) => {
+  await page.goto(`${base}/servo.html?demo=servo&lang=en&theme=dark`);
+  await page.waitForFunction(() => (window.__servoBench?.chart.samples.length || 0) > 3);
+  await page.evaluate(() => {
+    const zoom = document.querySelector("#chartZoom");
+    zoom.value = "2";
+    zoom.dispatchEvent(new Event("input", { bubbles: true }));
+    const pan = document.querySelector("#chartPan");
+    pan.value = "40";
+    pan.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await page.locator("#chartYChannel").selectOption("position");
+  await page.locator("#chartUpper").fill("3000");
+  await page.locator("#chartLower").fill("1000");
+  await page.waitForTimeout(200);
+  const view = await page.evaluate(() => ({
+    zoom: window.__servoBench.chart.zoom,
+    pan: window.__servoBench.chart.pan,
+    channel: window.__servoBench.chart.yChannel,
+    bounds: window.__servoBench.chart.bounds,
+    pixels: document.querySelector("#chartCanvas").width,
+  }));
+  expect(view.zoom).toBe(2);
+  expect(view.pan).toBe(40);
+  expect(view.channel).toBe("position");
+  expect(view.bounds).toEqual({ min: 1000, max: 3000 });
+  expect(view.pixels).toBeGreaterThan(0);
+
+  await page.locator("#chartAuto").click();
+  await expect(page.locator("#chartUpper")).toHaveValue("");
+  await expect(page.locator("#chartLower")).toHaveValue("");
+  const reset = await page.evaluate(() => ({
+    zoom: window.__servoBench.chart.zoom,
+    pan: window.__servoBench.chart.pan,
+    bounds: window.__servoBench.chart.bounds,
+  }));
+  expect(reset).toEqual({ zoom: 1, pan: 0, bounds: null });
+});
+
 test("parameter save downloads a JSON file with the EEPROM map", async ({ page }) => {
   await page.goto(`${base}/servo.html?demo=servo&lang=en&theme=dark`);
   await page.locator("#tabProgram").click();

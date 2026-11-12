@@ -11,7 +11,8 @@ There is also a browser-only counterpart, [web/servo.html](../../web/servo.html)
 it implements the same packet layer in JavaScript and talks to the Bee with Web
 Bluetooth, so it needs neither Python nor a host. Its tabs mirror the vendor
 utility: bench (position control with normal/sync/async writes, live feedback,
-a scrolling chart with CSV export, and a step/sweep auto test) and program
+a scrolling chart with CSV export, per-channel vertical bounds, horizontal
+zoom/offset, and a step/sweep auto test) and program
 (register table, JSON parameter save/load/restore, midpoint calibration,
 factory restore). It identifies SCS0009, STS3215 and HD1910 from the model
 bytes and switches byte order, travel range, lock/offset registers, register

@@ -216,6 +216,32 @@
               </label>
               <span id="chartStats" class="field-hint"></span>
             </div>
+            <div class="servo-chart-controls">
+              <label class="servo-field" for="chartZoom">
+                <span data-i18n="chartScale">水平缩放</span>
+                <input id="chartZoom" class="servo-mini" type="range" min="0.25" max="4" step="0.25" value="1" />
+                <output id="chartZoomValue" for="chartZoom">1.0×</output>
+              </label>
+              <label class="servo-field" for="chartPan">
+                <span data-i18n="chartOffset">水平位移</span>
+                <input id="chartPan" class="servo-mini" type="range" min="0" max="100" step="5" value="0" />
+                <output id="chartPanValue" for="chartPan">0%</output>
+              </label>
+              <label class="servo-field" for="chartYChannel">
+                <span data-i18n="chartYChannel">Y 通道</span>
+                <select id="chartYChannel"></select>
+              </label>
+              <label class="servo-field" for="chartUpper">
+                <span data-i18n="chartUpper">上限</span>
+                <input id="chartUpper" type="number" step="1" placeholder="auto" />
+              </label>
+              <label class="servo-field" for="chartLower">
+                <span data-i18n="chartLower">下限</span>
+                <input id="chartLower" type="number" step="1" placeholder="auto" />
+              </label>
+              <button id="chartAuto" class="btn btn-soft servo-small" type="button" data-i18n="chartAuto">自动</button>
+            </div>
+            <p class="field-hint" data-i18n="chartBoundsHint">上下限按所选通道的单位生效；留空或上限≤下限表示自动。</p>
           </article>
 
           <article class="card servo-card">

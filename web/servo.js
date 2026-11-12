@@ -172,6 +172,13 @@ const STRINGS = {
     chartChannels: "曲线通道",
     chartExport: "导出 CSV",
     chartWindow: "时间窗",
+    chartScale: "水平缩放",
+    chartOffset: "水平位移",
+    chartYChannel: "Y 通道",
+    chartUpper: "上限",
+    chartLower: "下限",
+    chartAuto: "自动",
+    chartBoundsHint: "上下限按所选通道的单位生效；留空或上限≤下限表示自动。位移把窗口移向更早的数据。",
     chartEmpty: "开启“实时监视”后开始采样。",
     chartSamples: "{count} 个采样 · 窗口 {window} s",
     autoTitle: "自动调试",
@@ -344,6 +351,13 @@ const STRINGS = {
     chartChannels: "Chart channels",
     chartExport: "Export CSV",
     chartWindow: "Window",
+    chartScale: "Scale",
+    chartOffset: "Offset",
+    chartYChannel: "Y channel",
+    chartUpper: "Upper",
+    chartLower: "Lower",
+    chartAuto: "Auto",
+    chartBoundsHint: "The bounds use the selected channel's units; empty or upper ≤ lower means auto. Offset moves the window into older data.",
     chartEmpty: "Samples appear while live monitor is on.",
     chartSamples: "{count} samples · {window} s",
     autoTitle: "Auto test",
@@ -492,7 +506,16 @@ const state = {
   lastScan: null,
   auto: null,
   pendingAsync: false,
-  chart: { samples: [], raf: 0, channels: new Set(["position", "speed", "load"]) },
+  chart: {
+    samples: [],
+    raf: 0,
+    channels: new Set(["position", "speed", "load"]),
+    zoom: 1,
+    pan: 0,
+    yChannel: "position",
+    yLower: null,
+    yUpper: null,
+  },
   lang: initialLang,
   theme: initialTheme,
 };
@@ -527,6 +550,8 @@ function applyLanguage() {
   renderSelectedHeader();
   renderRegisterTable();
   renderLegend();
+  renderChartControls();
+  renderChart();
   updateUartHint();
   updateMetrics(state.telemetry);
   if (state.lastScan) {
@@ -885,6 +910,7 @@ function resetUi() {
   state.uartTouched = false;
   state.pendingAsync = false;
   state.chart.samples = [];
+  resetChartView();
   syncLinkText();
   setControlsEnabled(false);
   $("connectButton").hidden = false;
@@ -1106,6 +1132,7 @@ async function selectServo(id) {
   state.telemetry = {};
   state.chart.samples = [];
   $("chartEmpty").hidden = false;
+  resetChartView();
   updateChartStats();
   renderServoList();
   renderSelectedHeader();
@@ -1525,6 +1552,51 @@ function tokenColor(name) {
   return color;
 }
 
+function readChartBounds() {
+  const upperText = $("chartUpper").value.trim();
+  const lowerText = $("chartLower").value.trim();
+  if (upperText === "" || lowerText === "") return null;
+  const upper = Number(upperText);
+  const lower = Number(lowerText);
+  if (!Number.isFinite(upper) || !Number.isFinite(lower) || upper <= lower) return null;
+  return { min: lower, max: upper };
+}
+
+function updateChartControlLabels() {
+  $("chartZoomValue").textContent = `${state.chart.zoom.toFixed(2)}×`;
+  $("chartPanValue").textContent = `${state.chart.pan}%`;
+}
+
+function renderChartControls() {
+  const select = $("chartYChannel");
+  if (!select) return;
+  const current = state.chart.yChannel;
+  select.replaceChildren();
+  for (const channel of CHANNELS) {
+    const option = document.createElement("option");
+    option.value = channel.key;
+    option.textContent = t(channel.label);
+    select.append(option);
+  }
+  if (CHANNELS.some((channel) => channel.key === current)) select.value = current;
+  updateChartControlLabels();
+}
+
+function resetChartView() {
+  state.chart.zoom = 1;
+  state.chart.pan = 0;
+  state.chart.yChannel = "position";
+  state.chart.yLower = null;
+  state.chart.yUpper = null;
+  $("chartZoom").value = "1";
+  $("chartPan").value = "0";
+  $("chartYChannel").value = "position";
+  $("chartUpper").value = "";
+  $("chartLower").value = "";
+  updateChartControlLabels();
+  renderChart();
+}
+
 function renderChart() {
   const canvas = $("chartCanvas");
   if (!canvas) return;
@@ -1550,34 +1622,46 @@ function renderChart() {
     ctx.stroke();
   }
   ctx.setLineDash([]);
-  const requestedWindow = Number($("chartWindow").value) || 30;
+  const baseWindow = Number($("chartWindow").value) || 30;
   const samples = state.chart.samples;
+  const zoom = state.chart.zoom || 1;
+  const pan = state.chart.pan || 0;
+  const requested = Math.min(600, Math.max(1, baseWindow / zoom));
   if (samples.length === 0) {
     $("chartEmpty").hidden = false;
     return;
   }
   const now = samples[samples.length - 1].t;
-  /* With only a few samples the requested window would leave the trace as a
-   * sliver at the right edge, so shrink to the data for the first seconds. */
   const collected = Math.max(0.5, now - samples[0].t);
-  const windowSeconds = Math.min(requestedWindow, Math.max(2, collected * 1.05));
+  const shift = (pan / 100) * requested;
+  const end = now - shift;
+  /* With only a few samples the requested window would leave the trace as a
+   * sliver at the right edge, so shrink to the data at the live edge. */
+  const windowSeconds = pan === 0
+    ? Math.min(requested, Math.max(2, collected * 1.05))
+    : requested;
+  const start = end - windowSeconds;
   state.chart.window = windowSeconds;
-  const start = now - windowSeconds;
+  state.chart.bounds = readChartBounds();
   for (const channel of CHANNELS) {
     if (!state.chart.channels.has(channel.key)) continue;
     ctx.strokeStyle = tokenColor(channel.token) || "#8ab";
     ctx.lineWidth = 1.6;
     ctx.beginPath();
     let started = false;
-    for (const sample of samples) {
-      if (sample.t < start) continue;
-      const ratio = (sample.t - start) / windowSeconds;
-      const x = pad + ratio * (width - pad * 2);
-      const channelMax = channel.key === "position"
+    const manual = state.chart.bounds && channel.key === state.chart.yChannel;
+    const channelMin = manual ? state.chart.bounds.min : channel.min;
+    const channelMax = manual
+      ? state.chart.bounds.max
+      : channel.key === "position"
         ? (familyInfo().positionMax || channel.max)
         : channel.max;
-      const span = channelMax - channel.min;
-      const normalised = Math.max(0, Math.min(1, (sample[channel.key] - channel.min) / span));
+    const span = Math.max(1e-9, channelMax - channelMin);
+    for (const sample of samples) {
+      if (sample.t < start || sample.t > end) continue;
+      const ratio = (sample.t - start) / windowSeconds;
+      const x = pad + ratio * (width - pad * 2);
+      const normalised = Math.max(0, Math.min(1, (sample[channel.key] - channelMin) / span));
       const y = height - pad - normalised * (height - pad * 2);
       if (!started) {
         ctx.moveTo(x, y);
@@ -1590,8 +1674,17 @@ function renderChart() {
   }
   ctx.fillStyle = label;
   ctx.font = "10px ui-monospace, monospace";
-  ctx.fillText(`-${windowSeconds.toFixed(1)}s`, pad, height - 1);
-  ctx.fillText("now", width - pad - 20, height - 1);
+  ctx.textAlign = "left";
+  ctx.fillText(`-${(windowSeconds + shift).toFixed(1)}s`, pad, height - 1);
+  ctx.fillText(pan === 0 ? "now" : `-${shift.toFixed(1)}s`, width - pad - 26, height - 1);
+  if (state.chart.bounds) {
+    const channel = CHANNELS.find((item) => item.key === state.chart.yChannel);
+    ctx.fillStyle = channel ? tokenColor(channel.token) || label : label;
+    ctx.textAlign = "right";
+    ctx.fillText(String(state.chart.bounds.max), width - pad - 2, pad + 9);
+    ctx.fillText(String(state.chart.bounds.min), width - pad - 2, height - pad - 5);
+    ctx.textAlign = "left";
+  }
   $("chartEmpty").hidden = true;
   updateLegendValues();
   updateChartStats();
@@ -2111,6 +2204,28 @@ function wireUi() {
   });
   $("chartExport").addEventListener("click", exportChart);
   $("chartWindow").addEventListener("change", () => renderChart());
+  $("chartZoom").addEventListener("input", () => {
+    state.chart.zoom = Number($("chartZoom").value) || 1;
+    updateChartControlLabels();
+    renderChart();
+  });
+  $("chartPan").addEventListener("input", () => {
+    state.chart.pan = Number($("chartPan").value) || 0;
+    updateChartControlLabels();
+    renderChart();
+  });
+  $("chartYChannel").addEventListener("change", () => {
+    state.chart.yChannel = $("chartYChannel").value;
+    renderChart();
+  });
+  for (const id of ["chartUpper", "chartLower"]) {
+    $(id).addEventListener("input", () => {
+      const value = $(id).value.trim();
+      state.chart[id === "chartUpper" ? "yUpper" : "yLower"] = value === "" ? null : Number(value);
+      renderChart();
+    });
+  }
+  $("chartAuto").addEventListener("click", resetChartView);
   for (const tab of document.querySelectorAll("[data-servo-tab]")) {
     tab.addEventListener("click", () => setTab(tab.dataset.servoTab));
   }
@@ -2142,6 +2257,7 @@ function boot() {
   wireUi();
   setControlsEnabled(false);
   renderLegend();
+  renderChartControls();
   updateMetrics({});
   setTab(stored(TAB_KEY, "bench") === "program" ? "program" : "bench");
   window.__servoBench = state;

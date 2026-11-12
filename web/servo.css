@@ -783,3 +783,36 @@ body.servo-app {
     margin-left: 0;
   }
 }
+
+.servo-chart-controls {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+  gap: 8px 12px;
+  align-items: end;
+}
+
+.servo-chart-controls .servo-field {
+  gap: 3px;
+}
+
+.servo-chart-controls output {
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.servo-chart-controls .servo-small {
+  justify-self: start;
+  margin-left: 0;
+}
+
+.servo-mini {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+@media (max-width: 620px) {
+  .servo-chart-controls {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
