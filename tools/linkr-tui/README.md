@@ -44,7 +44,7 @@ and closes its eventual result; a new dial waits for that cleanup to finish.
 | Configure the model | Ctrl+S opens Endpoint / Model / API Key from any workspace or the sidebar; F2 or click Advanced reveals protocol, headers and token limits; Ctrl+S saves |
 | Resume a conversation | Ctrl+G opens conversation history; Enter or click resumes; Esc returns |
 | Start / switch a conversation | Ctrl+N / Alt+Up or Alt+Down while the assistant has focus |
-| Shared console | The top bar says `In control`, `Read only` or `No controller` when the board arbitrates ownership. Typing while read-only holds the keystrokes, asks for an idle hand-over, and sends them once it is granted; a busy owner refuses and the line is dropped. Ctrl+P → Take console control preempts, Release gives it up, and Hand over returns it to the session this one took it from |
+| Shared console | The top bar says `In control`, `Read only` or `No controller` when the board arbitrates ownership, over Bluetooth or the LAN bridge. Typing while read-only holds the keystrokes, asks for an idle hand-over, and sends them once it is granted; a busy owner refuses and the line is dropped. Ctrl+P → Take console control preempts, Release gives it up, and Hand over returns it to the session this one took it from |
 
 The message composer remains at the bottom of the assistant. Long drafts and
 URLs scroll horizontally with the caret, including CJK and combined emoji.

@@ -36,9 +36,10 @@ sending `stty`. Losing control invalidates pending client writes.
 Legacy clients that do not negotiate ownership can claim an idle console with
 their first UART write or modifying management command; an owner that has been
 quiet for the idle window is also taken over. They cannot write while another
-session is actively writing. Legacy CLI/TUI clients do not yet provide a
-dedicated ownership status/button, but their first write benefits from the same
-idle rule.
+session is actively writing. The Rust CLI/TUI negotiates ownership on both
+bearers: it asks `@c?` over Bluetooth and reads the LAN bridge's announcement,
+shows the same badge, claims a free console, and asks for an idle hand-over on
+the first keystroke. A CLI without the feature benefits from the same idle rule.
 
 ## Management Protocol
 

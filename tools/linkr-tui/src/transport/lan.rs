@@ -389,9 +389,9 @@ impl Link for LanLink {
         // out over the sync channel `spawn_writer` owns, and the dial reports
         // success or its reason once.
         let (inbound_tx, inbound_rx) = mpsc::channel::<Inbound>();
-        let (outbound_tx, outbound_rx) = mpsc::channel::<Vec<u8>>();
+        let (outbound_tx, outbound_rx) = mpsc::channel::<Outbound>();
         let (ready_tx, ready_rx) = mpsc::channel::<io::Result<()>>();
-        let (to_socket_tx, to_socket_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(UPLINK_MESSAGES);
+        let (to_socket_tx, to_socket_rx) = tokio::sync::mpsc::channel::<Outbound>(UPLINK_MESSAGES);
 
         let url = normalize_url(&host);
         let token = self.token.clone();
@@ -464,12 +464,30 @@ fn dial_budget() -> Duration {
 /// The reader half has to be told which is which, because a notice is not
 /// target output: a frame the bridge sends out of band is meant for the user's
 /// eyes, and a frame it sends as binary is meant for the emulator.
+#[derive(Debug)]
 enum Inbound {
     Data(Vec<u8>),
     Notice(String),
+    /// One console-ownership frame from the bridge. Text, like a notice, but
+    /// state rather than prose: the interface folds it into the badge instead
+    /// of showing it as a sentence.
+    Control(String),
     /// The socket ended. The reader reports end-of-stream, as `LinkReader`
     /// promises, rather than an error: a bridge that walked away is a hang-up.
     End,
+}
+
+/// One thing on its way to the socket.
+///
+/// The bridge takes target bytes as binary frames and ownership commands as
+/// text frames, so the two cannot share one queue of `Vec<u8>`: only the type
+/// says which opcode to use, and guessing from the contents would one day send
+/// a line beginning with `@control ` to the target's shell.
+enum Outbound {
+    /// Target traffic, paced into the binary stream.
+    Bytes(Vec<u8>),
+    /// One whole ownership command, sent as its own text frame.
+    Control(String),
 }
 
 /// Why a dial failed, and whether trying again could help.
@@ -487,7 +505,7 @@ fn serve(
     token: Option<String>,
     ready: Sender<io::Result<()>>,
     inbound: Sender<Inbound>,
-    outbound: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    outbound: tokio::sync::mpsc::Receiver<Outbound>,
 ) {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -646,7 +664,7 @@ fn classify(why: tokio_tungstenite::tungstenite::Error, url: &str) -> Failure {
 async fn carry(
     mut socket: WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
     inbound: &Sender<Inbound>,
-    mut outbound: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    mut outbound: tokio::sync::mpsc::Receiver<Outbound>,
 ) {
     let mut pending: VecDeque<u8> = VecDeque::new();
     let mut pacer = Pacer::uplink();
@@ -677,8 +695,8 @@ async fn carry(
                         return;
                     }
                 }
-                bytes = outbound.recv(), if pending.len() < UPLINK_BACKLOG => {
-                    if !queue(bytes, &mut pending, inbound) {
+                message = outbound.recv(), if pending.len() < UPLINK_BACKLOG => {
+                    if !send_outbound(&mut socket, message, &mut pending, inbound).await {
                         return;
                     }
                 }
@@ -696,11 +714,41 @@ async fn carry(
                     return;
                 }
             }
-            bytes = outbound.recv() => {
-                if !queue(bytes, &mut pending, inbound) {
+            message = outbound.recv() => {
+                if !send_outbound(&mut socket, message, &mut pending, inbound).await {
                     return;
                 }
             }
+        }
+    }
+}
+
+/// Put one outgoing message on the socket, or hold target bytes for the pacer.
+///
+/// Ownership frames are text and go out at once: they must not wait behind a
+/// paste that the pacer is still metering, and they must never be merged into
+/// the binary stream, because the bridge would type them into the target.
+async fn send_outbound(
+    socket: &mut WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
+    message: Option<Outbound>,
+    pending: &mut VecDeque<u8>,
+    inbound: &Sender<Inbound>,
+) -> bool {
+    match message {
+        Some(Outbound::Bytes(bytes)) => {
+            pending.extend(bytes);
+            true
+        }
+        Some(Outbound::Control(command)) => {
+            if socket.send(Message::Text(command.into())).await.is_err() {
+                let _ = inbound.send(Inbound::End);
+                return false;
+            }
+            true
+        }
+        None => {
+            let _ = inbound.send(Inbound::End);
+            false
         }
     }
 }
@@ -731,23 +779,18 @@ fn absorb(
             if text.is_empty() {
                 return true;
             }
-            inbound.send(Inbound::Notice(text.to_string())).is_ok()
+            // The bridge's ownership answers are the one text frame that is
+            // state rather than prose. Anything else is a notice, exactly as
+            // before.
+            let text = text.to_string();
+            let trimmed = text.trim_start();
+            if trimmed.starts_with("OK control ") || trimmed.starts_with("ERR control=") {
+                inbound.send(Inbound::Control(text)).is_ok()
+            } else {
+                inbound.send(Inbound::Notice(text)).is_ok()
+            }
         }
         Some(Ok(_)) => true,
-    }
-}
-
-/// Buffer bytes to send. `false` means the interface closed the link.
-fn queue(bytes: Option<Vec<u8>>, pending: &mut VecDeque<u8>, inbound: &Sender<Inbound>) -> bool {
-    match bytes {
-        Some(bytes) => {
-            pending.extend(bytes);
-            true
-        }
-        None => {
-            let _ = inbound.send(Inbound::End);
-            false
-        }
     }
 }
 
@@ -778,6 +821,14 @@ impl LinkReader for LanReader {
                         }
                     }
                 }
+                Ok(Inbound::Control(text)) => {
+                    if let Some(notices) = &self.notices {
+                        if notices.send(LinkEvent::Control(text)).is_err() {
+                            self.done = true;
+                            return Ok(0);
+                        }
+                    }
+                }
                 Ok(Inbound::End) | Err(_) => {
                     self.done = true;
                     return Ok(0);
@@ -798,13 +849,13 @@ impl LinkReader for LanReader {
 
 /// Bytes towards the bridge.
 struct LanWriter {
-    outbound: Sender<Vec<u8>>,
+    outbound: Sender<Outbound>,
 }
 
 impl LinkWriter for LanWriter {
     fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
         self.outbound
-            .send(buf.to_vec())
+            .send(Outbound::Bytes(buf.to_vec()))
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "the LAN link is no longer up"))
     }
 
@@ -812,6 +863,12 @@ impl LinkWriter for LanWriter {
         // Nothing is buffered here: the pacer holds bytes on the reactor side,
         // and claiming otherwise would let a caller believe it had pushed them.
         Ok(())
+    }
+
+    fn write_control(&mut self, command: &str) -> io::Result<()> {
+        self.outbound
+            .send(Outbound::Control(command.to_string()))
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "the LAN link is no longer up"))
     }
 }
 
@@ -852,6 +909,38 @@ mod tests {
         assert!(validate_token("0123456789abcdef0123456789abcdeff").is_err());
         assert!(validate_token("").is_err());
         assert!(validate_token("0123456789abcdef0123456789abcdeg").is_err());
+    }
+
+    /// Ownership frames are state; every other text frame is still a notice.
+    /// Folding `OK control …` into prose would leave the badge blind on LAN,
+    /// and treating a notice as state would dress a WiFi event up as a claim.
+    #[test]
+    fn ownership_text_is_state_and_other_text_is_a_notice() {
+        let (inbound, received) = mpsc::channel();
+        let frame = |text: &str| Some(Ok(Message::Text(text.into())));
+
+        assert!(absorb(
+            frame("OK control self=1 owner=0 mode=available epoch=1 peers=1\r\n"),
+            &inbound
+        ));
+        assert!(absorb(
+            frame("@event wifi operation=0 phase=off result=0\r\n"),
+            &inbound
+        ));
+        assert!(absorb(frame("ERR control=busy\r\n"), &inbound));
+
+        match received.try_recv() {
+            Ok(Inbound::Control(text)) => assert!(text.starts_with("OK control ")),
+            other => panic!("a status was not routed as control: {other:?}"),
+        }
+        match received.try_recv() {
+            Ok(Inbound::Notice(text)) => assert!(text.starts_with("@event wifi")),
+            other => panic!("prose was not routed as a notice: {other:?}"),
+        }
+        match received.try_recv() {
+            Ok(Inbound::Control(text)) => assert_eq!(text.trim(), "ERR control=busy"),
+            other => panic!("a refusal was not routed as control: {other:?}"),
+        }
     }
 
     /// The dialogue is the firmware's, frame for frame. Asserted against the

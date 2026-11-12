@@ -285,6 +285,9 @@ impl Session {
                 // answers about itself into it would make the top bar drift
                 // every time somebody asked for the firmware version.
                 LinkEvent::Management(_) => {}
+                // The LAN bridge's ownership answer is about the bridge, like
+                // a management reply, so it is not target traffic either.
+                LinkEvent::Control(_) => {}
                 LinkEvent::Closed(reason) => {
                     ended = true;
                     // A clean end is a hang-up; anything else is a failure.
@@ -339,6 +342,15 @@ impl Session {
             return false;
         };
         handle.send_management(frame)
+    }
+
+    /// Send one ownership command in the bearer's own spelling. `false` means
+    /// there is no link to ask over.
+    pub fn send_control(&mut self, command: String) -> bool {
+        let Some(handle) = &self.handle else {
+            return false;
+        };
+        handle.send_control(command)
     }
 }
 

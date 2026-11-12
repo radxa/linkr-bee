@@ -822,6 +822,13 @@ pub struct App {
     /// A release or hand-over is out, so losing control is what was asked for
     /// and must not be announced as another session seizing it.
     pub control_yield: bool,
+    /// The LAN bridge has announced ownership, by sending its first
+    /// `OK control …` frame after authentication.
+    ///
+    /// The socket has no capability word, so this announcement is the feature
+    /// flag: an old bridge never sends it and the TUI never probes with a
+    /// command it would not understand.
+    pub control_announced: bool,
     /// When a delayed removal is due to be read back; see [`App::pump`].
     pub bond_refresh_due: Option<Instant>,
     /// Whether the label command in flight is the automatic "this host has no
@@ -1071,6 +1078,7 @@ impl Default for App {
             control_poll_due: None,
             control_handover: None,
             control_yield: false,
+            control_announced: false,
             bond_refresh_due: None,
             bond_self_write: false,
             bond_mutation_pending: false,
@@ -3045,6 +3053,25 @@ impl App {
                         }
                     }
                 }
+                // The LAN bridge's ownership frame. The first one after
+                // authentication is the feature announcement: an old bridge
+                // sends none, and this client never probes one with a command
+                // it would reject.
+                LinkEvent::Control(text) => {
+                    self.trace.rx_reply(&crate::lan_token_store::redact(&text));
+                    if !self.control_announced {
+                        if let Some(status) = crate::device::parse_control_status(&text) {
+                            self.control_announced = true;
+                            // A free console on arrival is taken, the way the
+                            // web client takes it. A console somebody is using
+                            // stays theirs until the next status says it was
+                            // released or this session asks.
+                            self.control_auto_claim =
+                                status.mode == crate::device::ControlMode::Available;
+                        }
+                    }
+                    self.apply_control_text(&text);
+                }
                 // A link coming up or going down is a new console. A write
                 // still waiting on the board is dropped with the link
                 // it belonged to — the record holds a password, and a board
@@ -3138,14 +3165,33 @@ impl App {
             // Ownership comes first: whether this session may type is the
             // answer every later action depends on. A board without the
             // capability keeps `None`, which means "do not gate input".
-            self.control = None;
-            self.control_handover = None;
-            self.control_yield = false;
-            self.control_claim_in_flight = false;
-            self.held_input.clear();
-            self.control_poll_due = None;
-            self.control_auto_claim = false;
+            //
+            // A LAN link is the exception: its first ownership frame may have
+            // arrived on this same pump, before this edge was noticed, so the
+            // state it carried is already this link's answer.
+            if self.transport != Transport::Lan {
+                self.control = None;
+                self.control_announced = false;
+                self.control_handover = None;
+                self.control_yield = false;
+                self.control_claim_in_flight = false;
+                self.held_input.clear();
+                self.control_poll_due = None;
+                self.control_auto_claim = false;
+            }
             self.control_read_pending = self.ble_connected() && self.supports_control();
+            // A LAN bridge announces ownership as a text frame, which may have
+            // arrived on this pump before the state moved to connected. The
+            // claim it asks for is sent now that there is a link to send it
+            // over.
+            if self.transport == Transport::Lan
+                && std::mem::take(&mut self.control_auto_claim)
+                && self
+                    .control
+                    .is_some_and(|status| status.mode == crate::device::ControlMode::Available)
+            {
+                let _ = self.request_control("claim");
+            }
             self.ble_name_read_pending = self.ble_connected();
             self.lan_token_read_pending = self.ble_connected();
             self.bonds_read_pending = self.ble_connected() && self.view == View::Network;
@@ -3195,6 +3241,7 @@ impl App {
             self.control_poll_due = None;
             self.control_handover = None;
             self.control_yield = false;
+            self.control_announced = false;
             self.ble_name_write_pending = false;
             self.ble_name_read_pending = false;
             self.lan_token_read_pending = false;
@@ -3581,10 +3628,15 @@ impl App {
 
     /// Whether the open board arbitrates console ownership.
     ///
-    /// Capability bit 7 is the answer, and an absent capability word is old
-    /// firmware: both mean this client keeps the historical single-session
-    /// behaviour rather than inventing a control badge from nothing.
+    /// Bluetooth answers with capability bit 7; the LAN socket has no
+    /// capability word and announces itself by sending `OK control …` once
+    /// after authentication. An absent answer from either means old firmware:
+    /// this client keeps the historical single-session behaviour rather than
+    /// inventing a control badge from nothing.
     pub fn supports_control(&self) -> bool {
+        if self.transport == Transport::Lan {
+            return self.control_announced;
+        }
         self.session
             .capabilities()
             .is_some_and(|caps| caps & crate::protocol::MGMT_CAP_MULTI_SESSION != 0)
@@ -3612,16 +3664,14 @@ impl App {
 
     /// Send one ownership command, quiet: the caller decides what to say.
     ///
-    /// Ownership is asked of the bridge, not the target, so it rides the
-    /// management channel like every other control. The question in flight is
+    /// Ownership is asked of the bridge, not the target. Bluetooth spells it
+    /// `@c …` inside a management frame; the LAN socket spells it `@control …`
+    /// in a text frame. Both reach the same arbiter, and the frame in flight is
     /// replaced on purpose — a hand-over that waited behind a slow `@i?` would
     /// land long after the keystroke that asked for it.
     fn send_control(&mut self, action: &str) -> Result<(), String> {
         if !self.connected() {
             return Err(self.strings().not_connected.to_string());
-        }
-        if !self.ble_connected() {
-            return Err(self.strings().diag_no_ble.to_string());
         }
         if !self.supports_control() {
             return Err(self.strings().control_unsupported.to_string());
@@ -3632,6 +3682,18 @@ impl App {
         // typing path holds its bytes and asks on the next pump.
         if self.talk.waiting().is_some() {
             return Err(self.strings().control_wait.to_string());
+        }
+        if self.transport == Transport::Lan {
+            let command = format!("@control {action}");
+            if !self.session.send_control(command.clone()) {
+                return Err(self.strings().not_connected.to_string());
+            }
+            self.trace.tx_command(&command);
+            self.control_poll_due = None;
+            return Ok(());
+        }
+        if !self.ble_connected() {
+            return Err(self.strings().diag_no_ble.to_string());
         }
         let command = if action == "?" {
             Query::Control.command().to_string()
@@ -3787,9 +3849,13 @@ impl App {
     /// badge and settles a held keystroke, and a refusal (`ERR control=…`),
     /// which leaves the pusher read-only and says why.
     fn apply_control_reply(&mut self, reply: &Reply) {
-        let text = reply.lines.join("\n");
+        self.apply_control_text(&reply.lines.join("\n"));
+    }
+
+    /// Fold the text of one ownership answer in, whichever bearer carried it.
+    fn apply_control_text(&mut self, text: &str) {
         let s = self.strings();
-        if let Some(status) = crate::device::parse_control_status(&text) {
+        if let Some(status) = crate::device::parse_control_status(text) {
             let previous = self.control;
             // Taking the console from somebody is recorded so "hand over" can
             // give it back to that session rather than to a guess.
@@ -3838,15 +3904,19 @@ impl App {
                         }
                     } else if std::mem::take(&mut self.control_auto_claim) {
                         // A session that has just joined takes a free console,
-                        // the way the web client does.
-                        let _ = self.request_control("claim");
+                        // the way the web client does. If the link is not up
+                        // yet the claim is not lost: it is put back, and the
+                        // connect edge or the next status sends it.
+                        if self.request_control("claim").is_err() {
+                            self.control_auto_claim = true;
+                        }
                     }
                 }
             }
             self.control_yield = false;
             return;
         }
-        if let Some(reason) = crate::device::control_refusal(&text) {
+        if let Some(reason) = crate::device::control_refusal(text) {
             if let Some(mut status) = self.control {
                 if status.owner != status.self_id {
                     status.mode = crate::device::ControlMode::Readonly;
@@ -9861,6 +9931,139 @@ mod tests {
         }));
         assert!(pump_until(&mut app, |_| wire.sent_len() > 0));
         assert_eq!(wire.take_sent(), b"ls".to_vec());
+    }
+
+    /// The LAN socket has no capability word: the bridge announces ownership
+    /// by sending its status unprompted, and only then does the TUI take a
+    /// free console — with the socket's own `@control` spelling.
+    #[test]
+    fn a_lan_session_claims_a_free_console_with_control_frames() {
+        let (mut app, wire) = connected_over_lan(Lang::En);
+        assert!(!app.supports_control(), "no announcement has arrived yet");
+        wire.feed_control("OK control self=1 owner=0 mode=available epoch=1 peers=1\r\n");
+        assert!(pump_until(&mut app, |app| app.control.is_some()));
+        assert!(app.supports_control());
+        assert!(pump_until(&mut app, |_| {
+            take_control_contains(&wire, "@control claim")
+        }));
+        wire.feed_control("OK control self=1 owner=1 mode=control epoch=2 peers=1\r\n");
+        assert!(pump_until(&mut app, |app| {
+            app.control
+                .is_some_and(|status| status.mode == crate::device::ControlMode::Control)
+        }));
+        assert_eq!(
+            app.control_badge().map(|(text, _)| text),
+            Some("In control".to_string())
+        );
+    }
+
+    /// A read-only LAN session holds the first keystroke, asks with the
+    /// socket's spelling, and types the line only after the grant.
+    #[test]
+    fn a_lan_readonly_keystroke_asks_for_an_idle_hand_over() {
+        let (mut app, wire) = connected_over_lan(Lang::En);
+        wire.feed_control("OK control self=2 owner=1 mode=readonly epoch=3 peers=2\r\n");
+        assert!(pump_until(&mut app, |app| app.control.is_some()));
+
+        assert!(app.type_bytes(true, "ls"), "typing is accepted, then held");
+        assert_eq!(wire.sent_len(), 0, "nothing reached the line yet");
+        assert!(pump_until(&mut app, |_| {
+            take_control_contains(&wire, "@control claim idle")
+        }));
+        wire.feed_control("OK control self=2 owner=2 mode=control epoch=4 peers=2\r\n");
+        assert!(pump_until(&mut app, |_| wire.sent_len() > 0));
+        assert_eq!(wire.take_sent(), b"ls".to_vec(), "the held line went out");
+    }
+
+    /// The LAN spelling of a refusal is read the same way: the held line is
+    /// dropped and the reason is spoken.
+    #[test]
+    fn a_lan_busy_refusal_drops_the_held_line() {
+        let (mut app, wire) = connected_over_lan(Lang::En);
+        wire.feed_control("OK control self=2 owner=1 mode=readonly epoch=3 peers=2\r\n");
+        assert!(pump_until(&mut app, |app| app.control.is_some()));
+
+        assert!(app.type_bytes(true, "rm -rf /"));
+        assert!(pump_until(&mut app, |_| {
+            take_control_contains(&wire, "@control claim idle")
+        }));
+        wire.feed_control("ERR control=busy\r\n");
+        assert!(pump_until(&mut app, |app| {
+            !app.control_claim_in_flight && app.held_input.is_empty()
+        }));
+        for _ in 0..10 {
+            app.pump();
+        }
+        assert_eq!(wire.sent_len(), 0, "a refused line is not typed anyway");
+        assert!(
+            app.notices
+                .iter()
+                .any(|notice| notice.text == app.strings().control_busy),
+            "the refusal is spoken: {:?}",
+            app.notices
+        );
+    }
+
+    /// Releasing over LAN uses the socket's spelling and is still not reported
+    /// as somebody else seizing the console.
+    #[test]
+    fn a_lan_release_uses_the_control_frame_and_is_not_a_seizure() {
+        let (mut app, wire) = connected_over_lan(Lang::En);
+        wire.feed_control("OK control self=1 owner=1 mode=control epoch=2 peers=1\r\n");
+        assert!(pump_until(&mut app, |app| {
+            app.control
+                .is_some_and(|status| status.mode == crate::device::ControlMode::Control)
+        }));
+        app.notices.clear();
+
+        let notice = app.release_control();
+        assert_eq!(notice.level, NoticeLevel::Info);
+        assert!(pump_until(&mut app, |_| {
+            take_control_contains(&wire, "@control release")
+        }));
+        wire.feed_control("OK control self=1 owner=0 mode=available epoch=3 peers=1\r\n");
+        assert!(pump_until(&mut app, |app| {
+            app.control
+                .is_some_and(|status| status.mode == crate::device::ControlMode::Available)
+        }));
+        assert!(
+            !app.notices
+                .iter()
+                .any(|notice| notice.text == app.strings().control_taken),
+            "a deliberate release is not a seizure: {:?}",
+            app.notices
+        );
+    }
+
+    /// A LAN bridge that never announces ownership is an old one: the TUI
+    /// keeps typing straight through instead of probing for a command the
+    /// bridge would reject.
+    #[test]
+    fn an_unannounced_lan_session_is_not_gated() {
+        let (mut app, wire) = connected_over_lan(Lang::En);
+        assert!(!app.supports_control());
+        assert!(app.type_bytes(true, "echo hi"));
+        assert!(pump_until(&mut app, |_| wire.sent_len() > 0));
+        assert_eq!(wire.take_sent(), b"echo hi".to_vec());
+        assert!(wire.take_control().is_empty(), "nothing was probed for");
+    }
+
+    /// Open a LAN memory link and wait until the session reports it.
+    fn connected_over_lan(lang: Lang) -> (App, crate::transport::testing::MemoryLink) {
+        let mut app = App {
+            lang,
+            ..App::default()
+        };
+        let wire = crate::transport::testing::MemoryLink::lan();
+        app.connect(wire.link()).expect("the memory link opens");
+        assert!(pump_until(&mut app, |app| app.connected()));
+        (app, wire)
+    }
+
+    /// Whether one of the ownership commands the host sent is `command`,
+    /// draining the queue as `take_control` does.
+    fn take_control_contains(wire: &crate::transport::testing::MemoryLink, command: &str) -> bool {
+        wire.take_control().iter().any(|sent| sent == command)
     }
 
     /// Answer the two background reads a Bluetooth link asks after ownership,
