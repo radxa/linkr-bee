@@ -1812,7 +1812,8 @@ async fn carry(
                                             desynced = true;
                                             let _ = notices.send(format!(
                                                 "Reliable UART sequence gap: expected {}, got {}. \
-                                                 Output has stopped; reconnect the board.",
+                                                 Output has stopped; disconnect and reconnect \
+                                                 the board.",
                                                 expected, meta.sequence
                                             ));
                                         }
@@ -1837,9 +1838,22 @@ async fn carry(
             frame = outbound.recv() => {
                 match frame {
                     Some(Frame::Stream(bytes)) => {
-                        if let (Some(sink), Some(sequence)) =
-                            (reliable_sink.as_ref(), tx_sequence.as_mut())
-                        {
+                        if let Some(sequence) = tx_sequence.as_mut() {
+                            // The sink was found at wiring time and the
+                            // characteristic set cannot change under a live
+                            // link. If it did, writing through NUS is not a
+                            // fallback: that characteristic was never
+                            // subscribed in this mode, so the bytes would go
+                            // nowhere. Say so and stop instead of losing the
+                            // target's input one keystroke at a time.
+                            let Some(sink) = reliable_sink.as_ref() else {
+                                let _ = notices.send(
+                                    "Reliable UART: the transmit characteristic is gone; \
+                                     disconnect and reconnect the board."
+                                        .to_string(),
+                                );
+                                return;
+                            };
                             // A write is cut into frames of the board's own
                             // payload limit, each confirmable on its own. With
                             // Response is not the throughput choice it is on
