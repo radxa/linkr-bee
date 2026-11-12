@@ -514,13 +514,31 @@ async function flash({ noReset = false } = {}) {
 
     setStatus("正在重启开发板…");
     logLine("正在重启开发板…");
-    await restartBoard();
+    // The write already succeeded. A restart that cannot get the port back
+    // (USB re-enumeration, a cable pulled at the wrong moment) is not a failed
+    // flash, and saying so would invite the user to erase and write again.
+    // `sent` is the honest middle: the edge went out but no boot was read back.
+    let restart = "confirmed";
+    try {
+      restart = await restartBoard();
+    } catch (error) {
+      restart = "failed";
+      logLine(`自动重启失败：${error?.message || error}`);
+    }
     // The board is booting; hand the port back so the terminal can open it.
     await releaseConnection();
     setProgress(1);
     resetButton.disabled = false;
-    setStatus("烧录完成。设备已重启，可以打开终端连接。", "ok");
-    logLine("烧录完成，设备已重启。");
+    if (restart === "confirmed") {
+      setStatus("烧录完成。设备已重启，可以打开终端连接。", "ok");
+      logLine("烧录完成，设备已重启。");
+    } else if (restart === "sent") {
+      setStatus("烧录完成，已发送重启命令；如果设备没有启动，请点“重启设备”。");
+      logLine("烧录完成，已发送重启命令（未读回启动信息）。");
+    } else {
+      setStatus("烧录完成，但自动重启失败；请点“重启设备”后再打开终端。");
+      logLine("烧录完成；自动重启失败，请点“重启设备”。");
+    }
   } catch (error) {
     console.error(error);
     let message = String(error?.message || error).replace(/[。.\s]+$/, "");
@@ -642,7 +660,11 @@ async function restartBoard() {
   } catch {
     await pulseEnOnly();
   }
-  if (!isNativeUsb()) return;
+  if (!isNativeUsb()) {
+    // A USB-UART bridge has no console of its own to read back here; the
+    // pulse is the whole answer, and it is the same one esptool sends.
+    return "sent";
+  }
 
   // The X1.0 only has the ESP32-C3's internal pull-up on GPIO9 (R3 is DNP and
   // C2 is 100 nF), so the first edge can still be sampled low and drop the chip
@@ -657,14 +679,15 @@ async function restartBoard() {
     } catch {
       // The port can still be enumerating; retry on the next pass.
     }
-    if (banner && !/wait usb download|boot:0x0/i.test(banner)) return;
-    if (!banner && attempt > 0) return;
+    if (banner && !/wait usb download|boot:0x0/i.test(banner)) return "confirmed";
+    if (!banner && attempt > 0) return "sent";
     try {
       await pulseEnOnly();
     } catch {
-      return;
+      return "sent";
     }
   }
+  return "sent";
 }
 
 async function resetDevice() {
@@ -675,9 +698,16 @@ async function resetDevice() {
   }
   resetButton.disabled = true;
   try {
-    await restartBoard();
-    setStatus("已发送重启命令。", "ok");
-    logLine("已发送重启命令。");
+    const restart = await restartBoard();
+    if (restart === "confirmed") {
+      setStatus("设备已重启。", "ok");
+      logLine("设备已重启。");
+    } else {
+      // The edge was sent; on a bridge with no readable console there is
+      // nothing to confirm it against, so the sentence must not claim one.
+      setStatus("已发送重启命令。", "ok");
+      logLine("已发送重启命令（未读回启动信息）。");
+    }
   } catch (error) {
     setStatus(`重启失败：${error?.message || error}`, "error");
   } finally {
