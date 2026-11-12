@@ -707,6 +707,19 @@ fn parse_args(prog: &str, argv: &[String]) -> Args {
             "--query-ble-name" => args.requests.queries.push(device::Query::BleName),
             "--query-lan" => args.requests.queries.push(device::Query::Lan),
             "--query-bonds" => args.requests.queries.push(device::Query::Bonds),
+            "--query-control" => args.requests.queries.push(device::Query::Control),
+            "--control" => {
+                let raw = value("--control");
+                let Some(action) = linkr_tui::cli::ControlAction::from_name(&raw) else {
+                    fail(
+                        prog,
+                        &format!(
+                            "'--control' wants claim, idle, release or yield; '{raw}' is not one"
+                        ),
+                    )
+                };
+                args.requests.control = Some(action);
+            }
             "--rename-bond" => {
                 let raw = value("--rename-bond");
                 let (address, label) = raw.split_once('=').unwrap_or_else(|| {
@@ -1039,7 +1052,7 @@ fn capabilities(prog: &str, json: bool) -> String {
             concat!(
                 "{{\"version\":\"{}\",\"protocol\":{},",
                 "\"operations\":[\"scan\",\"query-info\",\"query-uart\",\"query-wifi\",",
-                "\"query-webdav\",\"query-ble-name\",\"query-lan\",\"query-bonds\",\"wifi-scan\",\"uart\",\"wifi\",\"wifi-off\",",
+                "\"query-webdav\",\"query-ble-name\",\"query-lan\",\"query-bonds\",\"query-control\",\"control\",\"wifi-scan\",\"uart\",\"wifi\",\"wifi-off\",",
                 "\"webdav\",\"webdav-off\",\"rename-ble\",\"reset-ble-name\",",
                 "\"rename-bond\",\"remove-bond\",",
                 "\"exec\",\"send\",\"doctor\",\"loopback-test\",\"link-state\"{}],",
@@ -1082,8 +1095,11 @@ fn capabilities(prog: &str, json: bool) -> String {
                 "scan        --scan                     list Linkr Bee boards on the air\n",
                 "read        --query-info --query-uart  ask the bridge what it is doing\n",
                 "            --query-wifi --query-webdav --query-ble-name --wifi-scan\n",
-                "            --query-lan --query-bonds\n",
+                "            --query-lan --query-bonds --query-control\n",
                 "state       --link-state               this link: live, counters, transport\n",
+                "console     --control ACTION           claim|idle|release|yield the console\n",
+                "                                       (idle takes it only when the owner\n",
+                "                                       has stopped typing)\n",
                 "configure   --uart --wifi --wifi-off   change that, then read it back\n",
                 "            --webdav --webdav-off\n",
                 "            --rename-ble NAME --reset-ble-name\n",
@@ -3510,6 +3526,8 @@ mod tests {
         // And the two local readings a one-shot caller can now ask for.
         assert!(json.contains("\"query-lan\""), "{json}");
         assert!(json.contains("\"query-bonds\""), "{json}");
+        assert!(json.contains("\"query-control\""), "{json}");
+        assert!(json.contains("\"control\""), "{json}");
         assert!(json.contains("\"rename-bond\""), "{json}");
         assert!(json.contains("\"remove-bond\""), "{json}");
         assert!(json.contains("\"link-state\""), "{json}");

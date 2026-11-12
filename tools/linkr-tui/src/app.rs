@@ -485,6 +485,11 @@ const WIFI_EVENT_FALLBACK: std::time::Duration = std::time::Duration::from_secs(
 /// it is a join.
 const WIFI_BUSY_RETRIES: u32 = 4;
 
+/// How often a session asks who owns the console. The firmware has no push
+/// event for a hand-over, so a client that stopped asking would keep painting
+/// "In control" after another session took it.
+const CONTROL_POLL: std::time::Duration = std::time::Duration::from_secs(4);
+
 /// The pause before the attempt that follows `spent` refused ones.
 ///
 /// It lengthens: the first attempt is for the second or two a join takes to
@@ -790,6 +795,44 @@ pub struct App {
     /// A link came up while the network view was open, and the paired-device
     /// list has not been read yet. It waits for a free question slot.
     pub bonds_read_pending: bool,
+    /// Which session owns the shared console, when the board arbitrates it.
+    /// `None` until `@c?` answers, or for a board without the capability —
+    /// both mean "keep the historical behaviour and let typing through".
+    pub control: Option<crate::device::ControlStatus>,
+    /// A link came up and ownership has not been asked about yet. It goes
+    /// first, before the name and the token: whether this session may type is
+    /// the answer every later action depends on.
+    pub control_read_pending: bool,
+    /// The next ownership answer may take the console when nobody owns it.
+    /// Set for the connect-time query only, so a session that deliberately
+    /// released control is not handed it back by the next poll.
+    pub control_auto_claim: bool,
+    /// Bytes typed while read-only, waiting for the idle claim that would let
+    /// them through.
+    pub held_input: Vec<u8>,
+    /// An idle claim is in flight for [`App::held_input`].
+    pub control_claim_in_flight: bool,
+    /// When the next quiet ownership poll is due. Polling is how this session
+    /// notices that another client took the console, which the firmware has no
+    /// push event for.
+    pub control_poll_due: Option<Instant>,
+    /// The session this one took the console from, if any, so "hand over" has
+    /// somewhere to hand it back to.
+    pub control_handover: Option<u32>,
+    /// A release or hand-over is out, so losing control is what was asked for
+    /// and must not be announced as another session seizing it.
+    pub control_yield: bool,
+    /// The LAN bridge has announced ownership, by sending its first
+    /// `OK control …` frame after authentication.
+    ///
+    /// The socket has no capability word, so this announcement is the feature
+    /// flag: an old bridge never sends it and the TUI never probes with a
+    /// command it would not understand.
+    pub control_announced: bool,
+    /// Why the last ownership command was refused (`busy`, `not_owner`, …).
+    /// Kept for callers without a toast stack — a script must be able to say
+    /// what the bridge said instead of printing a mode that did not move.
+    pub control_error: Option<String>,
     /// When a delayed removal is due to be read back; see [`App::pump`].
     pub bond_refresh_due: Option<Instant>,
     /// Whether the label command in flight is the automatic "this host has no
@@ -1031,6 +1074,16 @@ impl Default for App {
             scan_retry: None,
             bond_label_queue: VecDeque::new(),
             bonds_read_pending: false,
+            control: None,
+            control_read_pending: false,
+            control_auto_claim: false,
+            held_input: Vec::new(),
+            control_claim_in_flight: false,
+            control_poll_due: None,
+            control_handover: None,
+            control_yield: false,
+            control_announced: false,
+            control_error: None,
             bond_refresh_due: None,
             bond_self_write: false,
             bond_mutation_pending: false,
@@ -3005,6 +3058,26 @@ impl App {
                         }
                     }
                 }
+                // The LAN bridge's ownership frame. The first one after
+                // authentication is the feature announcement: an old bridge
+                // sends none, and this client never probes one with a command
+                // it would reject.
+                LinkEvent::Control(text) => {
+                    self.trace.rx_reply(&crate::lan_token_store::redact(&text));
+                    if !self.control_announced {
+                        if let Some(status) = crate::device::parse_control_status(&text) {
+                            self.control_announced = true;
+                            // A free console on arrival is taken, the way the
+                            // web client takes it. A console somebody is using
+                            // stays theirs until this session asks; a keystroke
+                            // is the other path, and it asks for an idle
+                            // hand-over rather than a preemptive claim.
+                            self.control_auto_claim =
+                                status.mode == crate::device::ControlMode::Available;
+                        }
+                    }
+                    self.apply_control_text(&text);
+                }
                 // A link coming up or going down is a new console. A write
                 // still waiting on the board is dropped with the link
                 // it belonged to — the record holds a password, and a board
@@ -3095,6 +3168,37 @@ impl App {
             // showing a name the board no longer has. The name goes first and
             // the token follows it, because only one question is in flight at
             // a time.
+            // Ownership comes first: whether this session may type is the
+            // answer every later action depends on. A board without the
+            // capability keeps `None`, which means "do not gate input".
+            //
+            // A LAN link is the exception: its first ownership frame may have
+            // arrived on this same pump, before this edge was noticed, so the
+            // state it carried is already this link's answer.
+            if self.transport != Transport::Lan {
+                self.control = None;
+                self.control_announced = false;
+                self.control_handover = None;
+                self.control_yield = false;
+                self.control_claim_in_flight = false;
+                self.held_input.clear();
+                self.control_poll_due = None;
+                self.control_auto_claim = false;
+                self.control_error = None;
+            }
+            self.control_read_pending = self.ble_connected() && self.supports_control();
+            // A LAN bridge announces ownership as a text frame, which may have
+            // arrived on this pump before the state moved to connected. The
+            // claim it asks for is sent now that there is a link to send it
+            // over.
+            if self.transport == Transport::Lan
+                && std::mem::take(&mut self.control_auto_claim)
+                && self
+                    .control
+                    .is_some_and(|status| status.mode == crate::device::ControlMode::Available)
+            {
+                let _ = self.request_control("claim");
+            }
             self.ble_name_read_pending = self.ble_connected();
             self.lan_token_read_pending = self.ble_connected();
             self.bonds_read_pending = self.ble_connected() && self.view == View::Network;
@@ -3136,6 +3240,16 @@ impl App {
             }
             self.talk.reset();
             self.management.reset();
+            self.control = None;
+            self.control_read_pending = false;
+            self.control_auto_claim = false;
+            self.control_claim_in_flight = false;
+            self.held_input.clear();
+            self.control_poll_due = None;
+            self.control_handover = None;
+            self.control_yield = false;
+            self.control_announced = false;
+            self.control_error = None;
             self.ble_name_write_pending = false;
             self.ble_name_read_pending = false;
             self.lan_token_read_pending = false;
@@ -3149,9 +3263,16 @@ impl App {
         if !now_live && self.dialing.is_none() {
             self.signal_dbm = None;
         }
+        // A keystroke that waited for a question to finish asks now, on this
+        // pump, rather than behind the background reads — whether the console
+        // may be typed into is the more urgent question.
+        self.claim_idle_if_held();
         // Optional reads resume whenever the request slot becomes free,
         // including after a refusal, timeout, or intervening user request.
         self.ask_pending_reads();
+        // Ownership is not pushed by the firmware, so a quiet poll is how this
+        // session learns that another client took (or released) the console.
+        self.poll_control(now);
         self.rx = self.session.rx();
         self.tx = self.session.tx();
         // The same beat the counters moved on: the graph is a clock, and this
@@ -3320,9 +3441,17 @@ impl App {
         quiet: bool,
     ) {
         let selection = crate::transport::ble::Selection::Address(address.to_string());
-        if !self.dial_async(&crate::session::Dial::Ble(selection, None), quiet) {
+        let dial = crate::session::Dial::Ble(selection, None);
+        if !self.dial_async(&dial, quiet) {
             return;
         }
+        // The picker's answer to "which one" is the board Connect must aim at
+        // next, even if this attempt fails. A successful link remembers itself
+        // in `poll_dial`; a failed one would otherwise leave `last_dial` on
+        // the board the user just disconnected from, so pressing Connect
+        // again would silently dial the old board while the row still showed
+        // the new one.
+        self.last_dial = Some(dial);
         // Set *after* the dial, so the dial's own naming of its target cannot
         // undo it: the name the scan heard is a better answer than the address
         // the dial was aimed with, and it is not known to the dial. The name
@@ -3505,6 +3634,445 @@ impl App {
         self.ble_scan.reset();
     }
 
+    /// Whether the open board arbitrates console ownership.
+    ///
+    /// Bluetooth answers with capability bit 7; the LAN socket has no
+    /// capability word and announces itself by sending `OK control …` once
+    /// after authentication. An absent answer from either means old firmware:
+    /// this client keeps the historical single-session behaviour rather than
+    /// inventing a control badge from nothing.
+    pub fn supports_control(&self) -> bool {
+        if self.transport == Transport::Lan {
+            return self.control_announced;
+        }
+        self.session
+            .capabilities()
+            .is_some_and(|caps| caps & crate::protocol::MGMT_CAP_MULTI_SESSION != 0)
+    }
+
+    /// Whether typing right now would be refused for want of control.
+    pub fn control_readonly(&self) -> bool {
+        self.supports_control()
+            && self
+                .control
+                .is_some_and(|status| status.mode != crate::device::ControlMode::Control)
+    }
+
+    /// The console's mode, when the board or bridge has said what it is.
+    ///
+    /// `None` is also the answer for firmware without ownership arbitration:
+    /// the historical behaviour is to let typing through, and the callers that
+    /// gate input treat it that way.
+    pub fn control_mode(&self) -> Option<crate::device::ControlMode> {
+        self.control.map(|status| status.mode)
+    }
+
+    /// Why the last ownership command was refused, if it was.
+    pub fn control_refusal(&self) -> Option<&str> {
+        self.control_error.as_deref()
+    }
+
+    /// The top bar's ownership badge, and the mode it describes.
+    pub fn control_badge(&self) -> Option<(String, crate::device::ControlMode)> {
+        let status = self.control?;
+        let s = self.strings();
+        let text = match status.mode {
+            crate::device::ControlMode::Control => s.control_owned,
+            crate::device::ControlMode::Readonly => s.control_readonly,
+            crate::device::ControlMode::Available => s.control_available,
+        };
+        Some((text.to_string(), status.mode))
+    }
+
+    /// Send one ownership command, quiet: the caller decides what to say.
+    ///
+    /// Ownership is asked of the bridge, not the target. Bluetooth spells it
+    /// `@c …` inside a management frame; the LAN socket spells it `@control …`
+    /// in a text frame. Both reach the same arbiter, and the frame in flight is
+    /// replaced on purpose — a hand-over that waited behind a slow `@i?` would
+    /// land long after the keystroke that asked for it.
+    fn send_control(&mut self, action: &str) -> Result<(), String> {
+        if !self.connected() {
+            return Err(self.strings().not_connected.to_string());
+        }
+        if !self.supports_control() {
+            return Err(self.strings().control_unsupported.to_string());
+        }
+        // One question at a time is the protocol's rule, and a control command
+        // must not throw away the answer somebody else is waiting for — a bond
+        // write displaced this way would never finish. The caller retries; the
+        // typing path holds its bytes and asks on the next pump.
+        if self.talk.waiting().is_some() {
+            return Err(self.strings().control_wait.to_string());
+        }
+        // A refusal answers the command being sent now, not the one before it.
+        self.control_error = None;
+        if self.transport == Transport::Lan {
+            let command = format!("@control {action}");
+            if !self.session.send_control(command.clone()) {
+                return Err(self.strings().not_connected.to_string());
+            }
+            self.trace.tx_command(&command);
+            self.control_poll_due = None;
+            return Ok(());
+        }
+        if !self.ble_connected() {
+            return Err(self.strings().diag_no_ble.to_string());
+        }
+        let command = if action == "?" {
+            Query::Control.command().to_string()
+        } else {
+            format!("@c {action}")
+        };
+        let id = self.talk.ask_id(Query::Control, Instant::now());
+        let frame = match crate::protocol::encode_management_request(id, command.as_bytes()) {
+            Ok(frame) => frame,
+            Err(why) => {
+                self.talk.reset();
+                return Err(why.message(false).to_string());
+            }
+        };
+        if !self.session.send_management(frame) {
+            self.talk.reset();
+            return Err(self.strings().not_connected.to_string());
+        }
+        self.trace.tx_command(&command);
+        // The poll that was already due is overtaken by this question.
+        self.control_poll_due = None;
+        Ok(())
+    }
+
+    /// Ask the bridge for the console. `claim` preempts an active typist;
+    /// `claim idle` takes it only when the current owner has been quiet.
+    fn request_control(&mut self, action: &str) -> Result<(), String> {
+        self.send_control(action)
+    }
+
+    /// Take the console now, and say what was asked.
+    pub fn take_control(&mut self) -> Notice {
+        let s = self.strings();
+        self.control_error = None;
+        if !self.supports_control() {
+            return Notice {
+                text: s.control_unsupported.to_string(),
+                level: NoticeLevel::Warn,
+            };
+        }
+        if self
+            .control
+            .is_some_and(|status| status.mode == crate::device::ControlMode::Control)
+        {
+            return Notice {
+                text: s.control_owned.to_string(),
+                level: NoticeLevel::Info,
+            };
+        }
+        match self.request_control("claim") {
+            Ok(()) => Notice {
+                text: s.control_requested.to_string(),
+                level: NoticeLevel::Info,
+            },
+            Err(why) => Notice {
+                text: why,
+                level: NoticeLevel::Warn,
+            },
+        }
+    }
+
+    /// Ask for the console only if its owner has stopped typing.
+    ///
+    /// This is the keystroke path without a keystroke: a script that is about
+    /// to type gets the same rule a person does, and a refused claim leaves
+    /// the console where it was.
+    pub fn take_control_when_idle(&mut self) -> Notice {
+        let s = self.strings();
+        self.control_error = None;
+        if !self.supports_control() {
+            return Notice {
+                text: s.control_unsupported.to_string(),
+                level: NoticeLevel::Warn,
+            };
+        }
+        if self
+            .control
+            .is_some_and(|status| status.mode == crate::device::ControlMode::Control)
+        {
+            return Notice {
+                text: s.control_owned.to_string(),
+                level: NoticeLevel::Info,
+            };
+        }
+        match self.request_control("claim idle") {
+            Ok(()) => {
+                self.control_claim_in_flight = true;
+                Notice {
+                    text: s.control_requested.to_string(),
+                    level: NoticeLevel::Info,
+                }
+            }
+            Err(why) => Notice {
+                text: why,
+                level: NoticeLevel::Warn,
+            },
+        }
+    }
+
+    /// Give the console up; the next session may take it.
+    pub fn release_control(&mut self) -> Notice {
+        let s = self.strings();
+        let holds = self
+            .control
+            .is_some_and(|status| status.mode == crate::device::ControlMode::Control);
+        if !holds {
+            return Notice {
+                text: s.control_not_owner.to_string(),
+                level: NoticeLevel::Warn,
+            };
+        }
+        match self.request_control("release") {
+            Ok(()) => {
+                self.control_yield = true;
+                self.held_input.clear();
+                self.control_claim_in_flight = false;
+                Notice {
+                    text: s.control_released.to_string(),
+                    level: NoticeLevel::Info,
+                }
+            }
+            Err(why) => Notice {
+                text: why,
+                level: NoticeLevel::Warn,
+            },
+        }
+    }
+
+    /// Hand the console back to the session this one took it from.
+    pub fn hand_over_control(&mut self) -> Notice {
+        let s = self.strings();
+        let holds = self
+            .control
+            .is_some_and(|status| status.mode == crate::device::ControlMode::Control);
+        if !holds {
+            return Notice {
+                text: s.control_not_owner.to_string(),
+                level: NoticeLevel::Warn,
+            };
+        }
+        let Some(target) = self
+            .control_handover
+            .filter(|target| *target != self.control.map(|c| c.self_id).unwrap_or(0))
+        else {
+            return Notice {
+                text: s.control_no_handover.to_string(),
+                level: NoticeLevel::Warn,
+            };
+        };
+        match self.request_control(&format!("yield {target}")) {
+            Ok(()) => {
+                self.control_yield = true;
+                Notice {
+                    text: format!("{}{target}", s.control_handover),
+                    level: NoticeLevel::Info,
+                }
+            }
+            Err(why) => Notice {
+                text: why,
+                level: NoticeLevel::Warn,
+            },
+        }
+    }
+
+    /// Ask who owns the console if the session is due a quiet check.
+    ///
+    /// The first query after a link comes up is the important one; the poll is
+    /// what keeps the badge honest afterwards. It never displaces a question
+    /// already in flight — the next tick tries again.
+    fn poll_control(&mut self, now: Instant) {
+        if !self.supports_control() || !self.connected() {
+            self.control_poll_due = None;
+            return;
+        }
+        if self.talk.waiting().is_some() {
+            return;
+        }
+        match self.control_poll_due {
+            None => self.control_poll_due = Some(now + CONTROL_POLL),
+            Some(due) if now >= due => {
+                if self.send_control("?").is_ok() {
+                    self.control_poll_due = Some(now + CONTROL_POLL);
+                }
+            }
+            Some(_) => {}
+        }
+    }
+
+    /// Fold one `@c` answer in.
+    ///
+    /// Two shapes arrive here: a status (`OK control …`), which updates the
+    /// badge and settles a held keystroke, and a refusal (`ERR control=…`),
+    /// which leaves the pusher read-only and says why.
+    fn apply_control_reply(&mut self, reply: &Reply) {
+        self.apply_control_text(&reply.lines.join("\n"));
+    }
+
+    /// Fold the text of one ownership answer in, whichever bearer carried it.
+    fn apply_control_text(&mut self, text: &str) {
+        let s = self.strings();
+        if let Some(status) = crate::device::parse_control_status(text) {
+            let previous = self.control;
+            // Taking the console from somebody is recorded so "hand over" can
+            // give it back to that session rather than to a guess.
+            if let Some(previous) = previous {
+                if previous.mode != crate::device::ControlMode::Control
+                    && status.mode == crate::device::ControlMode::Control
+                    && previous.owner != 0
+                    && previous.owner != status.self_id
+                {
+                    self.control_handover = Some(previous.owner);
+                }
+                if previous.mode == crate::device::ControlMode::Control
+                    && status.mode != crate::device::ControlMode::Control
+                    && !self.control_yield
+                {
+                    self.push_notice(Notice {
+                        text: s.control_taken.to_string(),
+                        level: NoticeLevel::Warn,
+                    });
+                }
+            }
+            self.control = Some(status);
+            self.control_error = None;
+            self.control_poll_due = Some(Instant::now() + CONTROL_POLL);
+            match status.mode {
+                crate::device::ControlMode::Control => {
+                    self.control_claim_in_flight = false;
+                    self.flush_held_input();
+                }
+                crate::device::ControlMode::Readonly => {
+                    if self.control_claim_in_flight {
+                        self.control_claim_in_flight = false;
+                        self.held_input.clear();
+                        self.push_notice(Notice {
+                            text: s.control_busy.to_string(),
+                            level: NoticeLevel::Warn,
+                        });
+                    }
+                }
+                crate::device::ControlMode::Available => {
+                    if self.control_claim_in_flight {
+                        // The claim that was out did not stick: ask again on
+                        // the strength of the keystroke that is still held.
+                        self.control_claim_in_flight = false;
+                        if self.request_control("claim idle").is_err() {
+                            self.held_input.clear();
+                        }
+                    } else if std::mem::take(&mut self.control_auto_claim) {
+                        // A session that has just joined takes a free console,
+                        // the way the web client does. If the link is not up
+                        // yet the claim is not lost: it is put back, and the
+                        // connect edge or the next status sends it.
+                        if self.request_control("claim").is_err() {
+                            self.control_auto_claim = true;
+                        }
+                    }
+                }
+            }
+            // The automatic claim belongs to the connect-time answer only: a
+            // console somebody was using is theirs until this session asks.
+            // Without this, a later `available` poll would hand it over on a
+            // claim the user never made. The web client decides the same way.
+            if status.mode != crate::device::ControlMode::Available {
+                self.control_auto_claim = false;
+            }
+            self.control_yield = false;
+            return;
+        }
+        if let Some(reason) = crate::device::control_refusal(text) {
+            if let Some(mut status) = self.control {
+                if status.owner != status.self_id {
+                    status.mode = crate::device::ControlMode::Readonly;
+                }
+                self.control = Some(status);
+            }
+            let was_holding_keystrokes = std::mem::take(&mut self.control_claim_in_flight);
+            self.control_yield = false;
+            self.held_input.clear();
+            self.control_error = Some(reason.to_string());
+            self.push_notice(Notice {
+                text: if was_holding_keystrokes && reason == "busy" {
+                    s.control_busy.to_string()
+                } else {
+                    format!("{}{reason}", s.control_refused)
+                },
+                level: NoticeLevel::Warn,
+            });
+        }
+    }
+
+    /// Type as the user asked, holding the bytes when the console is not ours.
+    ///
+    /// The first keystroke asks for an **idle** hand-over: the bridge grants it
+    /// only when the current owner has stopped writing, so watching a session
+    /// never interrupts an active typist. The bytes go out on the `OK`, and are
+    /// dropped — with a sentence — when the bridge says the other side is busy.
+    fn send_user_input(&mut self, bytes: &[u8]) -> bool {
+        if self.control_readonly() {
+            return self.hold_while_readonly(bytes);
+        }
+        self.send_bytes(bytes)
+    }
+
+    fn hold_while_readonly(&mut self, bytes: &[u8]) -> bool {
+        if !self.connected() {
+            return false;
+        }
+        if bytes.is_empty() {
+            return true;
+        }
+        self.held_input.extend_from_slice(bytes);
+        // A held keystroke is still the user's typing: echo it the way
+        // `send_bytes` would have, unless line mode already did.
+        if !self.line_mode && self.terminal.echo {
+            self.terminal.push(bytes);
+        }
+        self.claim_idle_if_held();
+        !self.held_input.is_empty() || !self.control_readonly()
+    }
+
+    /// Ask for the console on behalf of keystrokes that are waiting for it.
+    ///
+    /// Never displaces a question already in flight: the protocol has one
+    /// answer slot, and taking it from a bond write or a diagnostics read
+    /// would lose that answer. The bytes stay held and the next pump tries
+    /// again once the bridge has replied.
+    fn claim_idle_if_held(&mut self) {
+        if !self.control_readonly()
+            || self.held_input.is_empty()
+            || self.control_claim_in_flight
+            || self.talk.waiting().is_some()
+        {
+            return;
+        }
+        self.control_claim_in_flight = true;
+        if self.request_control("claim idle").is_err() {
+            self.control_claim_in_flight = false;
+            self.held_input.clear();
+        }
+    }
+
+    /// Send the keystrokes that waited for the console.
+    fn flush_held_input(&mut self) {
+        let bytes = std::mem::take(&mut self.held_input);
+        if bytes.is_empty() {
+            return;
+        }
+        if self.session.send(&bytes) {
+            self.geometry.note_input(&bytes);
+            self.trace.tx(&bytes);
+            self.tx = self.session.tx();
+        }
+    }
+
     /// Ask for the LAN access token if nobody has yet, and let the caller
     /// ignore the answer: the capture lands on whichever pump it arrives on.
     ///
@@ -3592,6 +4160,9 @@ impl App {
             // fills and not the network view: a token that appears on screen
             // next to a wifi name is a token in a screenshot.
             Query::Lan => self.lan_status.loading = true,
+            // Ownership is a quiet question with a top-bar badge for an
+            // answer; no view opens a spinner for it.
+            Query::Control => {}
         }
         // A scan is the one question the app may ask again by itself, so it
         // carries the record of what it is owed. A fresh scan gets the whole
@@ -3891,6 +4462,10 @@ impl App {
         // "loading…" underneath an error.
         let mutation = reply.query == Query::BondLabel && self.bond_mutation_pending;
         self.stop_waiting(reply.query);
+        if reply.query == Query::Control {
+            self.apply_control_reply(&reply);
+            return;
+        }
         if mutation {
             self.bond_mutation_pending = false;
             let text = reply.lines.join("\n");
@@ -4034,6 +4609,9 @@ impl App {
         }
         let text = reply.lines.join("\n");
         match reply.query {
+            // Already handled above, before the shared refusal and answer
+            // paths: ownership is not a view and has nothing to fold in here.
+            Query::Control => {}
             Query::Diagnostics => self.diagnostics.apply(&reply.lines, stamp.to_string()),
             // A read is how the frame learns the wire's own rate. Asking the
             // target would be asking somebody who does not know: this is the
@@ -4232,6 +4810,17 @@ impl App {
     /// read the name until the next link.
     fn ask_pending_reads(&mut self) {
         if !self.ble_connected() || self.waiting_on_device() {
+            return;
+        }
+        if self.control_read_pending {
+            self.control_read_pending = false;
+            // Taking a free console on arrival is what the web client does;
+            // a console somebody is using stays theirs and this session is
+            // read-only until it asks or the other side goes idle.
+            self.control_auto_claim = true;
+            if self.send_control("?").is_err() {
+                self.control_auto_claim = false;
+            }
             return;
         }
         if self.ble_name_read_pending {
@@ -4594,6 +5183,21 @@ impl App {
             // by hand and the store may already have one — and firmware that
             // does not know the question should not get a toast per link.
             Query::Lan => return,
+            // A quiet ownership poll that went unanswered is not worth a
+            // toast; the next poll tries again and the badge keeps its last
+            // known state. A claim, though, was holding keystrokes, and a
+            // claim nobody answered must not leave them held for ever.
+            Query::Control => {
+                if self.control_claim_in_flight {
+                    self.control_claim_in_flight = false;
+                    self.held_input.clear();
+                    self.push_notice(Notice {
+                        text: s.mgmt_no_answer.to_string(),
+                        level: NoticeLevel::Warn,
+                    });
+                }
+                return;
+            }
             _ => self.network.error = Some(text.clone()),
         }
         self.push_notice(Notice {
@@ -4617,6 +5221,7 @@ impl App {
             | Query::Bonds
             | Query::BondLabel => self.network.loading = false,
             Query::Lan => self.lan_status.loading = false,
+            Query::Control => {}
         }
     }
 
@@ -4696,7 +5301,11 @@ impl App {
         // A prompt-looking tail in its output — a banner, an echo, the shell
         // waiting for a password — is not an idle pane, and an `stty` typed
         // into it would be a command the caller never asked for.
-        if self.collect_output || !self.connected() || !self.pending_line.is_empty() {
+        if self.collect_output
+            || !self.connected()
+            || !self.pending_line.is_empty()
+            || self.control_readonly()
+        {
             return;
         }
         let Some(command) = self.geometry.take_pending_command() else {
@@ -4752,7 +5361,7 @@ impl App {
         // be written off-screen for the user to miss.
         self.scroll_terminal_to_bottom();
         if !self.line_mode {
-            return self.send_bytes(bytes.as_bytes());
+            return self.send_user_input(bytes.as_bytes());
         }
         if !ends_line && !bytes.is_empty() {
             // Held locally, but still a command line the user is composing:
@@ -4770,7 +5379,7 @@ impl App {
         }
         let mut line = std::mem::take(&mut self.pending_line);
         line.push_str(bytes);
-        self.send_bytes(line.as_bytes())
+        self.send_user_input(line.as_bytes())
     }
 
     /// Send a whole command, and say so when there is nothing to send it over.
@@ -4793,7 +5402,7 @@ impl App {
         if !payload.ends_with(b"\n") && !payload.ends_with(b"\r") {
             payload.extend_from_slice(self.enter.bytes().unwrap_or("\r").as_bytes());
         }
-        self.send_bytes(&payload)
+        self.send_user_input(&payload)
     }
 
     /// Throw the pane's history away. The device is not told.
@@ -6262,6 +6871,36 @@ mod tests {
         assert!(!app.transport_locked, "the choice is given back");
         assert_eq!(app.state, ConnectionState::Failed);
         assert!(app.last_dial.is_none(), "nothing was remembered");
+    }
+
+    /// Picking a board that then fails must not leave Connect aiming at the
+    /// board the user just left: the row shows the new pick, so pressing
+    /// Connect again has to retry it instead of silently dialling the old one.
+    #[test]
+    fn a_failed_pick_is_still_what_connect_aims_at() {
+        use crate::transport::ble::Selection;
+
+        let mut app = App {
+            lang: Lang::En,
+            ..App::default()
+        };
+        app.last_dial = Some(Dial::Ble(
+            Selection::Address("FB:F6:91:14:33:3A".into()),
+            None,
+        ));
+        app.connect_to_board("nonsense", None, None, false);
+        assert!(
+            pump_until(&mut app, |app| app.dialing.is_none()),
+            "the dial comes back"
+        );
+        assert_eq!(app.state, ConnectionState::Failed);
+        assert!(
+            matches!(
+                app.dial_for_connect(),
+                Ok(Dial::Ble(Selection::Address(address), _)) if address == "nonsense"
+            ),
+            "Connect must aim at the board on screen, not the previous link"
+        );
     }
 
     /// Connect pressed twice dials once: the second press is answered with a
@@ -9188,5 +9827,463 @@ mod tests {
         app.talk.abandon(Instant::now() + Duration::from_secs(30));
         app.report_unanswered(Query::BondLabel, Instant::now());
         assert!(app.take_bond_mutation_result().is_none());
+    }
+
+    // --- console ownership -------------------------------------------------
+
+    /// A board that advertises `MULTI_SESSION` is asked who owns the console
+    /// before anything else. A free console is claimed, the way the web client
+    /// takes it, and the top bar says so.
+    #[test]
+    fn a_free_console_is_claimed_on_connect() {
+        let (mut app, wire, query) = connected_with_ownership(Lang::En);
+        wire.feed_management(answer(
+            query,
+            "OK control self=1 owner=0 mode=available epoch=1 peers=1\r\n",
+        ));
+        // The answer says "available", so the first session takes it.
+        assert!(pump_until(&mut app, |app| app.control.is_some()));
+        let claim = next_control_frame(&mut app, &wire, b"@c claim");
+        wire.feed_management(answer(
+            claim,
+            "OK control self=1 owner=1 mode=control epoch=2 peers=1\r\n",
+        ));
+        assert!(pump_until(&mut app, |app| {
+            app.control
+                .is_some_and(|status| status.mode == crate::device::ControlMode::Control)
+        }));
+        assert_eq!(
+            app.control_badge().map(|(text, _)| text),
+            Some("In control".to_string())
+        );
+    }
+
+    /// A read-only session holds the first keystroke, asks for an idle
+    /// hand-over, and sends the line once the bridge grants it.
+    #[test]
+    fn a_keystroke_takes_an_idle_console_and_then_goes_out() {
+        let (mut app, wire, query) = connected_with_ownership(Lang::En);
+        wire.feed_management(answer(
+            query,
+            "OK control self=2 owner=1 mode=readonly epoch=3 peers=2\r\n",
+        ));
+        assert!(pump_until(&mut app, |app| {
+            app.control
+                .is_some_and(|status| status.mode == crate::device::ControlMode::Readonly)
+        }));
+        assert_eq!(
+            app.control_badge().map(|(text, _)| text),
+            Some("Read only".to_string())
+        );
+        settle_connect_reads(&mut app, &wire);
+
+        assert!(app.type_bytes(true, "ls"), "typing is accepted, then held");
+        assert_eq!(wire.sent_len(), 0, "nothing reached the line yet");
+
+        let claim = next_control_frame(&mut app, &wire, b"@c claim idle");
+        wire.feed_management(answer(
+            claim,
+            "OK control self=2 owner=2 mode=control epoch=4 peers=2\r\n",
+        ));
+        assert!(pump_until(&mut app, |app| {
+            app.control
+                .is_some_and(|status| status.mode == crate::device::ControlMode::Control)
+        }));
+        assert!(pump_until(&mut app, |_| wire.sent_len() > 0));
+        assert_eq!(wire.take_sent(), b"ls".to_vec(), "the held line went out");
+    }
+
+    /// The idle hand-over never interrupts an active typist: the refusal drops
+    /// the held line and says why, leaving the pane read-only.
+    #[test]
+    fn a_busy_console_refuses_the_idle_claim_and_the_line_is_dropped() {
+        let (mut app, wire, query) = connected_with_ownership(Lang::En);
+        wire.feed_management(answer(
+            query,
+            "OK control self=2 owner=1 mode=readonly epoch=3 peers=2\r\n",
+        ));
+        assert!(pump_until(&mut app, |app| app.control.is_some()));
+        settle_connect_reads(&mut app, &wire);
+
+        assert!(app.type_bytes(true, "rm -rf /"));
+        let claim = next_control_frame(&mut app, &wire, b"@c claim idle");
+        wire.feed_management(answer(claim, "ERR control=busy\r\n"));
+        assert!(pump_until(&mut app, |app| {
+            !app.control_claim_in_flight && app.held_input.is_empty()
+        }));
+        for _ in 0..20 {
+            app.pump();
+        }
+        assert_eq!(wire.sent_len(), 0, "a refused line is not typed anyway");
+        assert!(
+            app.notices
+                .iter()
+                .any(|notice| { notice.text == app.strings().control_busy }),
+            "the refusal is spoken: {:?}",
+            app.notices
+        );
+    }
+
+    /// A script reads the refusal, not only the toast: `--control` and `send`
+    /// report what the bridge said.
+    #[test]
+    fn a_refused_ownership_command_is_readable_by_a_script() {
+        let (mut app, wire, query) = connected_with_ownership(Lang::En);
+        wire.feed_management(answer(
+            query,
+            "OK control self=2 owner=1 mode=readonly epoch=3 peers=2\r\n",
+        ));
+        assert!(pump_until(&mut app, |app| app.control.is_some()));
+        settle_connect_reads(&mut app, &wire);
+
+        let press = app.take_control_when_idle();
+        assert_eq!(press.level, crate::event::NoticeLevel::Info);
+        let claim = next_control_frame(&mut app, &wire, b"@c claim idle");
+        wire.feed_management(answer(claim, "ERR control=busy\r\n"));
+        assert!(pump_until(&mut app, |app| app.control_refusal().is_some()));
+        assert_eq!(app.control_refusal(), Some("busy"));
+    }
+
+    /// The idle claim is available without a keystroke, for a script that is
+    /// about to send stdin.
+    #[test]
+    fn asking_for_the_console_when_idle_sends_the_idle_claim() {
+        let (mut app, wire, query) = connected_with_ownership(Lang::En);
+        wire.feed_management(answer(
+            query,
+            "OK control self=2 owner=1 mode=readonly epoch=3 peers=2\r\n",
+        ));
+        assert!(pump_until(&mut app, |app| app.control.is_some()));
+        settle_connect_reads(&mut app, &wire);
+
+        let notice = app.take_control_when_idle();
+        assert_eq!(notice.level, crate::event::NoticeLevel::Info);
+        next_control_frame(&mut app, &wire, b"@c claim idle");
+    }
+
+    /// Giving the console up is not another session seizing it, and saying so
+    /// would blame a peer for something the user asked for.
+    #[test]
+    fn releasing_the_console_is_not_reported_as_a_seizure() {
+        let (mut app, wire, query) = connected_with_ownership(Lang::En);
+        wire.feed_management(answer(
+            query,
+            "OK control self=1 owner=0 mode=available epoch=1 peers=1\r\n",
+        ));
+        assert!(pump_until(&mut app, |app| app.control.is_some()));
+        let claim = next_control_frame(&mut app, &wire, b"@c claim");
+        wire.feed_management(answer(
+            claim,
+            "OK control self=1 owner=1 mode=control epoch=2 peers=1\r\n",
+        ));
+        assert!(pump_until(&mut app, |app| {
+            app.control
+                .is_some_and(|status| status.mode == crate::device::ControlMode::Control)
+        }));
+        settle_connect_reads(&mut app, &wire);
+        app.notices.clear();
+
+        let notice = app.release_control();
+        assert_eq!(notice.level, NoticeLevel::Info);
+        let release = next_control_frame(&mut app, &wire, b"@c release");
+        wire.feed_management(answer(
+            release,
+            "OK control self=1 owner=0 mode=available epoch=3 peers=1\r\n",
+        ));
+        assert!(pump_until(&mut app, |app| {
+            app.control
+                .is_some_and(|status| status.mode == crate::device::ControlMode::Available)
+        }));
+        assert!(
+            !app.notices
+                .iter()
+                .any(|notice| notice.text == app.strings().control_taken),
+            "a deliberate release is not a seizure: {:?}",
+            app.notices
+        );
+    }
+
+    /// The single answer slot is not stolen from a question already in flight:
+    /// the keystroke waits, and asks for the console as soon as the answer is
+    /// in.
+    #[test]
+    fn a_held_keystroke_waits_for_the_question_in_flight() {
+        let (mut app, wire, query) = connected_with_ownership(Lang::En);
+        wire.feed_management(answer(
+            query,
+            "OK control self=2 owner=1 mode=readonly epoch=3 peers=2\r\n",
+        ));
+        assert!(pump_until(&mut app, |app| app.control.is_some()));
+
+        // A diagnostics read owns the one answer slot.
+        let (uart, _) = app.talk.ask(Query::Uart, Instant::now());
+        assert!(app.type_bytes(true, "ls"), "typing is accepted, then held");
+        assert!(!app.held_input.is_empty());
+        assert_eq!(app.talk.waiting(), Some(Query::Uart), "not displaced");
+        assert!(
+            !crate::transport::testing::asked_frames(&wire)
+                .iter()
+                .any(|frame| &frame[crate::protocol::MGMT_HEADER_SIZE..] == b"@c claim idle"),
+            "an idle claim must not take the answer slot from a read"
+        );
+
+        // The read answers, and the held line asks on the next pump.
+        wire.feed_management(answer(uart, "OK uart=115200,8,N,1,none\r\n"));
+        let claim = next_control_frame(&mut app, &wire, b"@c claim idle");
+        wire.feed_management(answer(
+            claim,
+            "OK control self=2 owner=2 mode=control epoch=4 peers=2\r\n",
+        ));
+        assert!(pump_until(&mut app, |app| {
+            app.control
+                .is_some_and(|status| status.mode == crate::device::ControlMode::Control)
+        }));
+        assert!(pump_until(&mut app, |_| wire.sent_len() > 0));
+        assert_eq!(wire.take_sent(), b"ls".to_vec());
+    }
+
+    /// The LAN socket has no capability word: the bridge announces ownership
+    /// by sending its status unprompted, and only then does the TUI take a
+    /// free console — with the socket's own `@control` spelling.
+    #[test]
+    fn a_lan_session_claims_a_free_console_with_control_frames() {
+        let (mut app, wire) = connected_over_lan(Lang::En);
+        assert!(!app.supports_control(), "no announcement has arrived yet");
+        wire.feed_control("OK control self=1 owner=0 mode=available epoch=1 peers=1\r\n");
+        assert!(pump_until(&mut app, |app| app.control.is_some()));
+        assert!(app.supports_control());
+        assert!(pump_until(&mut app, |_| {
+            take_control_contains(&wire, "@control claim")
+        }));
+        wire.feed_control("OK control self=1 owner=1 mode=control epoch=2 peers=1\r\n");
+        assert!(pump_until(&mut app, |app| {
+            app.control
+                .is_some_and(|status| status.mode == crate::device::ControlMode::Control)
+        }));
+        assert_eq!(
+            app.control_badge().map(|(text, _)| text),
+            Some("In control".to_string())
+        );
+    }
+
+    /// A read-only LAN session holds the first keystroke, asks with the
+    /// socket's spelling, and types the line only after the grant.
+    #[test]
+    fn a_lan_readonly_keystroke_asks_for_an_idle_hand_over() {
+        let (mut app, wire) = connected_over_lan(Lang::En);
+        wire.feed_control("OK control self=2 owner=1 mode=readonly epoch=3 peers=2\r\n");
+        assert!(pump_until(&mut app, |app| app.control.is_some()));
+
+        assert!(app.type_bytes(true, "ls"), "typing is accepted, then held");
+        assert_eq!(wire.sent_len(), 0, "nothing reached the line yet");
+        assert!(pump_until(&mut app, |_| {
+            take_control_contains(&wire, "@control claim idle")
+        }));
+        wire.feed_control("OK control self=2 owner=2 mode=control epoch=4 peers=2\r\n");
+        assert!(pump_until(&mut app, |_| wire.sent_len() > 0));
+        assert_eq!(wire.take_sent(), b"ls".to_vec(), "the held line went out");
+    }
+
+    /// The LAN spelling of a refusal is read the same way: the held line is
+    /// dropped and the reason is spoken.
+    #[test]
+    fn a_lan_busy_refusal_drops_the_held_line() {
+        let (mut app, wire) = connected_over_lan(Lang::En);
+        wire.feed_control("OK control self=2 owner=1 mode=readonly epoch=3 peers=2\r\n");
+        assert!(pump_until(&mut app, |app| app.control.is_some()));
+
+        assert!(app.type_bytes(true, "rm -rf /"));
+        assert!(pump_until(&mut app, |_| {
+            take_control_contains(&wire, "@control claim idle")
+        }));
+        wire.feed_control("ERR control=busy\r\n");
+        assert!(pump_until(&mut app, |app| {
+            !app.control_claim_in_flight && app.held_input.is_empty()
+        }));
+        for _ in 0..10 {
+            app.pump();
+        }
+        assert_eq!(wire.sent_len(), 0, "a refused line is not typed anyway");
+        assert!(
+            app.notices
+                .iter()
+                .any(|notice| notice.text == app.strings().control_busy),
+            "the refusal is spoken: {:?}",
+            app.notices
+        );
+    }
+
+    /// Releasing over LAN uses the socket's spelling and is still not reported
+    /// as somebody else seizing the console.
+    #[test]
+    fn a_lan_release_uses_the_control_frame_and_is_not_a_seizure() {
+        let (mut app, wire) = connected_over_lan(Lang::En);
+        wire.feed_control("OK control self=1 owner=1 mode=control epoch=2 peers=1\r\n");
+        assert!(pump_until(&mut app, |app| {
+            app.control
+                .is_some_and(|status| status.mode == crate::device::ControlMode::Control)
+        }));
+        app.notices.clear();
+
+        let notice = app.release_control();
+        assert_eq!(notice.level, NoticeLevel::Info);
+        assert!(pump_until(&mut app, |_| {
+            take_control_contains(&wire, "@control release")
+        }));
+        wire.feed_control("OK control self=1 owner=0 mode=available epoch=3 peers=1\r\n");
+        assert!(pump_until(&mut app, |app| {
+            app.control
+                .is_some_and(|status| status.mode == crate::device::ControlMode::Available)
+        }));
+        assert!(
+            !app.notices
+                .iter()
+                .any(|notice| notice.text == app.strings().control_taken),
+            "a deliberate release is not a seizure: {:?}",
+            app.notices
+        );
+    }
+
+    /// A LAN bridge that never announces ownership is an old one: the TUI
+    /// keeps typing straight through instead of probing for a command the
+    /// bridge would reject.
+    #[test]
+    fn an_unannounced_lan_session_is_not_gated() {
+        let (mut app, wire) = connected_over_lan(Lang::En);
+        assert!(!app.supports_control());
+        assert!(app.type_bytes(true, "echo hi"));
+        assert!(pump_until(&mut app, |_| wire.sent_len() > 0));
+        assert_eq!(wire.take_sent(), b"echo hi".to_vec());
+        assert!(wire.take_control().is_empty(), "nothing was probed for");
+    }
+
+    /// Open a LAN memory link and wait until the session reports it.
+    fn connected_over_lan(lang: Lang) -> (App, crate::transport::testing::MemoryLink) {
+        let mut app = App {
+            lang,
+            ..App::default()
+        };
+        let wire = crate::transport::testing::MemoryLink::lan();
+        app.connect(wire.link()).expect("the memory link opens");
+        assert!(pump_until(&mut app, |app| app.connected()));
+        (app, wire)
+    }
+
+    /// Whether one of the ownership commands the host sent is `command`,
+    /// draining the queue as `take_control` does.
+    fn take_control_contains(wire: &crate::transport::testing::MemoryLink, command: &str) -> bool {
+        wire.take_control().iter().any(|sent| sent == command)
+    }
+
+    /// A session that joins while somebody else owns the console watches it,
+    /// it does not inherit an automatic claim: when the owner later releases,
+    /// taking the console is still the user's decision or the first keystroke's
+    /// idle request. The web client decides the same way.
+    #[test]
+    fn a_connect_into_a_busy_console_does_not_claim_it_later() {
+        let (mut app, wire, query) = connected_with_ownership(Lang::En);
+        wire.feed_management(answer(
+            query,
+            "OK control self=2 owner=1 mode=readonly epoch=3 peers=2\r\n",
+        ));
+        assert!(pump_until(&mut app, |app| app.control.is_some()));
+        settle_connect_reads(&mut app, &wire);
+
+        // The owner releases and the next poll says so.
+        app.control_poll_due = Some(Instant::now());
+        let poll = next_control_frame(&mut app, &wire, b"@c?");
+        wire.feed_management(answer(
+            poll,
+            "OK control self=2 owner=0 mode=available epoch=4 peers=2\r\n",
+        ));
+        assert!(pump_until(&mut app, |app| {
+            app.control
+                .is_some_and(|status| status.mode == crate::device::ControlMode::Available)
+        }));
+        for _ in 0..10 {
+            app.pump();
+        }
+        assert!(
+            !crate::transport::testing::asked_includes(&wire, b"@c claim"),
+            "the console became free; the user never asked for it"
+        );
+    }
+
+    /// Answer the two background reads a Bluetooth link asks after ownership,
+    /// so a test that types next is not waiting behind them.
+    fn settle_connect_reads(app: &mut App, wire: &crate::transport::testing::MemoryLink) {
+        for (query, reply) in [
+            (Query::BleName, "OK name=Bench Bee custom=yes"),
+            (Query::Lan, "OK ws=off token=none"),
+        ] {
+            if app.talk.waiting() != Some(query) {
+                continue;
+            }
+            let id = crate::transport::testing::asked_id(wire);
+            wire.feed_management(answer(id, reply));
+            assert!(
+                pump_until(app, |app| app.talk.waiting() != Some(query)),
+                "{query:?} was not answered"
+            );
+        }
+    }
+
+    /// Open a Bluetooth memory link that advertises console arbitration and
+    /// answer the on-connect ownership question out of band, handing the test
+    /// the request id it must answer.
+    fn connected_with_ownership(lang: Lang) -> (App, crate::transport::testing::MemoryLink, u32) {
+        let mut app = App {
+            lang,
+            ..App::default()
+        };
+        let wire = crate::transport::testing::MemoryLink::ble()
+            .with_capabilities(crate::protocol::MGMT_CAP_MULTI_SESSION);
+        app.connect(wire.link()).expect("the memory link opens");
+        assert!(pump_until(&mut app, |app| app.connected()));
+        assert!(
+            app.supports_control(),
+            "capabilities: {:?}",
+            app.session.capabilities()
+        );
+        assert!(
+            pump_until(&mut app, |app| app.talk.waiting() == Some(Query::Control)),
+            "ownership is asked before the name"
+        );
+        let frames = crate::transport::testing::asked_frames(&wire);
+        let query = frames
+            .iter()
+            .find(|frame| &frame[crate::protocol::MGMT_HEADER_SIZE..] == b"@c?")
+            .expect("@c? was not asked");
+        let id = u32::from_le_bytes([query[4], query[5], query[6], query[7]]);
+        (app, wire, id)
+    }
+
+    /// The id of the next control frame whose body is `command`.
+    fn next_control_frame(
+        app: &mut App,
+        wire: &crate::transport::testing::MemoryLink,
+        command: &[u8],
+    ) -> u32 {
+        assert!(
+            pump_until(app, |app| app.talk.waiting() == Some(Query::Control)),
+            "the control question never went out"
+        );
+        let frames = crate::transport::testing::asked_frames(wire);
+        let frame = frames
+            .iter()
+            .find(|frame| &frame[crate::protocol::MGMT_HEADER_SIZE..] == command)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{} was not asked; got {:?}",
+                    String::from_utf8_lossy(command),
+                    frames
+                        .iter()
+                        .map(|frame| String::from_utf8_lossy(
+                            &frame[crate::protocol::MGMT_HEADER_SIZE..]
+                        ))
+                        .collect::<Vec<_>>()
+                )
+            });
+        u32::from_le_bytes([frame[4], frame[5], frame[6], frame[7]])
     }
 }

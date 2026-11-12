@@ -92,6 +92,13 @@ pub trait LinkReader: Send {
         None
     }
 
+    /// What the board's Management service advertised when this link was
+    /// wired, when the bearer read it. A pipe has nothing to say here, and the
+    /// callers that care about a capability treat `None` as "the old way".
+    fn board_capabilities(&self) -> Option<u32> {
+        None
+    }
+
     /// Read into `buf`. `Ok(0)` means the far end closed cleanly.
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize>;
 
@@ -131,6 +138,19 @@ pub trait LinkWriter: Send {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "this link has no management channel",
+        ))
+    }
+
+    /// Send one ownership command as the bearer spells it.
+    ///
+    /// Bluetooth asks the management service with `@c …`; the LAN socket asks
+    /// with a text frame `@control …`. Both reach the same arbiter on the
+    /// board, so the difference is spelling, not authority. The default
+    /// refuses, for a bearer that carries neither.
+    fn write_control(&mut self, _command: &str) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "this link has no console-control channel",
         ))
     }
 
@@ -195,6 +215,14 @@ pub enum LinkEvent {
     /// would be wrong exactly when the target happened to print something
     /// shaped like a reply. See `device`.
     Management(Vec<u8>),
+    /// One console-ownership answer from the LAN bridge, verbatim.
+    ///
+    /// The socket sends ownership as plain text (`OK control …` or
+    /// `ERR control=…`) rather than in a Management frame, and the first one
+    /// arrives unasked as the feature announcement. Kept apart from
+    /// [`LinkEvent::Notice`] because it is state, not prose, and apart from
+    /// [`LinkEvent::Management`] because it has no request id to match.
+    Control(String),
     /// The link ended. The string is what the notice says happened; nothing
     /// after a `Closed` is delivered.
     Closed(String),
@@ -206,6 +234,8 @@ enum Outgoing {
     Bytes(Vec<u8>),
     /// A whole management frame, split into writes by the link itself.
     Management(Vec<u8>),
+    /// One ownership command, already spelled for this bearer.
+    Control(String),
     /// Stop writing, and — on a link that holds a session of its own — end
     /// that session out loud rather than letting it time out. See
     /// [`LinkWriter::hangup`].
@@ -233,6 +263,8 @@ pub struct OpenedLink {
     /// How the sidebar and the notices name it, e.g. `ble:EE:C7:42:34:48:CF`.
     pub description: String,
     pub ble_device_id: Option<String>,
+    /// The Management capability word, when the board advertised one.
+    pub board_capabilities: Option<u32>,
     /// The LAN address this link talks to, empty for links that are not LAN.
     pub lan_host: String,
     /// Whether this LAN link went out with a token.
@@ -257,6 +289,7 @@ impl OpenedLink {
         let (lan_host, lan_secured) = link.lan_details().unwrap_or_default();
         let (reader, writer) = link.open()?;
         let ble_device_id = reader.ble_device_id();
+        let board_capabilities = reader.board_capabilities();
         let description = ble_device_id
             .as_ref()
             .map(|id| format!("ble:{id}"))
@@ -265,6 +298,7 @@ impl OpenedLink {
             kind,
             description,
             ble_device_id,
+            board_capabilities,
             lan_host,
             lan_secured,
             reader,
@@ -338,6 +372,12 @@ impl LinkHandle {
     /// something about itself and are answered on another characteristic.
     pub fn send_management(&self, frame: Vec<u8>) -> bool {
         self.outgoing.send(Outgoing::Management(frame)).is_ok()
+    }
+
+    /// Queue one ownership command in the bearer's own spelling. `false` means
+    /// the writer thread is gone.
+    pub fn send_control(&self, command: String) -> bool {
+        self.outgoing.send(Outgoing::Control(command)).is_ok()
     }
 
     /// Take every event that has arrived, without blocking. Stops as soon as
@@ -477,6 +517,11 @@ fn spawn_writer(
                         let _ = events.send(LinkEvent::Notice(err.to_string()));
                     }
                 }
+                Outgoing::Control(command) => {
+                    if let Err(err) = writer.write_control(&command) {
+                        let _ = events.send(LinkEvent::Notice(err.to_string()));
+                    }
+                }
             }
         }
     })
@@ -504,6 +549,13 @@ pub mod testing {
         /// Management responses waiting to be delivered to the host. Each entry
         /// is one notification, because that is how they arrive.
         management_from_device: Arc<Mutex<VecDeque<Vec<u8>>>>,
+        /// Ownership commands the host sent on a bearer that spells them as
+        /// text (`@control …`), kept apart from target bytes for the same
+        /// reason as the management queue.
+        control_to_device: Arc<Mutex<VecDeque<String>>>,
+        /// Ownership frames waiting to be delivered to the host, as the LAN
+        /// bridge sends them.
+        control_from_device: Arc<Mutex<VecDeque<String>>>,
         /// Which link this memory pair claims to be. Almost every test wants
         /// `Stdio`; the management channel is Bluetooth-only, so anything
         /// asking the bridge about itself needs a link that says it is.
@@ -520,6 +572,9 @@ pub mod testing {
         /// different request from dropping the writer: see
         /// [`LinkWriter::hangup`].
         hung_up: Arc<Mutex<bool>>,
+        /// The Management capability word a Bluetooth pair reports, when a
+        /// test needs the link to look like a board that advertises one.
+        capabilities: Option<u32>,
     }
 
     /// A memory pair announces itself as `Stdio` rather than taking
@@ -534,10 +589,13 @@ pub mod testing {
                 from_device: Arc::new(Mutex::new(VecDeque::new())),
                 management_to_device: Arc::new(Mutex::new(VecDeque::new())),
                 management_from_device: Arc::new(Mutex::new(VecDeque::new())),
+                control_to_device: Arc::new(Mutex::new(VecDeque::new())),
+                control_from_device: Arc::new(Mutex::new(VecDeque::new())),
                 kind: LinkKind::Stdio,
                 description: "memory".to_string(),
                 closed: Arc::new(Mutex::new(false)),
                 hung_up: Arc::new(Mutex::new(false)),
+                capabilities: None,
             }
         }
     }
@@ -556,6 +614,15 @@ pub mod testing {
             }
         }
 
+        /// A memory pair standing in for the LAN socket: ownership arrives as
+        /// text and is asked for as text.
+        pub fn lan() -> MemoryLink {
+            MemoryLink {
+                kind: LinkKind::Lan,
+                ..MemoryLink::default()
+            }
+        }
+
         /// A memory pair that names itself the way a Bluetooth link does —
         /// `ble:EE:C7:42:34:48:CF`. The sidebar's device row reads the
         /// description of the link that is up, so this is what a test of that
@@ -566,6 +633,12 @@ pub mod testing {
                 description: format!("ble:{}", address.to_ascii_uppercase()),
                 ..MemoryLink::default()
             }
+        }
+
+        /// A memory pair whose board advertises `capabilities`.
+        pub fn with_capabilities(mut self, capabilities: u32) -> MemoryLink {
+            self.capabilities = Some(capabilities);
+            self
         }
 
         /// Build the `Link` the session opens.
@@ -582,6 +655,18 @@ pub mod testing {
         /// Everything the host has asked on the management channel, drained.
         pub fn take_management(&self) -> Vec<Vec<u8>> {
             let mut queue = self.management_to_device.lock().expect("link lock");
+            queue.drain(..).collect()
+        }
+
+        /// Feed the host one ownership frame the way the LAN bridge sends it.
+        pub fn feed_control(&self, text: &str) {
+            let mut queue = self.control_from_device.lock().expect("link lock");
+            queue.push_back(text.to_string());
+        }
+
+        /// The ownership commands the host has sent, drained.
+        pub fn take_control(&self) -> Vec<String> {
+            let mut queue = self.control_to_device.lock().expect("link lock");
             queue.drain(..).collect()
         }
 
@@ -748,11 +833,37 @@ pub mod testing {
                 }
             }
         }
+
+        /// Hand every waiting ownership frame to the loop, the way the LAN
+        /// reader does when a text frame arrives.
+        fn deliver_control(&self) {
+            let Some(events) = &self.events else {
+                return;
+            };
+            loop {
+                let next = {
+                    let mut queue = self.link.control_from_device.lock().expect("link lock");
+                    queue.pop_front()
+                };
+                match next {
+                    Some(text) => {
+                        if events.send(LinkEvent::Control(text)).is_err() {
+                            return;
+                        }
+                    }
+                    None => return,
+                }
+            }
+        }
     }
 
     impl LinkReader for MemoryReader {
         fn side_channel(&mut self, events: Sender<LinkEvent>) {
             self.events = Some(events);
+        }
+
+        fn board_capabilities(&self) -> Option<u32> {
+            self.link.capabilities
         }
 
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
@@ -764,6 +875,7 @@ pub mod testing {
                 // that may never come. A real link does this on a thread of its
                 // own; a memory link has nowhere else to do it.
                 self.deliver_management();
+                self.deliver_control();
                 {
                     let mut queue = self.link.from_device.lock().expect("link lock");
                     if !queue.is_empty() {
@@ -802,6 +914,12 @@ pub mod testing {
         fn write_management(&mut self, frame: &[u8]) -> io::Result<()> {
             let mut queue = self.link.management_to_device.lock().expect("link lock");
             queue.push_back(frame.to_vec());
+            Ok(())
+        }
+
+        fn write_control(&mut self, command: &str) -> io::Result<()> {
+            let mut queue = self.link.control_to_device.lock().expect("link lock");
+            queue.push_back(command.to_string());
             Ok(())
         }
 
