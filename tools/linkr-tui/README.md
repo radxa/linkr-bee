@@ -44,6 +44,7 @@ and closes its eventual result; a new dial waits for that cleanup to finish.
 | Configure the model | Ctrl+S opens Endpoint / Model / API Key from any workspace or the sidebar; F2 or click Advanced reveals protocol, headers and token limits; Ctrl+S saves |
 | Resume a conversation | Ctrl+G opens conversation history; Enter or click resumes; Esc returns |
 | Start / switch a conversation | Ctrl+N / Alt+Up or Alt+Down while the assistant has focus |
+| Shared console | The top bar says `In control`, `Read only` or `No controller` when the board arbitrates ownership. Typing while read-only holds the keystrokes, asks for an idle hand-over, and sends them once it is granted; a busy owner refuses and the line is dropped. Ctrl+P → Take console control preempts, Release gives it up, and Hand over returns it to the session this one took it from |
 
 The message composer remains at the bottom of the assistant. Long drafts and
 URLs scroll horizontally with the caret, including CJK and combined emoji.
@@ -209,9 +210,12 @@ can become `�`, but these symptoms alone do not prove transport loss.
 Inspect Diagnostics' `@i?` UART drops, UART TX queue drops and Reliable UART
 timing counters alongside the target's encoding and framing. Sustained output
 can fill the RX ring when forwarding cannot keep up; BLE, WebSocket and log
-delivery still share a worker. The TUI's legacy NUS path is best effort and
-has no retry. The browser's Reliable UART channel can detect sequence gaps,
-but neither path guarantees lossless capture at an arbitrary output rate.
+delivery still share a worker. When the board advertises the Reliable UART
+service, the TUI uses it: frames are numbered, reassembled after fragmentation,
+and a sequence gap stops delivery with one notice instead of silently feeding
+the pane garbage. Boards without it fall back to the legacy NUS path, which is
+best effort and has no retry. Neither path guarantees lossless capture at an
+arbitrary output rate.
 `stdio` links get no bridge sentence: there is a pipe the user opened, not a
 bridge in the middle.
 
