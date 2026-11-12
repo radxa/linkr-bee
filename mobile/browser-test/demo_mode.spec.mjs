@@ -78,11 +78,13 @@ test("the auto-sync switch is offered on a desktop browser and keeps its value",
   await expect(page.locator("#remoteSizeInput")).not.toBeChecked();
 });
 
-test("a native shell is offered the remote-size switch", async ({ browser }) => {
+for (const lang of ["en", "zh"]) {
+test(`a native shell is offered the remote-size switch (${lang})`, async ({ browser }) => {
   const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
-  await context.addInitScript(() => {
+  await context.addInitScript((lang) => {
     window.LinkrNativeBle = { platform: "android" };
-  });
+    localStorage.setItem("linkr-lang", lang);
+  }, lang);
   const page = await context.newPage();
   await page.goto("/?demo=board");
   await expect(page.locator("#statusText")).toContainText(/Connected|已连接/);
@@ -91,6 +93,15 @@ test("a native shell is offered the remote-size switch", async ({ browser }) => 
   // A native shell starts with automatic syncing off.
   await expect(page.locator("#remoteSizeInput")).not.toBeChecked();
   await expect(page.locator("#remoteSizeHint, [data-i18n=\"remoteSizeHint\"]").first())
-    .toContainText(/tty/);
+    .not.toBeEmpty();
+  // Test the preference rather than a particular word in translated guidance.
+  await page.locator("#remoteSizeInput").evaluate((input) => {
+    input.checked = true;
+    input.dispatchEvent(new Event("change"));
+  });
+  await page.reload();
+  await expect(page.locator("#statusText")).toContainText(/Connected|已连接/);
+  await expect(page.locator("#remoteSizeInput")).toBeChecked();
   await context.close();
 });
+}
