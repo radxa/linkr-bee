@@ -18,6 +18,7 @@ import {
   parseIdRange,
   parseStatusFrames,
   registersFor,
+  toBytes,
   wordFromBytes,
 } from "../../web/servo_protocol.js";
 
@@ -188,4 +189,16 @@ test("the SCS model has no offset register and uses its own lock", () => {
   assert.equal(info.lock, 48);
   assert.equal(info.motion.length, 6);
   assert.equal(info.motion.start, 42);
+});
+
+
+test("DataView reads are converted, not silently emptied", () => {
+  const view = new DataView(Uint8Array.from([1, 0, 0, 2, 0xbf, 0, 0, 0]).buffer);
+  // This is the shape Web Bluetooth returns for a characteristic read; the
+  // page used to do `new Uint8Array(view)`, which is empty and read as an
+  // unsupported management protocol.
+  assert.equal(new Uint8Array(view).length, 0);
+  assert.deepEqual(Array.from(toBytes(view)), [1, 0, 0, 2, 0xbf, 0, 0, 0]);
+  assert.deepEqual(Array.from(toBytes(new Uint8Array([5, 6]))), [5, 6]);
+  assert.deepEqual(Array.from(toBytes(view.buffer)), [1, 0, 0, 2, 0xbf, 0, 0, 0]);
 });

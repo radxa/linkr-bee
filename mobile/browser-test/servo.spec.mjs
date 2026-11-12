@@ -200,6 +200,101 @@ test("parameter save downloads a JSON file with the EEPROM map", async ({ page }
   expect(download.suggestedFilename()).toMatch(/STS3215_ID1\.json/);
 });
 
+/* A real Web Bluetooth read hands the page a DataView. The page used to wrap
+ * that in `new Uint8Array(view)`, which is empty, and reported "unsupported
+ * Management v1" on a perfectly good Bee. Drive the connect path with a fake
+ * transport that returns the same shapes. */
+test("the connect handshake claims control and parses the management protocol", async ({ page }) => {
+  await page.addInitScript(() => {
+    const MGMT_COMMAND = "4c4b0004-9a7e-4f4e-8b8a-3d6f12a0c001";
+    const MGMT_RESPONSE = "4c4b0005-9a7e-4f4e-8b8a-3d6f12a0c001";
+    const MGMT_PROTOCOL = "4c4b0002-9a7e-4f4e-8b8a-3d6f12a0c001";
+    const NUS_TX = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
+    const encoder = new TextEncoder();
+    class FakeTransport {
+      constructor() {
+        this.mgmtCallback = null;
+        this.uartCallback = null;
+        this.frame = new Uint8Array(0);
+        this.owner = "0";
+        this.uart = "115200,8,N,1,none";
+      }
+      async initialize() {}
+      async requestDevice() { return { id: "fake-bee", name: "Linkr Bee fake" }; }
+      async connect() {}
+      async disconnect() {}
+      async read(_id, _service, characteristic) {
+        if (characteristic === MGMT_PROTOCOL) {
+          return new DataView(Uint8Array.from([1, 0, 0, 2, 0xbf, 0, 0, 0, 0, 0]).buffer);
+        }
+        return new DataView(new ArrayBuffer(0));
+      }
+      async write(_id, _service, characteristic, value) {
+        if (characteristic !== MGMT_COMMAND) return;
+        const chunk = value instanceof Uint8Array
+          ? value
+          : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+        const merged = new Uint8Array(this.frame.length + chunk.length);
+        merged.set(this.frame, 0);
+        merged.set(chunk, this.frame.length);
+        this.frame = merged;
+        if (this.frame.length < 12) return;
+        const requestId = this.frame[4] | (this.frame[5] << 8) | (this.frame[6] << 16) | (this.frame[7] << 24);
+        const length = this.frame[8] | (this.frame[9] << 8);
+        if (this.frame.length < 12 + length) return;
+        const command = new TextDecoder().decode(this.frame.slice(12, 12 + length));
+        this.frame = new Uint8Array(0);
+        let reply;
+        if (command.startsWith("@u=")) {
+          this.uart = command.slice(3);
+          reply = `OK uart=${this.uart}\r\n`;
+        } else if (command === "@u?") {
+          reply = `OK uart=${this.uart}\r\n`;
+        } else if (command === "@c claim") {
+          this.owner = "2";
+          reply = "OK control self=2 owner=2 mode=control epoch=2\r\n";
+        } else if (command === "@c release") {
+          this.owner = "0";
+          reply = "OK control self=2 owner=0 mode=available epoch=3\r\n";
+        } else if (command === "@c?") {
+          reply = this.owner === "2"
+            ? "OK control self=2 owner=2 mode=control epoch=2\r\n"
+            : "OK control self=2 owner=0 mode=available epoch=1\r\n";
+        } else {
+          reply = "ERR unknown command\r\n";
+        }
+        queueMicrotask(() => {
+          const payload = encoder.encode(reply);
+          const frame = new Uint8Array(12 + payload.length);
+          frame.set([0x4c, 0x4b, 1, 2]);
+          const view = new DataView(frame.buffer);
+          view.setUint32(4, requestId, true);
+          view.setUint16(8, payload.length, true);
+          frame.set(payload, 12);
+          this.mgmtCallback?.(new DataView(frame.buffer));
+        });
+      }
+      async startNotifications(_id, _service, characteristic, callback) {
+        if (characteristic === MGMT_RESPONSE) this.mgmtCallback = callback;
+        else if (characteristic === NUS_TX) this.uartCallback = callback;
+      }
+    }
+    window.__fakeTransport = new FakeTransport();
+  });
+
+  await page.goto(`${base}/servo.html?lang=en&theme=dark`);
+  // ble_transport.js installs the browser transport when the page loads; swap
+  // the fake in only after it has run.
+  await page.evaluate(() => { window.LinkrBleTransport = window.__fakeTransport; });
+  await page.locator("#connectButton").click();
+  await expect(page.locator("#logList")).toContainText("Console control claimed", { timeout: 15000 });
+  await expect(page.locator("#logList")).not.toContainText("Management v1");
+  await expect(page.locator("#linkStateText")).toContainText("Linkr Bee fake");
+  await expect(page.locator("#scanHint")).toContainText("No servo", { timeout: 15000 });
+  await page.locator("#disconnectButton").click();
+  await expect(page.locator("#linkStateText")).toContainText("Disconnected");
+});
+
 test("the phone layout has no horizontal overflow and the language toggles", async ({ page }) => {
   await page.goto(`${base}/servo.html?demo=servo&lang=zh&theme=dark`);
   const overflow = await page.evaluate(

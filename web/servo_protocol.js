@@ -163,6 +163,18 @@ export function registersFor(info) {
   return info?.family === "scs" ? SCS_REGISTERS : STS_REGISTERS;
 }
 
+/* Web Bluetooth reads return a DataView; `new Uint8Array(dataView)` is empty
+ * because a DataView is not array-like. Convert every view shape explicitly. */
+export function toBytes(value) {
+  if (value == null) return new Uint8Array(0);
+  if (value instanceof Uint8Array) return value;
+  if (ArrayBuffer.isView(value)) {
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  }
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  return new Uint8Array(value);
+}
+
 /* --- Byte order helpers -------------------------------------------------- */
 
 export function wordFromBytes(data, endian = "little") {

@@ -15,7 +15,7 @@
  * presentation for screenshot runs.
  */
 
-import { parseManagementHeader } from "./management_protocol.js?v=20261112";
+import { parseManagementHeader } from "./management_protocol.js?v=20261112b";
 import {
   BROADCAST_ID,
   INSTRUCTION,
@@ -30,8 +30,9 @@ import {
   decodeWord,
   encodeRegister,
   parseIdRange,
+  toBytes,
   toServoWord,
-} from "./servo_protocol.js?v=20261112";
+} from "./servo_protocol.js?v=20261112b";
 
 const NUS_SERVICE = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
 const NUS_RX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
@@ -89,6 +90,7 @@ const STRINGS = {
     requesting: "请选择 Linkr Bee…",
     connectingDevice: "正在连接 {name}…",
     unsupportedApi: "这块 Bee 的固件不支持 Management v1，无法改 UART 参数。",
+    managementReply: "管理协议应答无效（{bytes}），请硬刷新页面后重新连接。",
     pairHint: "首次连接新主机：先按一下 Bee 的配对键（X1.0：USER_KEY/GPIO3），再在浏览器里允许配对。",
     connectFailed: "连接失败：{message}",
     disconnectedNotice: "连接已断开。",
@@ -280,6 +282,7 @@ const STRINGS = {
     requesting: "Choose a Linkr Bee…",
     connectingDevice: "Connecting to {name}…",
     unsupportedApi: "This Bee firmware does not expose Management v1, so the UART cannot be configured.",
+    managementReply: "Invalid management reply ({bytes}); hard-refresh the page and reconnect.",
     pairHint: "First time on a new host: press the Bee pairing key (X1.0: USER_KEY/GPIO3), then allow pairing in the browser.",
     connectFailed: "Connection failed: {message}",
     disconnectedNotice: "The link disconnected.",
@@ -690,8 +693,7 @@ async function sendUart(bytes) {
 
 function onUartData(value) {
   if (!state.link) return;
-  const bytes = value instanceof Uint8Array ? value : new Uint8Array(value);
-  state.link.feed(bytes);
+  state.link.feed(toBytes(value));
 }
 
 /* Management v1 request/response on its own framed characteristic. */
@@ -700,7 +702,7 @@ const managementPending = new Map();
 let managementPartial = null;
 
 function onManagementData(value) {
-  const bytes = value instanceof Uint8Array ? value : new Uint8Array(value);
+  const bytes = toBytes(value);
   if (!managementPartial) {
     if (bytes.length < 12) return;
     const header = parseManagementHeader(bytes);
@@ -994,8 +996,13 @@ async function connect() {
     await transport.connect(device.id, () => onDisconnected());
     state.transport = transport;
     state.deviceId = device.id;
-    const protocol = new Uint8Array(await transport.read(device.id, MGMT_SERVICE, MGMT_PROTOCOL));
-    if (protocol[0] !== 1) throw new Error(t("unsupportedApi"));
+    const protocol = toBytes(await transport.read(device.id, MGMT_SERVICE, MGMT_PROTOCOL));
+    if (protocol.length < 8 || protocol[0] !== 1) {
+      log("warn", t("managementReply", {
+        bytes: protocol.length ? Array.from(protocol, (byte) => byte.toString(16).padStart(2, "0")).join(" ") : "empty",
+      }));
+      throw new Error(t("unsupportedApi"));
+    }
     state.caps = protocol[4] | (protocol[5] << 8) | (protocol[6] << 16) | (protocol[7] << 24);
     await transport.startNotifications(device.id, MGMT_SERVICE, MGMT_RESPONSE, onManagementData);
     await transport.startNotifications(device.id, NUS_SERVICE, NUS_TX, onUartData);
