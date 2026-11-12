@@ -45,6 +45,7 @@ and closes its eventual result; a new dial waits for that cleanup to finish.
 | Resume a conversation | Ctrl+G opens conversation history; Enter or click resumes; Esc returns |
 | Start / switch a conversation | Ctrl+N / Alt+Up or Alt+Down while the assistant has focus |
 | Shared console | The top bar says `In control`, `Read only` or `No controller` when the board arbitrates ownership, over Bluetooth or the LAN bridge. Typing while read-only holds the keystrokes, asks for an idle hand-over, and sends them once it is granted; a busy owner refuses and the line is dropped. Ctrl+P → Take console control preempts, Release gives it up, and Hand over returns it to the session this one took it from |
+| Shared console (CLI) | `--query-control` prints `self`, `owner`, `mode`, `epoch` and `peers`; `--control claim\|idle\|release\|yield` takes, shares, gives up or hands back the console. `--send` waits for the console before its first byte and fails rather than typing into a session that is still writing |
 
 The message composer remains at the bottom of the assistant. Long drafts and
 URLs scroll horizontally with the caret, including CJK and combined emoji.
@@ -262,10 +263,21 @@ cargo run -- --ble-name Linkr --wifi-scan --loopback-test --no-terminal
 cargo run -- --ble-name Linkr --query-ble-name --json
 cargo run -- --ble-name Linkr --rename-ble "测试😀" --json
 cargo run -- --ble-name Linkr --reset-ble-name --json
+cargo run -- --ble-name Linkr --query-control --json
+cargo run -- --ble-name Linkr --control idle
 cargo run -- --print-completion zsh
 cargo run -- --scan --timeout 5
 cargo run -- --ble-name Linkr --serve
 ```
+
+The shared console is part of the shell surface, not only the terminal.
+`--query-control` reports who owns it, `--control claim` takes it, `--control
+idle` takes it only when the owner has stopped typing, and `--control release`
+or `--control yield` gives it up or hands it back. Before `--send` writes its
+first byte it waits for the console the same way a keystroke does; a console
+that is still being typed into fails the send instead of delivering half a
+command into somebody else's shell. Firmware does not filter raw UART bytes by
+owner, so this check belongs to the client.
 
 The advertised BLE name has an entry in the terminal as well: the network view
 carries the current name, *Rename*, *Restore default* and *Read name*. A name

@@ -829,6 +829,10 @@ pub struct App {
     /// flag: an old bridge never sends it and the TUI never probes with a
     /// command it would not understand.
     pub control_announced: bool,
+    /// Why the last ownership command was refused (`busy`, `not_owner`, …).
+    /// Kept for callers without a toast stack — a script must be able to say
+    /// what the bridge said instead of printing a mode that did not move.
+    pub control_error: Option<String>,
     /// When a delayed removal is due to be read back; see [`App::pump`].
     pub bond_refresh_due: Option<Instant>,
     /// Whether the label command in flight is the automatic "this host has no
@@ -1079,6 +1083,7 @@ impl Default for App {
             control_handover: None,
             control_yield: false,
             control_announced: false,
+            control_error: None,
             bond_refresh_due: None,
             bond_self_write: false,
             bond_mutation_pending: false,
@@ -3179,6 +3184,7 @@ impl App {
                 self.held_input.clear();
                 self.control_poll_due = None;
                 self.control_auto_claim = false;
+                self.control_error = None;
             }
             self.control_read_pending = self.ble_connected() && self.supports_control();
             // A LAN bridge announces ownership as a text frame, which may have
@@ -3243,6 +3249,7 @@ impl App {
             self.control_handover = None;
             self.control_yield = false;
             self.control_announced = false;
+            self.control_error = None;
             self.ble_name_write_pending = false;
             self.ble_name_read_pending = false;
             self.lan_token_read_pending = false;
@@ -3644,11 +3651,25 @@ impl App {
     }
 
     /// Whether typing right now would be refused for want of control.
-    fn control_readonly(&self) -> bool {
+    pub fn control_readonly(&self) -> bool {
         self.supports_control()
             && self
                 .control
                 .is_some_and(|status| status.mode != crate::device::ControlMode::Control)
+    }
+
+    /// The console's mode, when the board or bridge has said what it is.
+    ///
+    /// `None` is also the answer for firmware without ownership arbitration:
+    /// the historical behaviour is to let typing through, and the callers that
+    /// gate input treat it that way.
+    pub fn control_mode(&self) -> Option<crate::device::ControlMode> {
+        self.control.map(|status| status.mode)
+    }
+
+    /// Why the last ownership command was refused, if it was.
+    pub fn control_refusal(&self) -> Option<&str> {
+        self.control_error.as_deref()
     }
 
     /// The top bar's ownership badge, and the mode it describes.
@@ -3684,6 +3705,8 @@ impl App {
         if self.talk.waiting().is_some() {
             return Err(self.strings().control_wait.to_string());
         }
+        // A refusal answers the command being sent now, not the one before it.
+        self.control_error = None;
         if self.transport == Transport::Lan {
             let command = format!("@control {action}");
             if !self.session.send_control(command.clone()) {
@@ -3728,6 +3751,7 @@ impl App {
     /// Take the console now, and say what was asked.
     pub fn take_control(&mut self) -> Notice {
         let s = self.strings();
+        self.control_error = None;
         if !self.supports_control() {
             return Notice {
                 text: s.control_unsupported.to_string(),
@@ -3748,6 +3772,44 @@ impl App {
                 text: s.control_requested.to_string(),
                 level: NoticeLevel::Info,
             },
+            Err(why) => Notice {
+                text: why,
+                level: NoticeLevel::Warn,
+            },
+        }
+    }
+
+    /// Ask for the console only if its owner has stopped typing.
+    ///
+    /// This is the keystroke path without a keystroke: a script that is about
+    /// to type gets the same rule a person does, and a refused claim leaves
+    /// the console where it was.
+    pub fn take_control_when_idle(&mut self) -> Notice {
+        let s = self.strings();
+        self.control_error = None;
+        if !self.supports_control() {
+            return Notice {
+                text: s.control_unsupported.to_string(),
+                level: NoticeLevel::Warn,
+            };
+        }
+        if self
+            .control
+            .is_some_and(|status| status.mode == crate::device::ControlMode::Control)
+        {
+            return Notice {
+                text: s.control_owned.to_string(),
+                level: NoticeLevel::Info,
+            };
+        }
+        match self.request_control("claim idle") {
+            Ok(()) => {
+                self.control_claim_in_flight = true;
+                Notice {
+                    text: s.control_requested.to_string(),
+                    level: NoticeLevel::Info,
+                }
+            }
             Err(why) => Notice {
                 text: why,
                 level: NoticeLevel::Warn,
@@ -3879,6 +3941,7 @@ impl App {
                 }
             }
             self.control = Some(status);
+            self.control_error = None;
             self.control_poll_due = Some(Instant::now() + CONTROL_POLL);
             match status.mode {
                 crate::device::ControlMode::Control => {
@@ -3934,6 +3997,7 @@ impl App {
             let was_holding_keystrokes = std::mem::take(&mut self.control_claim_in_flight);
             self.control_yield = false;
             self.held_input.clear();
+            self.control_error = Some(reason.to_string());
             self.push_notice(Notice {
                 text: if was_holding_keystrokes && reason == "busy" {
                     s.control_busy.to_string()
@@ -9858,6 +9922,43 @@ mod tests {
             "the refusal is spoken: {:?}",
             app.notices
         );
+    }
+
+    /// A script reads the refusal, not only the toast: `--control` and `send`
+    /// report what the bridge said.
+    #[test]
+    fn a_refused_ownership_command_is_readable_by_a_script() {
+        let (mut app, wire, query) = connected_with_ownership(Lang::En);
+        wire.feed_management(answer(
+            query,
+            "OK control self=2 owner=1 mode=readonly epoch=3 peers=2\r\n",
+        ));
+        assert!(pump_until(&mut app, |app| app.control.is_some()));
+        settle_connect_reads(&mut app, &wire);
+
+        let press = app.take_control_when_idle();
+        assert_eq!(press.level, crate::event::NoticeLevel::Info);
+        let claim = next_control_frame(&mut app, &wire, b"@c claim idle");
+        wire.feed_management(answer(claim, "ERR control=busy\r\n"));
+        assert!(pump_until(&mut app, |app| app.control_refusal().is_some()));
+        assert_eq!(app.control_refusal(), Some("busy"));
+    }
+
+    /// The idle claim is available without a keystroke, for a script that is
+    /// about to send stdin.
+    #[test]
+    fn asking_for_the_console_when_idle_sends_the_idle_claim() {
+        let (mut app, wire, query) = connected_with_ownership(Lang::En);
+        wire.feed_management(answer(
+            query,
+            "OK control self=2 owner=1 mode=readonly epoch=3 peers=2\r\n",
+        ));
+        assert!(pump_until(&mut app, |app| app.control.is_some()));
+        settle_connect_reads(&mut app, &wire);
+
+        let notice = app.take_control_when_idle();
+        assert_eq!(notice.level, crate::event::NoticeLevel::Info);
+        next_control_frame(&mut app, &wire, b"@c claim idle");
     }
 
     /// Giving the console up is not another session seizing it, and saying so
