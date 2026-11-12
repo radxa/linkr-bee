@@ -204,6 +204,13 @@ function updateResetAvailability() {
   resetButton.disabled = state.flashing || !navigator.serial || !state.port;
 }
 
+// Chips that expose their own USB Serial/JTAG peripheral (ESP32-C3/S3/C6/P4)
+// rather than a separate USB-UART bridge. They need the extra reset edge below.
+function isNativeUsb(port = state.port) {
+  const { vid, pid } = portInfo(port);
+  return vid === "303A" && pid === "1001";
+}
+
 function formatBytes(bytes) {
   if (!Number.isFinite(bytes) || bytes <= 0) return "—";
   if (bytes < 1024) return `${bytes} B`;
@@ -505,7 +512,11 @@ async function flash({ noReset = false } = {}) {
       },
     });
 
-    await loader.after("hard_reset");
+    setStatus("正在重启开发板…");
+    logLine("正在重启开发板…");
+    await restartBoard();
+    // The board is booting; hand the port back so the terminal can open it.
+    await releaseConnection();
     setProgress(1);
     resetButton.disabled = false;
     setStatus("烧录完成。设备已重启，可以打开终端连接。", "ok");
@@ -541,17 +552,119 @@ async function flash({ noReset = false } = {}) {
   }
 }
 
-async function pulseReset(transport) {
-  // The UART auto-reset circuit wires DTR to GPIO0 and RTS to EN. Pulse both
-  // in the order esptool's classic reset uses; `loader.after("hard_reset")`
-  // only drops RTS and has no edge when the line is already idle.
-  await transport.setDTR(false);
-  await transport.setRTS(true);
-  await sleep(100);
-  await transport.setDTR(true);
-  await transport.setRTS(false);
-  await sleep(100);
-  await transport.setDTR(false);
+// esptool-js' `after("hard_reset")` only drops RTS. When the line is already
+// idle that is no edge at all, so the chip keeps running the flasher stub: the
+// WROOM-32 shows only its power LED, and the X1.0 stays in USB download mode
+// with no console and no BLE. Pulse EN ourselves and leave IO0/BOOT high, so
+// the release starts the firmware instead of the ROM loader.
+async function pulseEn(transport, { hold = 120, settle = 300 } = {}) {
+  await transport.setDTR(false); // IO0/BOOT high: boot the firmware, not the loader
+  await transport.setRTS(true); // EN low: hold the chip in reset
+  await sleep(hold);
+  await transport.setRTS(false); // EN high: start
+  await sleep(settle);
+}
+
+async function ensureTransport() {
+  if (!state.transport) {
+    // Bounded cleanup first: a session left over from a failed flash may still
+    // hold the reader lock.
+    await releaseConnection();
+    state.transport = new Transport(state.port, false);
+    await state.transport.connect(115200);
+  }
+  return state.transport;
+}
+
+async function openTransport() {
+  try {
+    return await ensureTransport();
+  } catch {
+    // The session may have been left closed by a failed flash.
+    await releaseConnection();
+    return ensureTransport();
+  }
+}
+
+async function pulseEnOnly() {
+  const transport = await openTransport();
+  await pulseEn(transport);
+  // EN and IO0 are idle again; hand the port back before the USB re-enumerates.
+  await releaseConnection();
+}
+
+// Read whatever the chip prints after a reset, long enough to tell a real boot
+// (`boot:0xf`, Zephyr banner) from a chip that fell back into USB download mode
+// (`boot:0x0`, "wait usb download").
+async function readBootOutput(port, timeout = 1600) {
+  const decoder = new TextDecoder();
+  let reader;
+  const deadline = Date.now() + timeout;
+  try {
+    await port.open({ baudRate: 115200 });
+    reader = port.readable.getReader();
+    let text = "";
+    while (Date.now() < deadline) {
+      const result = await Promise.race([
+        reader.read(),
+        sleep(Math.max(0, deadline - Date.now())).then(() => null),
+      ]);
+      if (!result || result.done) break;
+      if (result.value) {
+        text += decoder.decode(result.value, { stream: true });
+        if (/wait usb download|boot:0x0|Booting Zephyr/i.test(text)) break;
+      }
+    }
+    return text;
+  } finally {
+    try {
+      await reader?.cancel();
+    } catch {
+      // Already cancelled.
+    }
+    try {
+      reader?.releaseLock?.();
+    } catch {
+      // Nothing holds the lock.
+    }
+    try {
+      await port?.close?.();
+    } catch {
+      // Already closed.
+    }
+  }
+}
+
+async function restartBoard() {
+  await releaseConnection();
+  try {
+    await pulseEnOnly();
+  } catch {
+    await pulseEnOnly();
+  }
+  if (!isNativeUsb()) return;
+
+  // The X1.0 only has the ESP32-C3's internal pull-up on GPIO9 (R3 is DNP and
+  // C2 is 100 nF), so the first edge can still be sampled low and drop the chip
+  // back into USB download mode. Watch the reset banner and pulse again only
+  // while the chip is still sitting in the loader; a second blind pulse would
+  // reset a board that already started.
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await sleep(200);
+    let banner = "";
+    try {
+      banner = await readBootOutput(state.port, 1600);
+    } catch {
+      // The port can still be enumerating; retry on the next pass.
+    }
+    if (banner && !/wait usb download|boot:0x0/i.test(banner)) return;
+    if (!banner && attempt > 0) return;
+    try {
+      await pulseEnOnly();
+    } catch {
+      return;
+    }
+  }
 }
 
 async function resetDevice() {
@@ -562,17 +675,9 @@ async function resetDevice() {
   }
   resetButton.disabled = true;
   try {
-    try {
-      if (!state.transport) throw new Error("no open transport");
-      await pulseReset(state.transport);
-    } catch {
-      // A transport left over from a failed flash may already be closed.
-      await releaseConnection();
-      state.transport = new Transport(state.port, false);
-      await state.transport.connect(115200);
-      await pulseReset(state.transport);
-    }
+    await restartBoard();
     setStatus("已发送重启命令。", "ok");
+    logLine("已发送重启命令。");
   } catch (error) {
     setStatus(`重启失败：${error?.message || error}`, "error");
   } finally {
