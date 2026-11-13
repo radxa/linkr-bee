@@ -22,8 +22,16 @@ log_*.txt
 
 # Local tooling state
 .reasonix/
-# Dependencies installed into the linked Harness plugin (npm install linkr-bee-cli)
+# Dependencies installed into the linked agent plugins (npm install linkr-bee-cli)
 linkr-bee-dsh/node_modules/
+linkr-bee-opencode/node_modules/
+# The OpenCode plugin commits its prebuilt UI bundles and ships them in npm, so
+# keep them despite the generic dist/ rule above.
+!linkr-bee-opencode/dist/
+!linkr-bee-opencode/dist/*
+
+# Local screen captures from KVM automation runs
+.linkr/
 
 # Mobile app dependencies and generated output
 mobile/node_modules/

@@ -95,6 +95,30 @@ RISC-V 64-bit and LoongArch64 Linux are prospective CLI/TUI ports, not published
 v0.1 targets. See the [architecture assessment](docs/CLI_ARCHITECTURES.zh-CN.md)
 (Chinese) for dependencies and remaining build/runtime validation.
 
+### Agent plugins
+
+[opencode-linkr-bee](linkr-bee-opencode/README.md) gives the
+[OpenCode](https://opencode.ai) 2.x agent five board tools over one shared live
+serial console: `linkr_bee_exec` and `linkr_bee_send` drive the target console,
+`linkr_bee_query` and `linkr_bee_set` read and change the bridge, and
+`linkr_bee_console` drives the console panel. The console appears in the TUI
+(**Linkr Bee: open console**, Ctrl+Shift+L, or `/linkr-bee`), in OpenCode
+desktop app windows (**Linkr Bee: toggle console**, Ctrl+\`), and as a
+standalone local browser page at the token-gated loopback URL the plugin reports
+(`webUrl`). The desktop panel does not load in a browser tab at the
+`opencode serve` URL; the browser page covers that case. Pairing and settings
+live in the **Linkr Bee** page of the desktop app's Settings (scan, one-click
+connect, transport fields, bridge UART, browser page) and in the TUI dialog
+commands **Linkr Bee: board / pair…** / **Linkr Bee: settings…** (or
+`/linkr-bee scan|settings|status`). Every console status bar shows the bridge
+UART baud rate the board reports.
+
+It needs OpenCode 2.x (verified with 2.2.7), Node.js 22 or newer, and `bee-cli`
+1.2.0 or newer; install it with `opencode plugin add opencode-linkr-bee`, which
+adds it to the global configuration. Projects can also list it under `"plugins"`
+in `opencode.json`. The DeepSeek Harness counterpart is
+[dsh-linkr-bee](linkr-bee-dsh/README.md).
+
 The mobile screenshots below show the shared responsive web UI, not proof of a
 physical-device test. See each platform guide for its validation status.
 

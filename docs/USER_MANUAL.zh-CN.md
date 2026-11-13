@@ -1,6 +1,6 @@
 # Linkr Bee 用户说明书
 
-Linkr Bee 将目标设备的 UART 串口控制台通过蓝牙或局域网连接到电脑。你可以使用命令行、终端界面、网页，或在 DeepSeek Harness 中使用 Bee 插件操作同一台设备。
+Linkr Bee 将目标设备的 UART 串口控制台通过蓝牙或局域网连接到电脑。你可以使用命令行、终端界面、网页，或在 DeepSeek Harness、OpenCode 中使用 Bee 插件操作同一台设备。
 
 本文以 **Linkr Bee X1.0（MV013）** 为例。其他支持的开发板在引脚、配对方式和可用功能上可能不同，接线前请查阅[硬件需求](HARDWARE.md)。
 
@@ -190,6 +190,32 @@ X1.0 支持的固件会显示**板载**功能，可操作状态灯、J5 接点�
 5. 在串口面板输入、登录目标并查看输出。可向 Agent 请求读取控制台、查询 Bee 状态或执行明确的目标命令；Agent 和用户共用同一串口会话，操作时避免同时输入未完成的命令。
 
 面板提供 Reading / Raw 视图；两者切换只改变本地显示。BLE 管理查询和设置需要 BLE 连接，LAN 只传输串口数据。连接断开时可使用面板中的 **Reconnect**，配置项和故障排查见[插件说明](../linkr-bee-dsh/README.md)。
+
+### 2.6 OpenCode：安装并使用 Bee 插件
+
+[opencode-linkr-bee](../linkr-bee-opencode/README.md) 为 [OpenCode](https://opencode.ai) 2.x 编程 Agent 提供五个板卡工具和一条共享的实时串口控制台。需要 OpenCode **2.x**（已在 2.2.7 验证）、Node.js **22 或以上**，以及 `bee-cli` **1.2.0 或以上**；控制台还要求 `bee-cli` 带 `watch`（或 `monitor`）与 `resize` 操作，版本过旧时面板会给出提示。
+
+1. 执行 `opencode plugin add opencode-linkr-bee` 安装插件，OpenCode 2.x 会把它写入全局配置。可用 `opencode plugin list` 确认已加载；`opencode plugin update opencode-linkr-bee` 与 `opencode plugin remove opencode-linkr-bee` 用于更新和卸载。
+2. 也可以在任意生效的 `opencode.json` 中手工配置（项目根目录、`.opencode/opencode.json` 或 `~/.config/opencode/opencode.json`）。2.x 的配置键是 `"plugins"`，带选项的条目是对象：
+
+   ```json
+   {
+     "$schema": "https://opencode.ai/config.json",
+     "plugins": [
+       { "package": "opencode-linkr-bee", "options": { "transport": "ble" } }
+     ]
+   }
+   ```
+
+   本地开发时把 `package` 指向插件目录的路径即可（必须是含 `package.json` 的目录，单个文件会被跳过）。
+3. 重启 OpenCode 会话或服务使插件加载。插件把 `linkr-bee-cli` 声明为依赖，正常安装会一并带上；首次调用仍可能需要联网下载并校验对应平台的二进制。若自动查找失败，可单独执行 `npm install -g linkr-bee-cli`，或在插件选项中填写 `cliPath`。
+4. 按第 1.2 节准备 Bee 并完成配对，然后打开共享控制台——Agent 工具和所有面板看到的是同一条会话和同一批字节：
+   - **TUI 面板**：在 OpenCode 终端界面按 Ctrl+Shift+L（终端无法发送 Ctrl+Shift 时用 Ctrl+L），或在命令面板选择 **Linkr Bee: open console**，或输入 `/linkr-bee`。`/linkr-bee` 还接受 `send <文本>`、`ctrl-c`、`clear`、`raw`（切换 Reading/Raw）和 `reconnect`。配对与设置同样在 TUI 里完成：命令面板 **Linkr Bee: board / pair…** 可扫描并连接板子、重连已保存板子或查看状态；**Linkr Bee: settings…** 可改传输方式、LAN 令牌、`bee-cli` 路径、超时、桥接 UART 和浏览器页开关；也可直接输入 `/linkr-bee scan`、`/linkr-bee settings`、`/linkr-bee status`。Reading 视图是过滤后的文本日志，底部有一行输入框；Raw 视图在支持内嵌终端的宿主上是真正的 VT100 终端，全屏程序、方向键菜单和 curses 界面可用（宿主较旧时回退为文本日志）。
+   - **桌面应用面板**：在 OpenCode 桌面应用窗口中使用命令 **Linkr Bee: toggle console**（默认快捷键 Ctrl+\`），或会话侧栏 **+** 菜单中的 **Linkr Bee console**。该面板只在桌面应用窗口中加载；`opencode serve` 的浏览器 Web UI 不加载 GUI 插件，浏览器标签页看不到它。桌面版在 **设置 → Linkr Bee** 提供同一套配置页（扫描/连接/传输/UART/浏览器页），面板头部的 ⚙ 也直达该页。
+   - **浏览器控制台页面**：插件启动一个仅限本机的页面，地址形如 `http://127.0.0.1:<port>/?t=<token>`，由控制台的 `webUrl`（或 `state.webUrl`）给出；页面提供 Reading/Raw、Clear、Reconnect 和 Copy URL。配置项 `webConsole`（环境变量 `LINKR_BEE_WEB_CONSOLE`，默认开启）可关闭。该地址包含访问令牌，只在本机使用，不要发给他人。
+5. 让 Agent 调用工具：`linkr_bee_exec` 在目标 UART 控制台执行命令并返回输出，`linkr_bee_query` 读取桥接与链路状态，`linkr_bee_send` 发送输入并捕获回复窗口，`linkr_bee_set` 修改桥接设置，`linkr_bee_console` 驱动共享控制台（`open`/`focus`/`clear`/`type`/`key`/`read`/`state`/`resize`）。传输方式（`ble` / `lan` / `loopback`）和其余配置项见[插件说明](../linkr-bee-opencode/README.md)。
+
+面板和工具共用同一条串口会话与同一条 BLE 链路，一次只有一个连接；Agent 调用一次性工具时会短暂接管链路。没有板子或 `bee-cli` 时面板仍会打开并显示离线提示。三个面板的状态栏都会显示桥接实际上报的 UART 波特率（未知时不显示）。设置页/TUI 菜单保存的值写在插件自己的 `$XDG_STATE_HOME/opencode/linkr-bee.json`（默认 `~/.local/state/opencode/linkr-bee.json`），优先级为设置文件 > `opencode.json` 的 `options` > 环境变量 > 默认值。
 
 ## 3. 常见问题
 

@@ -1,0 +1,204 @@
+/*
+ * Styles for the plugin-served standalone console page.
+ *
+ * A plain browser document: colours follow `data-theme` on <html> (system
+ * preference by default, `?theme=light|dark` override). The terminal itself is
+ * themed through xterm's ITheme; this file only styles the page chrome.
+ */
+:root {
+  --lbw-bg: #151a21;
+  --lbw-fg: #d7dde5;
+  --lbw-muted: #8b98a9;
+  --lbw-border: #2a3341;
+  --lbw-button: #1d2531;
+  --lbw-button-hover: #26303e;
+  --lbw-selected: #2a3546;
+  --lbw-hint: #1a2029;
+  --lbw-error: #f07178;
+  --lbw-warn: #e6c07b;
+  --lbw-ok: #3fb950;
+  color-scheme: dark;
+}
+
+:root[data-theme='light'] {
+  --lbw-bg: #f6f8fa;
+  --lbw-fg: #24292f;
+  --lbw-muted: #6e7781;
+  --lbw-border: #d0d7de;
+  --lbw-button: #ffffff;
+  --lbw-button-hover: #eaeef2;
+  --lbw-selected: #e6ebf1;
+  --lbw-hint: #f0f3f6;
+  --lbw-error: #cf222e;
+  --lbw-warn: #9a6700;
+  --lbw-ok: #1a7f37;
+  color-scheme: light;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--lbw-bg);
+  color: var(--lbw-fg);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  font-size: 12px;
+}
+
+#linkr-console {
+  position: fixed;
+  inset: 0;
+}
+
+.lbw {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--lbw-bg);
+  color: var(--lbw-fg);
+}
+
+.lbw-bar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--lbw-border);
+}
+
+.lbw-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--lbw-muted);
+}
+
+.lbw-dot[data-on='true'] {
+  background: var(--lbw-ok);
+}
+
+.lbw-title {
+  flex: 0 0 auto;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.lbw-status {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--lbw-muted);
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lbw-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+}
+
+.lbw button {
+  height: 24px;
+  padding: 0 9px;
+  border: 1px solid var(--lbw-border);
+  border-radius: 5px;
+  background: var(--lbw-button);
+  color: var(--lbw-fg);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.lbw button:hover:not(:disabled) {
+  background: var(--lbw-button-hover);
+}
+
+.lbw button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.lbw-seg {
+  display: flex;
+  overflow: hidden;
+  border: 1px solid var(--lbw-border);
+  border-radius: 5px;
+}
+
+.lbw-seg button {
+  height: 22px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--lbw-muted);
+  padding: 0 8px;
+}
+
+.lbw-seg button[data-active='true'] {
+  background: var(--lbw-selected);
+  color: var(--lbw-fg);
+}
+
+.lbw-seg button + button {
+  border-left: 1px solid var(--lbw-border);
+}
+
+.lbw-target {
+  flex: 0 0 auto;
+  overflow: hidden;
+  padding: 3px 10px;
+  border-bottom: 1px solid var(--lbw-border);
+  color: var(--lbw-muted);
+  font-size: 11px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lbw-hint {
+  flex: 0 0 auto;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--lbw-border);
+  background: var(--lbw-hint);
+  color: var(--lbw-muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.lbw-hint[data-tone='warn'] {
+  color: var(--lbw-warn);
+}
+
+.lbw-hint[data-tone='error'] {
+  color: var(--lbw-error);
+}
+
+.lbw-terminal {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  padding: 4px 0 2px 6px;
+}
+
+.lbw-term-host {
+  height: 100%;
+}
+
+.lbw-term-host .xterm {
+  height: 100%;
+}
+
+.lbw-term-host .xterm-viewport {
+  scrollbar-width: thin;
+}
