@@ -1,0 +1,201 @@
+/*
+ * Styles contributed by the GUI part through `ctx.add(Style, css)`.
+ *
+ * Only the panel chrome lives here; the terminal itself is styled by the
+ * bundled `@xterm/xterm` stylesheet plus the theme passed to `new Terminal`.
+ * Colours come from the `--lb-*` custom properties the component sets from
+ * `ctx.appearance.mode()` so the panel follows the app in both schemes.
+ */
+.lb-console {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--lb-bg);
+  color: var(--lb-fg);
+  font-size: 12px;
+}
+
+.lb-console__bar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--lb-border);
+  background: var(--lb-bg);
+}
+
+.lb-console__dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--lb-muted);
+}
+
+.lb-console__dot[data-on="true"] {
+  background: #3fb950;
+}
+
+.lb-console__status {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--lb-muted);
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lb-console__status strong {
+  color: var(--lb-fg);
+  font-weight: 500;
+}
+
+.lb-console__actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+}
+
+.lb-console__seg {
+  display: flex;
+  overflow: hidden;
+  border: 1px solid var(--lb-border);
+  border-radius: 5px;
+}
+
+.lb-console__seg button {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--lb-muted);
+  padding: 2px 7px;
+}
+
+.lb-console__seg button + button {
+  border-left: 1px solid var(--lb-border);
+}
+
+.lb-console__seg button[data-active="true"] {
+  background: var(--lb-selected);
+  color: var(--lb-fg);
+}
+
+.lb-console button {
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--lb-border);
+  border-radius: 5px;
+  background: var(--lb-button);
+  color: var(--lb-fg);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.lb-console button:hover {
+  background: var(--lb-button-hover);
+}
+
+.lb-console button:active {
+  transform: translateY(0.5px);
+}
+
+.lb-console__target {
+  flex: 0 0 auto;
+  overflow: hidden;
+  padding: 3px 10px;
+  border-bottom: 1px solid var(--lb-border);
+  color: var(--lb-muted);
+  font-size: 11px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lb-console__hint {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 2px 14px;
+  align-items: baseline;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--lb-border);
+  background: var(--lb-hint);
+  color: var(--lb-muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.lb-console__hint-copy {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+
+.lb-console__hint-error {
+  flex: 2 1 260px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lb-console__hint-error strong {
+  color: var(--lb-fg);
+  font-weight: 500;
+}
+
+.lb-console__hint strong {
+  color: var(--lb-fg);
+  font-weight: 500;
+}
+
+.lb-console__terminal {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  padding: 4px 0 2px 6px;
+  background: var(--lb-term-bg);
+}
+
+.lb-console__terminal .xterm {
+  height: 100%;
+}
+
+.lb-console__terminal .xterm-viewport {
+  scrollbar-width: thin;
+}
+
+/* Settings page widgets: the page itself uses the app's settings components;
+   only the monospace page URL and the notice/error text need a local rule. */
+.lb-settings__url {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.lb-settings__notice {
+  display: block;
+  padding: 8px 0;
+  font-size: 12px;
+  color: var(--lb-muted, #6e7781);
+}
+
+.lb-settings__error {
+  display: block;
+  padding: 8px 0;
+  font-size: 12px;
+  color: #cf222e;
+}
+
+.lb-console__settings {
+  min-width: 26px;
+}

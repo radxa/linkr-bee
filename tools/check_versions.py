@@ -108,6 +108,7 @@ def collect() -> dict[str, str | None]:
         "tools/linkr-tui/Cargo.toml": cargo_version(),
         "tools/linkr-tui/npm/package.json": json_version(ROOT / "tools/linkr-tui/npm/package.json"),
         "linkr-bee-dsh/package.json": json_version(ROOT / "linkr-bee-dsh/package.json"),
+        "linkr-bee-opencode/package.json": json_version(ROOT / "linkr-bee-opencode/package.json"),
     }
 
 

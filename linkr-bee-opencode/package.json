@@ -1,0 +1,86 @@
+{
+  "name": "opencode-linkr-bee",
+  "version": "1.2.0",
+  "description": "Linkr Bee (BLE/UART wireless serial bridge) as an OpenCode 2.x plugin: agent tools that run commands and read state on the target board through bee-cli.",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./server": "./index.js",
+    "./rpc": "./src/rpc.js",
+    "./tui": "./src/tui.tsx",
+    "./gui-experimental": "./dist/gui-experimental.cjs",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "src",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "THIRD_PARTY_NOTICES.md",
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22",
+    "opencode": ">=2.2.0"
+  },
+  "keywords": [
+    "opencode-plugin",
+    "opencode",
+    "linkr-bee",
+    "serial",
+    "uart",
+    "console",
+    "ble",
+    "bluetooth",
+    "embedded"
+  ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/radxa/linkr-bee.git",
+    "directory": "linkr-bee-opencode"
+  },
+  "homepage": "https://github.com/radxa/linkr-bee/tree/main/linkr-bee-opencode",
+  "bugs": {
+    "url": "https://github.com/radxa/linkr-bee/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@opencode/plugin": "2.2.7",
+    "linkr-bee-cli": "^1.2.0"
+  },
+  "peerDependencies": {
+    "@opentui/core": ">=0.6.6",
+    "@opentui/solid": ">=0.6.6",
+    "solid-js": ">=1.9.0"
+  },
+  "peerDependenciesMeta": {
+    "@opentui/core": {
+      "optional": true
+    },
+    "@opentui/solid": {
+      "optional": true
+    },
+    "solid-js": {
+      "optional": true
+    }
+  },
+  "scripts": {
+    "build:gui": "vite build",
+    "build:gui:watch": "vite build --watch",
+    "build:web": "vite build --config vite.web.config.ts",
+    "build:web:watch": "vite build --config vite.web.config.ts --watch",
+    "build": "npm run build:gui && npm run build:web"
+  },
+  "devDependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "solid-js": "^1.9.17",
+    "vite": "^7.3.7",
+    "vite-plugin-solid": "^2.11.10"
+  }
+}

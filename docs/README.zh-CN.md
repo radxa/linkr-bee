@@ -6,7 +6,7 @@
 
 | 文档 | 内容 |
 | --- | --- |
-| [用户说明书](USER_MANUAL.zh-CN.md) | X1.0 接线与配对、CLI / TUI / Web 使用、DeepSeek Harness 插件 |
+| [用户说明书](USER_MANUAL.zh-CN.md) | X1.0 接线与配对、CLI / TUI / Web 使用、DeepSeek Harness / OpenCode 插件 |
 | [项目 README](../README.zh-CN.md) | 产品介绍、客户端选择、接线、首次连接与常见问题 |
 | [使用指南](USAGE.zh-CN.md) | 中文界面截图、终端操作、手机和平板布局、助手、局域网与日志 |
 | [Rust CLI / TUI](../tools/linkr-tui/README.md) | 桌面终端、脚本请求、常驻会话与主机实现（英文） |
@@ -28,6 +28,7 @@
 | [蓝牙配对与恢复](BLE_PAIRING.md) | 配对 GPIO 授权（C3/C5 为 GPIO1；WROOM 可选 GPIO4，默认关闭）、绑定保留、各端步骤与故障恢复 |
 | [MCP 服务器](MCP.zh-CN.md) · [English](MCP.md) | Android App 作为局域网 MCP 端点，供 Claude Desktop、Cursor 等 AI 客户端接入 |
 | [A2A 常驻助手](A2A.zh-CN.md) · [English](A2A.md) | 通过 A2A 暴露 App 内常驻助手：agent card、JSON-RPC 任务、一次任务确认 |
+| [OpenCode 插件](../linkr-bee-opencode/README.md) | OpenCode 2.x 的五个板卡工具与共享实时串口控制台：TUI 面板、桌面应用面板与仅限本机、带令牌的浏览器页面（英文） |
 | [鸿蒙桥接协议](../harmonyos/BRIDGE_PROTOCOL.md) | ArkWeb 与 ArkTS 之间的 JSON 桥接约定（英文） |
 | [视觉资源](../assets/README.md) | Logo、截图语言分组与重新截图的方法（英文） |
 

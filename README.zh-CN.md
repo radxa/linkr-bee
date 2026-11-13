@@ -61,6 +61,22 @@ Linkr Bee 让这条控制台随时可连，不用常驻一根 USB 串口线、�
 RISC-V 64 位和 LoongArch64 Linux 的 CLI/TUI 移植具备基础条件，尚未提供 v0.1 安装包。
 依赖、构建缺口与待验证项见[架构支持评估](docs/CLI_ARCHITECTURES.zh-CN.md)。
 
+### Agent 插件
+
+[opencode-linkr-bee](linkr-bee-opencode/README.md)（英文）为
+[OpenCode](https://opencode.ai) 2.x 的 Agent 提供五个板卡工具，共用一条实时串口控制台：
+`linkr_bee_exec` 与 `linkr_bee_send` 驱动目标控制台，`linkr_bee_query` 与
+`linkr_bee_set` 读取和修改桥接设置，`linkr_bee_console` 驱动控制台面板。控制台有三种
+界面：TUI（命令面板 **Linkr Bee: open console**、Ctrl+Shift+L 或 `/linkr-bee`）、
+OpenCode 桌面应用窗口中的面板（**Linkr Bee: toggle console**、Ctrl+\`），以及插件给出
+地址的本机浏览器页面（仅限回环、带令牌，地址来自 `webUrl`）。桌面面板不会加载在
+`opencode serve` 地址的浏览器标签页里，这种情况请用浏览器页面。
+
+需要 OpenCode 2.x（已在 2.2.7 验证）、Node.js 22 或以上，以及 `bee-cli` 1.2.0 或
+以上；执行 `opencode plugin add opencode-linkr-bee` 会把它安装到全局配置。也可以在
+项目的 `opencode.json` 的 `"plugins"` 数组中列出。DeepSeek Harness 的对应插件是
+[dsh-linkr-bee](linkr-bee-dsh/README.md)（英文）。
+
 下方手机截图展示共享 Web 界面的响应式布局，不代表已完成对应平台的真机验证；各端
 验证范围见平台文档。
 

@@ -88,8 +88,15 @@ jobs:
       - name: Run bridge tests
         run: npm test
 
-      - name: Run CLI launcher and Harness plugin regressions
-        run: node --test ../tools/linkr-tui/npm/test/*.test.mjs ../linkr-bee-dsh/test/*.test.mjs
+      - name: Run CLI launcher and agent plugin regressions
+        run: node --test ../tools/linkr-tui/npm/test/*.test.mjs ../linkr-bee-dsh/test/*.test.mjs ../linkr-bee-opencode/test/*.test.mjs
+
+      # The OpenCode plugin ships prebuilt UI bundles in git; a missing build
+      # would only fail at plugin load, so fail here instead.
+      - name: Check committed OpenCode plugin UI bundles
+        run: |
+          test -s ../linkr-bee-opencode/dist/gui-experimental.cjs
+          test -s ../linkr-bee-opencode/dist/web-console.js
 
       - name: Install browser test runtime
         run: npx playwright install --with-deps chromium
