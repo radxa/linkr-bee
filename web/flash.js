@@ -22,6 +22,7 @@ const portHint = $("portHint");
 const connectButton = $("connectButton");
 const downloadButton = $("downloadButton");
 const resetButton = $("resetButton");
+const watchdogButton = $("watchdogButton");
 const statusLine = $("status");
 const progressBar = $("progressBar");
 const progressTrack = progressBar.parentElement;
@@ -202,6 +203,30 @@ function setProgress(fraction) {
 
 function updateResetAvailability() {
   resetButton.disabled = state.flashing || !navigator.serial || !state.port;
+  // The watchdog reset writes ESP32-C3 RTC registers through the stub, so it
+  // only makes sense on the X1.0's own USB port. Other boards keep the plain
+  // EN restart above. The X1.0 entry still shows the button before a port is
+  // picked, disabled, so the fallback is discoverable instead of appearing
+  // only after the reset it is meant to rescue has failed.
+  const onX1 = state.board?.slug === "linkr-bee-x1-0";
+  const offered = onX1 && !!navigator.serial;
+  const nativeUsb = onX1 && isNativeUsb();
+  watchdogButton.hidden = !offered;
+  watchdogButton.disabled = !offered || !nativeUsb || state.flashing || !state.port;
+  watchdogButton.title = !offered
+    ? ""
+    : !state.port
+      ? "先选择 X1.0 的原生 USB 串口（VID 303A / PID 1001）"
+      : !nativeUsb
+        ? "看门狗重启需要 X1.0 的原生 USB 串口（VID 303A / PID 1001）"
+        : "通过 ESP32-C3 的 RTC 看门狗复位，不依赖 EN 引脚";
+}
+
+// Chips that expose their own USB Serial/JTAG peripheral (ESP32-C3/S3/C6/P4)
+// rather than a separate USB-UART bridge. They need the extra reset edge below.
+function isNativeUsb(port = state.port) {
+  const { vid, pid } = portInfo(port);
+  return vid === "303A" && pid === "1001";
 }
 
 function formatBytes(bytes) {
@@ -302,6 +327,7 @@ function selectBoard(slug) {
   camPrep.hidden = true;
   setProgress(0);
   if (board) setStatus(`已选择 ${board.name}。点击“连接串口并烧录”开始。`);
+  updateResetAvailability();
 }
 
 function populateBoards(manifest) {
@@ -432,6 +458,7 @@ async function flash({ noReset = false } = {}) {
   connectButton.disabled = true;
   retryButton.hidden = true;
   resetButton.disabled = true;
+  watchdogButton.disabled = true;
   portSelect.disabled = true;
   pickPortButton.disabled = true;
   refreshPortsButton.disabled = true;
@@ -505,11 +532,33 @@ async function flash({ noReset = false } = {}) {
       },
     });
 
-    await loader.after("hard_reset");
+    setStatus("正在重启开发板…");
+    logLine("正在重启开发板…");
+    // The write already succeeded. A restart that cannot get the port back
+    // (USB re-enumeration, a cable pulled at the wrong moment) is not a failed
+    // flash, and saying so would invite the user to erase and write again.
+    // `sent` is the honest middle: the edge went out but no boot was read back.
+    let restart = "confirmed";
+    try {
+      restart = await restartBoard();
+    } catch (error) {
+      restart = "failed";
+      logLine(`自动重启失败：${error?.message || error}`);
+    }
+    // The board is booting; hand the port back so the terminal can open it.
+    await releaseConnection();
     setProgress(1);
     resetButton.disabled = false;
-    setStatus("烧录完成。设备已重启，可以打开终端连接。", "ok");
-    logLine("烧录完成，设备已重启。");
+    if (restart === "confirmed") {
+      setStatus("烧录完成。设备已重启，可以打开终端连接。", "ok");
+      logLine("烧录完成，设备已重启。");
+    } else if (restart === "sent") {
+      setStatus("烧录完成，已发送重启命令；如果设备没有启动，请点“重启设备”。");
+      logLine("烧录完成，已发送重启命令（未读回启动信息）。");
+    } else {
+      setStatus("烧录完成，但自动重启失败；请点“重启设备”后再打开终端。");
+      logLine("烧录完成；自动重启失败，请点“重启设备”。");
+    }
   } catch (error) {
     console.error(error);
     let message = String(error?.message || error).replace(/[。.\s]+$/, "");
@@ -541,17 +590,205 @@ async function flash({ noReset = false } = {}) {
   }
 }
 
-async function pulseReset(transport) {
-  // The UART auto-reset circuit wires DTR to GPIO0 and RTS to EN. Pulse both
-  // in the order esptool's classic reset uses; `loader.after("hard_reset")`
-  // only drops RTS and has no edge when the line is already idle.
-  await transport.setDTR(false);
-  await transport.setRTS(true);
-  await sleep(100);
-  await transport.setDTR(true);
-  await transport.setRTS(false);
-  await sleep(100);
-  await transport.setDTR(false);
+// esptool-js' `after("hard_reset")` only drops RTS. When the line is already
+// idle that is no edge at all, so the chip keeps running the flasher stub: the
+// WROOM-32 shows only its power LED, and the X1.0 stays in USB download mode
+// with no console and no BLE. Pulse EN ourselves and leave IO0/BOOT high, so
+// the release starts the firmware instead of the ROM loader.
+async function pulseEn(transport, { hold = 120, settle = 300 } = {}) {
+  await transport.setDTR(false); // IO0/BOOT high: boot the firmware, not the loader
+  await transport.setRTS(true); // EN low: hold the chip in reset
+  await sleep(hold);
+  await transport.setRTS(false); // EN high: start
+  await sleep(settle);
+}
+
+async function ensureTransport() {
+  if (!state.transport) {
+    // Bounded cleanup first: a session left over from a failed flash may still
+    // hold the reader lock.
+    await releaseConnection();
+    state.transport = new Transport(state.port, false);
+    await state.transport.connect(115200);
+  }
+  return state.transport;
+}
+
+async function openTransport() {
+  try {
+    return await ensureTransport();
+  } catch {
+    // The session may have been left closed by a failed flash.
+    await releaseConnection();
+    return ensureTransport();
+  }
+}
+
+async function pulseEnOnly() {
+  const transport = await openTransport();
+  await pulseEn(transport);
+  // EN and IO0 are idle again; hand the port back before the USB re-enumerates.
+  await releaseConnection();
+}
+
+// Read whatever the chip prints after a reset, long enough to tell a real boot
+// (`boot:0xf`, Zephyr banner) from a chip that fell back into USB download mode
+// (`boot:0x0`, "wait usb download").
+async function readBootOutput(port, timeout = 1600) {
+  const decoder = new TextDecoder();
+  let reader;
+  const deadline = Date.now() + timeout;
+  try {
+    await port.open({ baudRate: 115200 });
+    reader = port.readable.getReader();
+    let text = "";
+    while (Date.now() < deadline) {
+      const result = await Promise.race([
+        reader.read(),
+        sleep(Math.max(0, deadline - Date.now())).then(() => null),
+      ]);
+      if (!result || result.done) break;
+      if (result.value) {
+        text += decoder.decode(result.value, { stream: true });
+        if (/wait usb download|boot:0x0|Booting Zephyr/i.test(text)) break;
+      }
+    }
+    return text;
+  } finally {
+    try {
+      await reader?.cancel();
+    } catch {
+      // Already cancelled.
+    }
+    try {
+      reader?.releaseLock?.();
+    } catch {
+      // Nothing holds the lock.
+    }
+    try {
+      await port?.close?.();
+    } catch {
+      // Already closed.
+    }
+  }
+}
+
+async function restartBoard() {
+  await releaseConnection();
+  try {
+    await pulseEnOnly();
+  } catch {
+    await pulseEnOnly();
+  }
+  if (!isNativeUsb()) {
+    // A USB-UART bridge has no console of its own to read back here; the
+    // pulse is the whole answer, and it is the same one esptool sends.
+    return "sent";
+  }
+
+  // The X1.0 only has the ESP32-C3's internal pull-up on GPIO9 (R3 is DNP and
+  // C2 is 100 nF), so the first edge can still be sampled low and drop the chip
+  // back into USB download mode. Watch the reset banner and pulse again only
+  // while the chip is still sitting in the loader; a second blind pulse would
+  // reset a board that already started.
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await sleep(200);
+    let banner = "";
+    try {
+      banner = await readBootOutput(state.port, 1600);
+    } catch {
+      // The port can still be enumerating; retry on the next pass.
+    }
+    if (banner && !/wait usb download|boot:0x0/i.test(banner)) return "confirmed";
+    if (!banner && attempt > 0) return "sent";
+    try {
+      await pulseEnOnly();
+    } catch {
+      return "sent";
+    }
+  }
+  return "sent";
+}
+
+// The ESP32-C3 RTC watchdog reset, the same sequence `esptool --after
+// watchdog-reset` uses: unlock the RTC WDT, set its timeout, enable it, lock.
+// The chip resets from inside, so this path does not reproduce the EN/GPIO9
+// edge that a native-USB reset has to get right.
+async function watchdogReset(loader) {
+  const RTC_CNTL = 0x60008000;
+  const WDT_WKEY = 0x50d83aa1;
+  const WDTCONFIG0 = RTC_CNTL + 0x0090;
+  const WDTCONFIG1 = RTC_CNTL + 0x0094;
+  const WDTWPROTECT = RTC_CNTL + 0x00a8;
+  await loader.writeReg(WDTWPROTECT, WDT_WKEY);
+  await loader.writeReg(WDTCONFIG1, 2000);
+  await loader.writeReg(WDTCONFIG0, (1 << 31) | (5 << 28) | (1 << 8) | 2);
+  await loader.writeReg(WDTWPROTECT, 0);
+  await sleep(600);
+}
+
+// Re-enter the bootloader (the stub is where the registers can be written),
+// arm the watchdog and read whatever the boot prints. An empty read is the
+// normal case on the X1.0: its Zephyr console does not come up on USB CDC.
+async function watchdogRestartBoard() {
+  await releaseConnection();
+  const transport = new Transport(state.port, false);
+  state.transport = transport;
+  const loader = new ESPLoader({
+    transport,
+    baudrate: Number(baudSelect.value),
+    terminal: terminal(),
+    debugLogging: false,
+  });
+  state.loader = loader;
+  const chip = await loader.main("default_reset");
+  if (!/ESP32-C3/i.test(chip)) {
+    throw new Error(`看门狗重启只适用于 ESP32-C3，当前芯片是 ${chip}`);
+  }
+  logLine("已进入引导程序，正在触发看门狗…");
+  await watchdogReset(loader);
+  await releaseConnection();
+  // The USB device re-enumerates; give it a moment before reading the banner.
+  await sleep(300);
+  let banner = "";
+  try {
+    banner = await readBootOutput(state.port, 1000);
+  } catch {
+    // The port can still be enumerating.
+  }
+  if (banner && /wait usb download|boot:0x0/i.test(banner)) {
+    throw new Error("看门狗复位后设备仍停在下载模式，请拔插一次 USB");
+  }
+  return banner ? "confirmed" : "sent";
+}
+
+async function watchdogRestartDevice() {
+  if (state.flashing) return;
+  if (!navigator.serial || !state.port) {
+    setStatus("请先选择开发板串口。", "error");
+    return;
+  }
+  watchdogButton.disabled = true;
+  resetButton.disabled = true;
+  setStatus("正在通过看门狗重启 X1.0…");
+  logLine("正在通过看门狗重启 X1.0…");
+  try {
+    const restart = await watchdogRestartBoard();
+    if (restart === "confirmed") {
+      setStatus("X1.0 已通过看门狗重启。", "ok");
+      logLine("X1.0 已通过看门狗重启。");
+    } else {
+      setStatus("已通过看门狗发送重启命令；X1.0 的控制台不走 USB，请在终端里确认。", "ok");
+      logLine("已通过看门狗发送重启命令；X1.0 的控制台不走 USB，请在终端里确认。");
+    }
+  } catch (error) {
+    setStatus(`看门狗重启失败：${error?.message || error}`, "error");
+    logLine(`看门狗重启失败：${error?.message || error}`);
+  } finally {
+    // The board is booting; free the port for the terminal or the next flash.
+    await releaseConnection();
+    updateResetAvailability();
+  }
 }
 
 async function resetDevice() {
@@ -561,18 +798,18 @@ async function resetDevice() {
     return;
   }
   resetButton.disabled = true;
+  watchdogButton.disabled = true;
   try {
-    try {
-      if (!state.transport) throw new Error("no open transport");
-      await pulseReset(state.transport);
-    } catch {
-      // A transport left over from a failed flash may already be closed.
-      await releaseConnection();
-      state.transport = new Transport(state.port, false);
-      await state.transport.connect(115200);
-      await pulseReset(state.transport);
+    const restart = await restartBoard();
+    if (restart === "confirmed") {
+      setStatus("设备已重启。", "ok");
+      logLine("设备已重启。");
+    } else {
+      // The edge was sent; on a bridge with no readable console there is
+      // nothing to confirm it against, so the sentence must not claim one.
+      setStatus("已发送重启命令。", "ok");
+      logLine("已发送重启命令（未读回启动信息）。");
     }
-    setStatus("已发送重启命令。", "ok");
   } catch (error) {
     setStatus(`重启失败：${error?.message || error}`, "error");
   } finally {
@@ -662,6 +899,7 @@ async function init() {
   connectButton.addEventListener("click", () => flash());
   retryButton.addEventListener("click", () => flash({ noReset: true }));
   resetButton.addEventListener("click", resetDevice);
+  watchdogButton.addEventListener("click", watchdogRestartDevice);
   downloadButton.addEventListener("click", () => {
     if (!state.board) return;
     const url = state.board.zip_url || releaseAssetUrl(state.board);

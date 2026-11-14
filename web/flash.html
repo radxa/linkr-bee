@@ -184,12 +184,19 @@
               </svg>
               重启设备
             </button>
+            <button id="watchdogButton" class="btn" type="button" hidden disabled>
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M3 12h4l2-6 3 12 2-6h7"></path>
+              </svg>
+              看门狗重启（X1.0）
+            </button>
           </div>
 
           <div class="progress" aria-hidden="true">
             <div id="progressBar" class="progress-bar"></div>
           </div>
           <p id="status" class="status" role="status" aria-live="polite">等待选择板型。</p>
+          <p class="muted small setup-note">烧录完成后页面会自动复位并启动固件。如果开发板没有启动（没有串口日志，也没有 BLE 广播），先点“重启设备”。X1.0 的 GPIO9 上电较慢，页面会自动补发第二次复位；如果它仍停在下载模式，点“看门狗重启（X1.0）”，这条路径不经过 EN 引脚。</p>
           <p class="muted small setup-note">使用能传输数据的线，不要用只能充电的线。</p>
           </section>
 
@@ -225,6 +232,6 @@
     </main>
 
     <script src="./vendor/jszip/jszip.min.js"></script>
-    <script type="module" src="./flash.js?v=20261105-uart"></script>
+    <script type="module" src="./flash.js?v=20261114-watchdog-2"></script>
   </body>
 </html>
