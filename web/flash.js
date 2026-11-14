@@ -22,6 +22,7 @@ const portHint = $("portHint");
 const connectButton = $("connectButton");
 const downloadButton = $("downloadButton");
 const resetButton = $("resetButton");
+const watchdogButton = $("watchdogButton");
 const statusLine = $("status");
 const progressBar = $("progressBar");
 const progressTrack = progressBar.parentElement;
@@ -202,6 +203,13 @@ function setProgress(fraction) {
 
 function updateResetAvailability() {
   resetButton.disabled = state.flashing || !navigator.serial || !state.port;
+  // The watchdog reset writes ESP32-C3 RTC registers through the stub, so it
+  // only makes sense on the X1.0's own USB port. Other boards keep the plain
+  // EN restart above.
+  const offered =
+    state.board?.slug === "linkr-bee-x1-0" && isNativeUsb() && !!navigator.serial;
+  watchdogButton.hidden = !offered;
+  watchdogButton.disabled = !offered || state.flashing || !state.port;
 }
 
 // Chips that expose their own USB Serial/JTAG peripheral (ESP32-C3/S3/C6/P4)
@@ -309,6 +317,7 @@ function selectBoard(slug) {
   camPrep.hidden = true;
   setProgress(0);
   if (board) setStatus(`已选择 ${board.name}。点击“连接串口并烧录”开始。`);
+  updateResetAvailability();
 }
 
 function populateBoards(manifest) {
@@ -439,6 +448,7 @@ async function flash({ noReset = false } = {}) {
   connectButton.disabled = true;
   retryButton.hidden = true;
   resetButton.disabled = true;
+  watchdogButton.disabled = true;
   portSelect.disabled = true;
   pickPortButton.disabled = true;
   refreshPortsButton.disabled = true;
@@ -690,6 +700,87 @@ async function restartBoard() {
   return "sent";
 }
 
+// The ESP32-C3 RTC watchdog reset, the same sequence `esptool --after
+// watchdog-reset` uses: unlock the RTC WDT, set its timeout, enable it, lock.
+// The chip resets from inside, so this path does not reproduce the EN/GPIO9
+// edge that a native-USB reset has to get right.
+async function watchdogReset(loader) {
+  const RTC_CNTL = 0x60008000;
+  const WDT_WKEY = 0x50d83aa1;
+  const WDTCONFIG0 = RTC_CNTL + 0x0090;
+  const WDTCONFIG1 = RTC_CNTL + 0x0094;
+  const WDTWPROTECT = RTC_CNTL + 0x00a8;
+  await loader.writeReg(WDTWPROTECT, WDT_WKEY);
+  await loader.writeReg(WDTCONFIG1, 2000);
+  await loader.writeReg(WDTCONFIG0, (1 << 31) | (5 << 28) | (1 << 8) | 2);
+  await loader.writeReg(WDTWPROTECT, 0);
+  await sleep(600);
+}
+
+// Re-enter the bootloader (the stub is where the registers can be written),
+// arm the watchdog and read whatever the boot prints. An empty read is the
+// normal case on the X1.0: its Zephyr console does not come up on USB CDC.
+async function watchdogRestartBoard() {
+  await releaseConnection();
+  const transport = new Transport(state.port, false);
+  state.transport = transport;
+  const loader = new ESPLoader({
+    transport,
+    baudrate: Number(baudSelect.value),
+    terminal: terminal(),
+    debugLogging: false,
+  });
+  state.loader = loader;
+  const chip = await loader.main("default_reset");
+  if (!/ESP32-C3/i.test(chip)) {
+    throw new Error(`看门狗重启只适用于 ESP32-C3，当前芯片是 ${chip}`);
+  }
+  logLine("已进入引导程序，正在触发看门狗…");
+  await watchdogReset(loader);
+  await releaseConnection();
+  // The USB device re-enumerates; give it a moment before reading the banner.
+  await sleep(300);
+  let banner = "";
+  try {
+    banner = await readBootOutput(state.port, 2000);
+  } catch {
+    // The port can still be enumerating.
+  }
+  if (banner && /wait usb download|boot:0x0/i.test(banner)) {
+    throw new Error("看门狗复位后设备仍停在下载模式，请拔插一次 USB");
+  }
+  return banner ? "confirmed" : "sent";
+}
+
+async function watchdogRestartDevice() {
+  if (state.flashing) return;
+  if (!navigator.serial || !state.port) {
+    setStatus("请先选择开发板串口。", "error");
+    return;
+  }
+  watchdogButton.disabled = true;
+  resetButton.disabled = true;
+  setStatus("正在通过看门狗重启 X1.0…");
+  logLine("正在通过看门狗重启 X1.0…");
+  try {
+    const restart = await watchdogRestartBoard();
+    if (restart === "confirmed") {
+      setStatus("X1.0 已通过看门狗重启。", "ok");
+      logLine("X1.0 已通过看门狗重启。");
+    } else {
+      setStatus("已通过看门狗发送重启命令（未读回启动信息）。", "ok");
+      logLine("已通过看门狗发送重启命令（未读回启动信息）。");
+    }
+  } catch (error) {
+    setStatus(`看门狗重启失败：${error?.message || error}`, "error");
+    logLine(`看门狗重启失败：${error?.message || error}`);
+  } finally {
+    // The board is booting; free the port for the terminal or the next flash.
+    await releaseConnection();
+    updateResetAvailability();
+  }
+}
+
 async function resetDevice() {
   if (state.flashing) return;
   if (!navigator.serial || !state.port) {
@@ -697,6 +788,7 @@ async function resetDevice() {
     return;
   }
   resetButton.disabled = true;
+  watchdogButton.disabled = true;
   try {
     const restart = await restartBoard();
     if (restart === "confirmed") {
@@ -797,6 +889,7 @@ async function init() {
   connectButton.addEventListener("click", () => flash());
   retryButton.addEventListener("click", () => flash({ noReset: true }));
   resetButton.addEventListener("click", resetDevice);
+  watchdogButton.addEventListener("click", watchdogRestartDevice);
   downloadButton.addEventListener("click", () => {
     if (!state.board) return;
     const url = state.board.zip_url || releaseAssetUrl(state.board);
