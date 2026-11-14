@@ -752,7 +752,7 @@ async function watchdogRestartBoard() {
   await sleep(300);
   let banner = "";
   try {
-    banner = await readBootOutput(state.port, 2000);
+    banner = await readBootOutput(state.port, 1000);
   } catch {
     // The port can still be enumerating.
   }
@@ -778,8 +778,8 @@ async function watchdogRestartDevice() {
       setStatus("X1.0 已通过看门狗重启。", "ok");
       logLine("X1.0 已通过看门狗重启。");
     } else {
-      setStatus("已通过看门狗发送重启命令（未读回启动信息）。", "ok");
-      logLine("已通过看门狗发送重启命令（未读回启动信息）。");
+      setStatus("已通过看门狗发送重启命令；X1.0 的控制台不走 USB，请在终端里确认。", "ok");
+      logLine("已通过看门狗发送重启命令；X1.0 的控制台不走 USB，请在终端里确认。");
     }
   } catch (error) {
     setStatus(`看门狗重启失败：${error?.message || error}`, "error");
