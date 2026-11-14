@@ -205,11 +205,21 @@ function updateResetAvailability() {
   resetButton.disabled = state.flashing || !navigator.serial || !state.port;
   // The watchdog reset writes ESP32-C3 RTC registers through the stub, so it
   // only makes sense on the X1.0's own USB port. Other boards keep the plain
-  // EN restart above.
-  const offered =
-    state.board?.slug === "linkr-bee-x1-0" && isNativeUsb() && !!navigator.serial;
+  // EN restart above. The X1.0 entry still shows the button before a port is
+  // picked, disabled, so the fallback is discoverable instead of appearing
+  // only after the reset it is meant to rescue has failed.
+  const onX1 = state.board?.slug === "linkr-bee-x1-0";
+  const offered = onX1 && !!navigator.serial;
+  const nativeUsb = onX1 && isNativeUsb();
   watchdogButton.hidden = !offered;
-  watchdogButton.disabled = !offered || state.flashing || !state.port;
+  watchdogButton.disabled = !offered || !nativeUsb || state.flashing || !state.port;
+  watchdogButton.title = !offered
+    ? ""
+    : !state.port
+      ? "先选择 X1.0 的原生 USB 串口（VID 303A / PID 1001）"
+      : !nativeUsb
+        ? "看门狗重启需要 X1.0 的原生 USB 串口（VID 303A / PID 1001）"
+        : "通过 ESP32-C3 的 RTC 看门狗复位，不依赖 EN 引脚";
 }
 
 // Chips that expose their own USB Serial/JTAG peripheral (ESP32-C3/S3/C6/P4)
