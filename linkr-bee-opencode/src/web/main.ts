@@ -56,6 +56,7 @@ function boot() {
 
   const cursor: Record<ReadView, number> = { reading: 0, raw: 0 };
   let epoch = '';
+  let readRevision = 0;
   let initializing = true;
   let pending: OutputEvent[] = [];
 
@@ -121,21 +122,21 @@ function boot() {
   /** Applies one streamed output event to the terminal for the current view. */
   function applyOutput(event: OutputEvent | undefined) {
     if (!event) return;
-    if (initializing) {
-      pending.push(event);
-      return;
-    }
-    if (event.epoch && epoch && event.epoch !== epoch) {
-      void reloadView(false);
-      return;
-    }
-    // Notices are plugin log lines, not target bytes.
+    // Plugin notices are independent of UART ring generations and snapshots.
     if (event.kind === 'meta') {
       if (event.text) addLog(event.text);
       return;
     }
+    if (initializing) {
+      pending.push(event);
+      return;
+    }
     // The Log view does not draw the terminal; switching back reloads the ring.
     if (view === 'log') return;
+    if (event.epoch && epoch && event.epoch !== epoch) {
+      void reloadView(false);
+      return;
+    }
     // Raw shows device bytes only; a synthetic user echo would duplicate the
     // bytes the target already echoes.
     if (view === 'raw' && event.kind === 'user') return;
@@ -149,14 +150,16 @@ function boot() {
 
   /** Reads one view's tail from the server and re-anchors its cursor. */
   async function reloadView(clear: boolean) {
-    if (view === 'log') return;
+    const revision = ++readRevision;
+    const wanted = view;
+    if (wanted === 'log') return;
     try {
-      const result = await client.read(view);
-      if (disposed) return;
+      const result = await client.read(wanted);
+      if (disposed || revision !== readRevision || view !== wanted) return;
       clearTransientError();
       if (clear) terminal.clear();
       epoch = result.epoch;
-      cursor[view] = result.bytes;
+      cursor[wanted] = result.bytes;
       if (result.text) terminal.terminal.write(result.text);
       if (result.truncated) addLog('older console bytes were already dropped (ring truncated)');
     } catch (caught) {
@@ -172,18 +175,20 @@ function boot() {
       state = snapshot;
       clearTransientError();
       render();
-      if (view === 'log') return;
-      const result = await client.read(view, cursor[view]);
-      if (disposed) return;
-      if (result.epoch !== epoch || result.bytes < cursor[view]) {
+      const wanted = view;
+      if (wanted === 'log') return;
+      const revision = ++readRevision;
+      const result = await client.read(wanted, cursor[wanted]);
+      if (disposed || revision !== readRevision || view !== wanted) return;
+      if (result.epoch !== epoch || result.bytes < cursor[wanted]) {
         // A clear/reconnect moved the ring: start the visible buffer over.
         terminal.clear();
         epoch = result.epoch;
-        cursor[view] = result.bytes;
+        cursor[wanted] = result.bytes;
         if (result.text) terminal.terminal.write(result.text);
         return;
       }
-      cursor[view] = result.bytes;
+      cursor[wanted] = result.bytes;
       if (result.text) terminal.terminal.write(result.text);
     } catch (caught) {
       handleError(caught);
@@ -347,7 +352,7 @@ function boot() {
     if (view === next) return;
     view = next;
     render();
-    if (next === 'log') return;
+    // Also invalidate an in-flight read when entering the client-only Log view.
     void reloadView(true);
   }
 

@@ -2043,12 +2043,13 @@ body,
 /* ---------- Event log (plugin/UI messages, out of the serial stream) ---------- */
 .event-log {
   --event-log-height: auto;
+  --event-log-max-height: 100%;
   position: absolute;
   inset: auto 0 0 0;
   z-index: 6;
   display: flex;
   flex-direction: column;
-  max-height: min(58%, 420px);
+  max-height: min(58%, 420px, var(--event-log-max-height));
   border-top: 1px solid var(--line);
   /* Opaque on purpose: this pane covers the terminal and the key bar, and the
    * translucent glass surfaces would let both show through the log text. */
@@ -2313,7 +2314,7 @@ body,
   }
 
   .event-log {
-    max-height: 64%;
+    max-height: min(64%, var(--event-log-max-height));
   }
 
   .term-hint {

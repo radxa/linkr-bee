@@ -278,7 +278,7 @@ function ConsolePanel(props: { panel: PanelInput }) {
     logLines = [...logLines, `[${stamp}] ${line}`].slice(-500);
     setLogRevision((value) => value + 1);
   }
-  const setCursor = (value: number, wanted = view()) => {
+  const setCursor = (value: number, wanted: 'reading' | 'raw') => {
     cursors[wanted] = value;
     setCursorBytes(value);
   };
@@ -350,8 +350,10 @@ function ConsolePanel(props: { panel: PanelInput }) {
   async function backfill(reason = 'reload'): Promise<void> {
     const token = ++reloadToken;
     const wanted = view();
+    // Log has no server ring. Still increment the token to retire old reads.
+    if (wanted === 'log') return;
     const result = await call('read', (api) => api.read({ view: wanted }));
-    if (!result || disposed || token !== reloadToken) return;
+    if (!result || disposed || token !== reloadToken || view() !== wanted) return;
     epoch = typeof result.epoch === 'string' ? result.epoch : epoch;
     const text = typeof result.text === 'string' ? result.text : '';
     const bytes = typeof result.bytes === 'number' ? result.bytes : cursors[wanted];
@@ -389,12 +391,6 @@ function ConsolePanel(props: { panel: PanelInput }) {
 
   function onOutput(event: OutputEvent): void {
     if (disposed || !event || typeof event !== 'object') return;
-    if (typeof event.epoch === 'string' && event.epoch !== '' && epoch !== '' && event.epoch !== epoch) {
-      // Clear or reconnect changed the ring generation: cursors are stale.
-      epoch = event.epoch;
-      void backfill('epoch');
-      return;
-    }
     // Plugin notices belong to the log view, never to the serial terminal.
     if (event.kind === 'meta') {
       if (typeof event.text === 'string') addLog(event.text);
@@ -403,6 +399,12 @@ function ConsolePanel(props: { panel: PanelInput }) {
     }
     const wanted = view();
     if (wanted === 'log') return;
+    if (typeof event.epoch === 'string' && event.epoch !== '' && epoch !== '' && event.epoch !== epoch) {
+      // Clear or reconnect changed the ring generation: cursors are stale.
+      epoch = event.epoch;
+      void backfill('epoch');
+      return;
+    }
     if (wanted === 'raw' && event.kind === 'user') return;
     const text = pickOutput(event as Record<string, unknown>, wanted);
     const next = pickCursor(event as Record<string, unknown>, wanted);

@@ -31,6 +31,7 @@ import { SETTINGS_PAGE_ID } from './settings';
 
 /** The panel's views: two server read views plus the plugin's own log. */
 type View = 'reading' | 'raw' | 'log';
+type ReadView = Exclude<View, 'log'>;
 
 interface LinkState {
   connected: boolean;
@@ -168,8 +169,9 @@ export function ConsolePanel() {
   let disposed = false;
 
   /** Byte cursor per view, from `read`'s `bytes` / `output`'s per-view counter. */
-  const cursor: Record<View, number> = { reading: 0, raw: 0 };
+  const cursor: Record<ReadView, number> = { reading: 0, raw: 0 };
   let epoch = '';
+  let readRevision = 0;
   let initializing = true;
   let pending: any[] = [];
   /** Off/cleanup callbacks from subscriptions and event registrations. */
@@ -218,13 +220,14 @@ export function ConsolePanel() {
 
   /** Pulls the panel's view tail from the ring and re-anchors the cursor. */
   async function resync(reset = true) {
+    const revision = ++readRevision;
     if (!rpc) return;
     const wanted = view();
     // The log view holds client-side notices only; there is no ring to read.
     if (wanted === 'log') return;
     try {
       const result = await rpc.read({ view: wanted });
-      if (disposed || !result) return;
+      if (disposed || !result || revision !== readRevision || view() !== wanted) return;
       if (reset) clearTerminal();
       epoch = String(result.epoch ?? '');
       cursor[wanted] = Number(result.bytes ?? 0);
@@ -240,17 +243,13 @@ export function ConsolePanel() {
   /** Applies one `output` event to the terminal for the current view. */
   function applyOutput(event: any) {
     if (!event) return;
-    if (initializing) {
-      pending.push(event);
-      return;
-    }
-    if (event.epoch !== undefined && epoch && event.epoch !== epoch) {
-      void resync();
-      return;
-    }
-    // Plugin notices are log lines, never terminal output.
+    // Notices are client-side log entries, not bytes in a UART ring epoch.
     if (event.kind === 'meta') {
       say(String(event.text ?? ''));
+      return;
+    }
+    if (initializing) {
+      pending.push(event);
       return;
     }
     const wanted = view();
@@ -258,6 +257,10 @@ export function ConsolePanel() {
     // resyncs from the ring. Raw shows device bytes only: a synthetic `user`
     // echo would duplicate what the target already echoes.
     if (wanted === 'log') return;
+    if (event.epoch !== undefined && epoch && event.epoch !== epoch) {
+      void resync();
+      return;
+    }
     if (wanted === 'raw' && event.kind === 'user') return;
     // The raw event carries both views; draw the one this panel is showing.
     const text = wanted === 'reading' ? event.reading ?? event.text : event.text;
@@ -439,11 +442,7 @@ export function ConsolePanel() {
   function switchView(next: View) {
     if (view() === next) return;
     setView(next);
-    if (next === 'log') {
-      // Keep the terminal's ring cursors where they are; the next terminal
-      // view resyncs from the server.
-      return;
-    }
+    // The Log guard in resync also retires snapshots from the previous view.
     void resync(true);
   }
 

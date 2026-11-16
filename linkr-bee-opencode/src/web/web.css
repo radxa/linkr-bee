@@ -212,7 +212,7 @@ body {
   font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   font-size: 12px;
   line-height: 1.55;
-  background: var(--lbw-panel, #f6f8fa);
+  background: var(--lbw-bg);
   color: var(--lbw-muted, #57606a);
 }
 

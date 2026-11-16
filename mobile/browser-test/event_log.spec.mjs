@@ -11,6 +11,57 @@ test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem("linkr-lang", "en"));
 });
 
+test.describe('event log in native keyboard layouts', () => {
+  test.use({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+
+  test('an expanded drawer shrinks with the card and restores the preferred height', async ({ page }) => {
+    await page.addInitScript(() => { window.LinkrNativeBle = { platform: 'android' }; });
+    await page.route('**/app.js?*', async (route) => {
+      const response = await route.fetch();
+      await route.fulfill({ response, body: await response.text() +
+        '\nwindow.__eventLogTest = { state, setMobileSidebarOpen };' });
+    });
+    await page.goto('/?demo=board');
+    await page.waitForFunction(() => window.__eventLogTest?.state.termReady);
+    await page.evaluate(() => window.__eventLogTest.setMobileSidebarOpen(false, { restoreFocus: false }));
+    await page.locator('#eventLogBtn').click();
+    await page.locator('#eventLogResize').focus();
+    await page.keyboard.press('End');
+    const panel = page.locator('#eventLogPanel');
+    const preferred = (await panel.boundingBox()).height;
+    const saved = await page.evaluate(() => localStorage.getItem('linkr-event-log-height'));
+
+    const headerIsAccessible = () => page.evaluate(() => {
+      const card = document.getElementById('terminalCard').getBoundingClientRect();
+      const head = document.querySelector('#terminalCard > .terminal-head').getBoundingClientRect();
+      const log = document.getElementById('eventLogPanel').getBoundingClientRect();
+      const close = document.getElementById('eventLogClose').getBoundingClientRect();
+      return log.top >= head.bottom && log.bottom <= card.bottom + 1 && close.top >= 0;
+    });
+    await page.evaluate(() => {
+      window.__eventLogTest.state.term.focus();
+      Object.defineProperty(visualViewport, 'height', { configurable: true, get: () => 350 });
+      visualViewport.dispatchEvent(new Event('resize'));
+    });
+    await expect(page.locator('html')).toHaveClass(/soft-keyboard-open/);
+    await expect.poll(headerIsAccessible).toBe(true);
+    expect((await panel.boundingBox()).height).toBeLessThan(preferred);
+    expect(await page.evaluate(() => localStorage.getItem('linkr-event-log-height'))).toBe(saved);
+
+    await page.evaluate(() => {
+      delete visualViewport.height;
+      visualViewport.dispatchEvent(new Event('resize'));
+    });
+    await expect(page.locator('html')).not.toHaveClass(/soft-keyboard-open/);
+    await expect.poll(async () => Math.abs((await panel.boundingBox()).height - preferred)).toBeLessThan(2);
+    // Opening Agent changes the card height without a window resize event.
+    await page.locator('#agentButton').click();
+    await expect.poll(headerIsAccessible).toBe(true);
+    await page.locator('#eventLogClose').click();
+    await expect(panel).toBeHidden();
+  });
+});
+
 test("app log lines stay out of the serial terminal and appear in the event log", async ({ page }) => {
   await page.goto("/?demo=board");
   await expect(page.locator("#statusText")).toContainText(/Connected/);

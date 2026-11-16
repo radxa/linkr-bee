@@ -2195,26 +2195,45 @@ let eventLogHeight = (() => {
   return Number.isFinite(stored) && stored >= EVENT_LOG_MIN_HEIGHT ? stored : null;
 })();
 
-function clampEventLogHeight(height) {
+function eventLogHeightBounds() {
   const card = elements.terminalCard;
   const available = card ? card.clientHeight : window.innerHeight;
-  // Keep the terminal head and a couple of rows visible above the drawer.
-  const max = Math.max(EVENT_LOG_MIN_HEIGHT, available - 140);
-  return Math.round(Math.min(max, Math.max(EVENT_LOG_MIN_HEIGHT, height)));
+  const head = card?.querySelector(".terminal-head")?.clientHeight || 0;
+  // Keep the header and a couple of rows visible when space permits. On a
+  // short keyboard/Agent layout, reduce the drawer minimum before hiding tools.
+  const reserved = Math.min(140, Math.max(head, available - EVENT_LOG_MIN_HEIGHT));
+  const max = Math.max(0, available - reserved);
+  return { min: Math.min(EVENT_LOG_MIN_HEIGHT, max), max, reserved };
+}
+
+function clampEventLogHeight(height) {
+  const { min, max } = eventLogHeightBounds();
+  return Math.round(Math.min(max, Math.max(min, height)));
+}
+
+function refreshEventLogHeight() {
+  const panel = elements.eventLogPanel;
+  if (!panel || !uiLog.open) return;
+  const { min, max, reserved } = eventLogHeightBounds();
+  // A relative CSS cap also protects the header between layout callbacks.
+  panel.style.setProperty("--event-log-max-height", `calc(100% - ${reserved}px)`);
+  if (eventLogHeight !== null) {
+    panel.style.height = `${clampEventLogHeight(eventLogHeight)}px`;
+    panel.style.maxHeight = "var(--event-log-max-height)";
+  }
+  const handle = elements.eventLogResize;
+  if (handle) {
+    handle.setAttribute("aria-valuemin", String(min));
+    handle.setAttribute("aria-valuemax", String(max));
+    handle.setAttribute("aria-valuenow", String(Math.round(panel.getBoundingClientRect().height)));
+  }
 }
 
 function applyEventLogHeight(height) {
   const panel = elements.eventLogPanel;
   if (!panel || !Number.isFinite(height)) return;
-  const clamped = clampEventLogHeight(height);
-  eventLogHeight = clamped;
-  panel.style.height = `${clamped}px`;
-  panel.style.maxHeight = "none";
-  const handle = elements.eventLogResize;
-  if (handle) {
-    handle.setAttribute("aria-valuemin", String(EVENT_LOG_MIN_HEIGHT));
-    handle.setAttribute("aria-valuenow", String(clamped));
-  }
+  eventLogHeight = clampEventLogHeight(height);
+  refreshEventLogHeight();
 }
 
 function resetEventLogHeight() {
@@ -2224,6 +2243,7 @@ function resetEventLogHeight() {
   if (!panel) return;
   panel.style.height = "";
   panel.style.maxHeight = "";
+  refreshEventLogHeight();
 }
 
 function rememberEventLogHeight() {
@@ -2300,7 +2320,7 @@ function setEventLogOpen(open) {
     uiLog.hasUnread = false;
     refreshEventLogDot();
     renderUiLog();
-    if (eventLogHeight !== null) applyEventLogHeight(eventLogHeight);
+    refreshEventLogHeight();
     elements.eventLogList?.focus({ preventScroll: true });
   }
 }
@@ -7186,9 +7206,14 @@ function bind() {
     applyEventLogHeight(next);
     rememberEventLogHeight();
   });
-  window.addEventListener("resize", () => {
-    if (uiLog.open && eventLogHeight !== null) applyEventLogHeight(eventLogHeight);
-  });
+  window.addEventListener("resize", refreshEventLogHeight);
+  window.visualViewport?.addEventListener("resize", refreshEventLogHeight);
+  // Keyboard and Agent layouts may resize this card without a window event.
+  if (typeof ResizeObserver !== "undefined") {
+    const observer = new ResizeObserver(refreshEventLogHeight);
+    observer.observe(elements.terminalCard);
+    observer.observe(elements.eventLogPanel);
+  }
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape" || !uiLog.open) return;
     event.preventDefault();
