@@ -357,7 +357,10 @@ export function singleLine(text, maxLength = 120) {
 
 /** Normalise a view name: anything that is not `raw` is the reading view. */
 export function normalizeView(view) {
-  return view === 'raw' ? 'raw' : 'reading';
+  if (view === 'raw') return 'raw';
+  // The log view is client-side chrome; it never reads the byte rings.
+  if (view === 'log') return 'log';
+  return 'reading';
 }
 
 /**

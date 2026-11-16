@@ -24,6 +24,8 @@ export interface UiUpdate {
   stream: boolean;
   /** Persistent hint (authorization/transport error); null hides it. */
   error: string | null;
+  /** Plugin log lines (never written into the serial terminal). */
+  logs: readonly string[];
 }
 
 function button(label: string, action: string): HTMLButtonElement {
@@ -56,6 +58,7 @@ export function createUi(handlers: UiHandlers): Ui {
         <span class="lbw-seg" role="group" aria-label="Console view">
           <button type="button" data-view="reading" data-active="true" aria-pressed="true">Reading</button>
           <button type="button" data-view="raw" data-active="false" aria-pressed="false">Raw</button>
+          <button type="button" data-view="log" data-active="false" aria-pressed="false">Log</button>
         </span>
         <button type="button" data-action="copy" title="Copy this console URL">Copy URL</button>
         <button type="button" data-action="clear">Clear</button>
@@ -65,6 +68,7 @@ export function createUi(handlers: UiHandlers): Ui {
     <div class="lbw-target" hidden></div>
     <div class="lbw-hint" hidden></div>
     <div class="lbw-terminal"></div>
+    <div class="lbw-log" role="log" aria-label="Log" hidden></div>
   `;
 
   const dot = root.querySelector<HTMLElement>('.lbw-dot')!;
@@ -72,17 +76,19 @@ export function createUi(handlers: UiHandlers): Ui {
   const target = root.querySelector<HTMLElement>('.lbw-target')!;
   const hint = root.querySelector<HTMLElement>('.lbw-hint')!;
   const terminalHost = root.querySelector<HTMLElement>('.lbw-terminal')!;
+  const logPane = root.querySelector<HTMLElement>('.lbw-log')!;
   const viewButtons = [...root.querySelectorAll<HTMLButtonElement>('.lbw-seg button')];
   const clearButton = root.querySelector<HTMLButtonElement>('[data-action="clear"]')!;
   const reconnectButton = root.querySelector<HTMLButtonElement>('[data-action="reconnect"]')!;
   const copyButton = root.querySelector<HTMLButtonElement>('[data-action="copy"]')!;
 
-  let current: UiUpdate = { phase: 'connecting', state: null, view: 'reading', stream: false, error: null };
+  let current: UiUpdate = { phase: 'connecting', state: null, view: 'reading', stream: false, error: null, logs: [] };
   let copyLabel: ReturnType<typeof setTimeout> | undefined;
 
   for (const element of viewButtons) {
     element.addEventListener('click', () => {
-      handlers.onView(element.dataset.view === 'raw' ? 'raw' : 'reading');
+      const wanted = element.dataset.view;
+      handlers.onView(wanted === 'raw' || wanted === 'log' ? wanted : 'reading');
     });
   }
   clearButton.addEventListener('click', () => handlers.onClear());
@@ -134,6 +140,26 @@ export function createUi(handlers: UiHandlers): Ui {
     status.textContent =
       current.phase === 'connecting' ? `connecting · ${transport}` : `${link} · ${transport}${baud} · ${size}`;
     status.title = state?.target ?? '';
+
+    terminalHost.hidden = view === 'log';
+    logPane.hidden = view !== 'log';
+    if (view === 'log') {
+      if (current.logs.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'lbw-log-empty';
+        empty.textContent = 'Nothing logged yet. Link changes, errors and tool requests appear here instead of in the serial terminal.';
+        logPane.replaceChildren(empty);
+      } else {
+        const lines = current.logs.map((line) => {
+          const element = document.createElement('div');
+          element.className = 'lbw-log-line';
+          element.textContent = line;
+          return element;
+        });
+        logPane.replaceChildren(...lines);
+        logPane.scrollTop = logPane.scrollHeight;
+      }
+    }
 
     if (state?.connected && state.target) {
       target.hidden = false;

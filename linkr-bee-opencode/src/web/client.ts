@@ -9,7 +9,10 @@
  * Keep this file free of DOM and xterm imports: it is the one place to adapt if
  * the server's endpoint paths or event names change.
  */
-export type View = 'reading' | 'raw';
+export type View = 'reading' | 'raw' | 'log';
+
+/** The two views the server has bytes for (the log is client-side). */
+export type ReadView = 'reading' | 'raw';
 
 export interface LinkState {
   connected: boolean;
@@ -131,7 +134,7 @@ export class ConsoleClient {
     return readJson<LinkState>(response);
   }
 
-  async read(view: View, since?: number): Promise<ReadResult> {
+  async read(view: ReadView, since?: number): Promise<ReadResult> {
     const response = await fetch(withToken(ENDPOINTS.read, this.token, { view, since }), {
       cache: 'no-store',
       credentials: 'omit',

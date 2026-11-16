@@ -20,7 +20,7 @@
  * Console bytes are untrusted device data and are only ever drawn, never
  * interpreted.
  */
-import { createEffect, createSignal, onCleanup, onMount, Show } from 'solid-js';
+import { createEffect, createSignal, For, onCleanup, onMount, Show } from 'solid-js';
 import { FitAddon } from '@xterm/addon-fit';
 import { Terminal, type ITheme } from '@xterm/xterm';
 import { usePlugin } from '@opencode/plugin/gui';
@@ -29,8 +29,8 @@ import LinkrBeeConsole from '../rpc.js';
 import { CONSOLE_TAB_ID, type definition } from './definition';
 import { SETTINGS_PAGE_ID } from './settings';
 
-/** The two read views the server exposes. Reading is the default. */
-type View = 'reading' | 'raw';
+/** The panel's views: two server read views plus the plugin's own log. */
+type View = 'reading' | 'raw' | 'log';
 
 interface LinkState {
   connected: boolean;
@@ -150,6 +150,11 @@ export function ConsolePanel() {
     baud: 0,
   });
   const [view, setView] = createSignal<View>('reading');
+  // Plugin notices (link changes, errors, tool requests) live here instead of
+  // being written into the serial terminal, so full-screen programs on the
+  // target never see injected text.
+  const [logs, setLogs] = createSignal<string[]>([]);
+  let logLines: string[] = [];
   const [phase, setPhase] = createSignal<Phase>('starting');
   const [error, setError] = createSignal('');
 
@@ -191,9 +196,19 @@ export function ConsolePanel() {
     }
   }
 
-  /** Draws a synthetic notice, distinct from target output. */
+  /** Adds one plugin log line; never touches the serial terminal. */
   function say(text: string) {
-    term?.write(`\r\n\x1b[90m[linkr-bee] ${text}\x1b[0m\r\n`);
+    const line = String(text ?? '').replace(/\s+/g, ' ').trim();
+    if (line === '') return;
+    const stamp = new Date().toLocaleTimeString();
+    logLines = [...logLines, `[${stamp}] ${line}`].slice(-500);
+    setLogs(logLines);
+  }
+
+  /** Clears only this panel's log buffer. */
+  function clearLog() {
+    logLines = [];
+    setLogs(logLines);
   }
 
   /** Clears the xterm screen and scrollback without touching server state. */
@@ -205,6 +220,8 @@ export function ConsolePanel() {
   async function resync(reset = true) {
     if (!rpc) return;
     const wanted = view();
+    // The log view holds client-side notices only; there is no ring to read.
+    if (wanted === 'log') return;
     try {
       const result = await rpc.read({ view: wanted });
       if (disposed || !result) return;
@@ -231,7 +248,17 @@ export function ConsolePanel() {
       void resync();
       return;
     }
+    // Plugin notices are log lines, never terminal output.
+    if (event.kind === 'meta') {
+      say(String(event.text ?? ''));
+      return;
+    }
     const wanted = view();
+    // In the log view nothing is drawn into the terminal; the next switch back
+    // resyncs from the ring. Raw shows device bytes only: a synthetic `user`
+    // echo would duplicate what the target already echoes.
+    if (wanted === 'log') return;
+    if (wanted === 'raw' && event.kind === 'user') return;
     // The raw event carries both views; draw the one this panel is showing.
     const text = wanted === 'reading' ? event.reading ?? event.text : event.text;
     const next = wanted === 'reading' ? event.readingBytes ?? event.bytes : event.bytes;
@@ -255,7 +282,14 @@ export function ConsolePanel() {
   function onStateEvent(event: any) {
     const next = payload(event);
     if (!next) return;
-    setState((previous) => ({ ...previous, ...next }));
+    const previous = state();
+    setState((current) => ({ ...current, ...next }));
+    const before = previous.connected ? 'connected' : 'offline';
+    const after = next.connected ? 'connected' : 'offline';
+    if (before !== after || previous.target !== next.target) {
+      const target = next.target ? ` · ${next.target}` : '';
+      say(`link ${after}${target}`);
+    }
   }
 
   /** The agent's console tool asks panels to open/focus/clear themselves. */
@@ -364,6 +398,10 @@ export function ConsolePanel() {
   }
 
   async function clearConsole() {
+    if (view() === 'log') {
+      clearLog();
+      return;
+    }
     clearTerminal();
     if (rpc) {
       try {
@@ -401,6 +439,11 @@ export function ConsolePanel() {
   function switchView(next: View) {
     if (view() === next) return;
     setView(next);
+    if (next === 'log') {
+      // Keep the terminal's ring cursors where they are; the next terminal
+      // view resyncs from the server.
+      return;
+    }
     void resync(true);
   }
 
@@ -532,6 +575,14 @@ export function ConsolePanel() {
             >
               {ctx.t('view.raw')}
             </button>
+            <button
+              type="button"
+              data-active={view() === 'log' ? 'true' : 'false'}
+              aria-pressed={view() === 'log'}
+              onClick={() => switchView('log')}
+            >
+              {ctx.t('view.log')}
+            </button>
           </div>
           <button type="button" onClick={() => void clearConsole()}>
             {ctx.t('clear')}
@@ -577,7 +628,21 @@ export function ConsolePanel() {
           </Show>
         </div>
       </Show>
-      <div class="lb-console__terminal" ref={host} />
+      <div
+        class="lb-console__terminal"
+        ref={host}
+        style={view() === 'log' ? 'display:none' : ''}
+      />
+      <Show when={view() === 'log'}>
+        <div class="lb-console__log" role="log" aria-label={ctx.t('view.log')}>
+          <Show
+            when={logs().length > 0}
+            fallback={<div class="lb-console__log-empty">{ctx.t('log.empty')}</div>}
+          >
+            <For each={logs()}>{(line) => <div class="lb-console__log-line">{line}</div>}</For>
+          </Show>
+        </div>
+      </Show>
     </div>
   );
 }

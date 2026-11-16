@@ -236,10 +236,14 @@ function ConsolePanel(props: { panel: PanelInput }) {
       return 'reading';
     }
   })();
-  const [view, setView] = createSignal<'reading' | 'raw'>(storedView);
+  const [view, setView] = createSignal<'reading' | 'raw' | 'log'>(storedView);
   // The last value this panel wrote/read from storage; only a *different* stored
   // value (another TUI instance) should move the view out from under the user.
-  let lastStoredView: 'reading' | 'raw' = storedView;
+  let lastStoredView: 'reading' | 'raw' | 'log' = storedView;
+  // Plugin notices (link changes, errors, tool requests) are kept here and
+  // drawn by the log view, never mixed into the raw terminal or reading log.
+  let logLines: string[] = [];
+  const [logRevision, setLogRevision] = createSignal(0);
   const [link, setLink] = createSignal<LinkState | null>(null);
   const [cursorBytes, setCursorBytes] = createSignal(0);
   const [error, setError] = createSignal('');
@@ -263,6 +267,17 @@ function ConsolePanel(props: { panel: PanelInput }) {
 
   const bump = () => setRevision((n) => n + 1);
   const showTerminal = () => HAS_TERMINAL && view() === 'raw';
+  const showReading = () => view() === 'reading' || (view() === 'raw' && !HAS_TERMINAL);
+  const showLog = () => view() === 'log';
+
+  /** Adds one plugin log line without touching the console buffers. */
+  function addLog(text: string): void {
+    const line = String(text ?? '').replace(/\s+/g, ' ').trim();
+    if (line === '') return;
+    const stamp = new Date().toLocaleTimeString();
+    logLines = [...logLines, `[${stamp}] ${line}`].slice(-500);
+    setLogRevision((value) => value + 1);
+  }
   const setCursor = (value: number, wanted = view()) => {
     cursors[wanted] = value;
     setCursorBytes(value);
@@ -380,7 +395,15 @@ function ConsolePanel(props: { panel: PanelInput }) {
       void backfill('epoch');
       return;
     }
+    // Plugin notices belong to the log view, never to the serial terminal.
+    if (event.kind === 'meta') {
+      if (typeof event.text === 'string') addLog(event.text);
+      mark('meta', { text: singleLine(event.text, 60) });
+      return;
+    }
     const wanted = view();
+    if (wanted === 'log') return;
+    if (wanted === 'raw' && event.kind === 'user') return;
     const text = pickOutput(event as Record<string, unknown>, wanted);
     const next = pickCursor(event as Record<string, unknown>, wanted);
     // A ring event that ends at or before our cursor was already drawn by the
@@ -444,6 +467,13 @@ function ConsolePanel(props: { panel: PanelInput }) {
   }
 
   async function clearConsole(): Promise<void> {
+    // In the log view Clear empties the plugin log, not the shared ring.
+    if (view() === 'log') {
+      logLines = [];
+      setLogRevision((value) => value + 1);
+      flash('log cleared');
+      return;
+    }
     const ok = await call('clear', (api) => api.clear({}));
     if (!ok) return;
     resetState(consoleState);
@@ -456,7 +486,7 @@ function ConsolePanel(props: { panel: PanelInput }) {
     flash('console cleared');
   }
 
-  async function rememberView(next: 'reading' | 'raw'): Promise<void> {
+  async function rememberView(next: 'reading' | 'raw' | 'log'): Promise<void> {
     if (!persistView) return;
     lastStoredView = next;
     try {
@@ -470,9 +500,10 @@ function ConsolePanel(props: { panel: PanelInput }) {
   }
 
   async function toggleView(): Promise<void> {
-    const next = normalizeView(view()) === 'raw' ? 'reading' : 'raw';
+    const current = normalizeView(view());
+    const next = current === 'reading' ? 'raw' : current === 'raw' ? 'log' : 'reading';
     setView(next);
-    flash(next === 'raw' ? 'raw terminal' : 'reading log');
+    flash(next === 'log' ? 'plugin log' : next === 'raw' ? 'raw terminal' : 'reading log');
     await rememberView(next);
     // The effect below focuses the new body and backfills it.
   }
@@ -660,12 +691,20 @@ function ConsolePanel(props: { panel: PanelInput }) {
     const current = link();
     const size = current ? `${current.cols || '?'}×${current.rows || '?'}` : '?×?';
     const target = current ? singleLine(current.target, 48) : '';
+    if (view() === 'log') {
+      logRevision();
+      const target = current ? singleLine(current.target, 48) : '';
+      return `plugin log · ${logLines.length} lines${target ? ` · ${target}` : ''}`;
+    }
     const mode = view() === 'raw' ? (HAS_TERMINAL ? 'raw terminal' : 'raw log') : 'reading log';
     const baud = current?.baud ? ` · ${current.baud} baud` : '';
     return `${mode}${baud} · ${size} · ${cursorBytes()} B${target ? ` · ${target}` : ''}`;
   });
 
   const footer = createMemo(() => {
+    if (view() === 'log') {
+      return 'log view: plugin notices and link changes (the serial terminal is untouched) · Ctrl+Y cycles reading / raw / log';
+    }
     if (view() === 'raw' && HAS_TERMINAL) {
       return 'terminal: every key goes to the board · palette: Linkr Bee (send line / Ctrl-C / clear / reading log / reconnect) · Ctrl+Shift+L reopens';
     }
@@ -713,7 +752,16 @@ function ConsolePanel(props: { panel: PanelInput }) {
           onTerminalResize={(cols: number, rows: number) => onTerminalResize(cols, rows)}
         />
       </Show>
-      <Show when={!showTerminal()}>
+      <Show when={showLog()}>
+        <scrollbox flexGrow={1} stickyScroll={true} stickyStart="bottom">
+          <text fg={theme.text.base}>
+            {logRevision() >= 0 && logLines.length > 0
+              ? logLines.join('\n')
+              : 'Nothing logged yet. Link changes, errors and tool requests appear here instead of in the serial terminal.'}
+          </text>
+        </scrollbox>
+      </Show>
+      <Show when={showReading()}>
         <scrollbox flexGrow={1} stickyScroll={true} stickyStart="bottom">
           <text fg={theme.text.base}>{bodyText() || hint()}</text>
         </scrollbox>

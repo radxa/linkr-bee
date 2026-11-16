@@ -200,7 +200,12 @@ The UART side is 3.3 V logic, not RS-232. See the
 
 - Top bar: connection state, connect/disconnect, panel toggle, theme, language.
 - Terminal: click and type; its toolbar opens the assistant and provides font
-  size, fullscreen, scroll-to-bottom, and copy. Clear and log export are in settings.
+  size, fullscreen, **Log**, scroll-to-bottom, and copy. The serial terminal only
+  shows UART bytes: app messages (connection state, reconnect attempts, GATT and
+  management errors, debug traces) go to the Log drawer, which opens from that
+  button and never writes into the terminal. Drag its top grabber (or focus it
+  and use the arrow keys, Home/End; double-click resets) to size it; the height
+  is remembered. Clear and log export are in settings.
 - Settings: the left rail opens connection, serial, network, assistant, and About
   sections. Close the panel to give the terminal more space.
 

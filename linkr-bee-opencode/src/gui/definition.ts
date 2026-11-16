@@ -44,6 +44,8 @@ export const definition = Plugin.define({
       'hint.noSession': 'Open a session tab first; the console lives in the session side panel.',
       'view.reading': 'Reading',
       'view.raw': 'Raw',
+      'view.log': 'Log',
+      'log.empty': 'Nothing logged yet. Link changes, errors and tool requests appear here instead of in the serial terminal.',
       'view.label': 'Console view',
       clear: 'Clear',
       reconnect: 'Reconnect',

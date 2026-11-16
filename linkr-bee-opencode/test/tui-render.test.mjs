@@ -224,6 +224,7 @@ test('renderText joins the visible window with newlines', () => {
 test('normalizeView defaults to the reading view', () => {
   assert.equal(normalizeView('raw'), 'raw');
   assert.equal(normalizeView('reading'), 'reading');
+  assert.equal(normalizeView('log'), 'log');
   assert.equal(normalizeView(undefined), 'reading');
   assert.equal(normalizeView('other'), 'reading');
 });

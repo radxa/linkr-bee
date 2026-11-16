@@ -83,8 +83,6 @@ export interface TerminalHandle {
   fit(): void;
   focus(): void;
   clear(): void;
-  /** Writes a synthetic notice line, dim and prefixed. */
-  notice(text: string): void;
   dispose(): void;
 }
 
@@ -141,9 +139,6 @@ export function createTerminal(options: TerminalOptions): TerminalHandle {
     },
     clear() {
       terminal.write('\x1b[2J\x1b[3J\x1b[H');
-    },
-    notice(text: string) {
-      terminal.write(`\r\n\x1b[90m[linkr-bee] ${text}\x1b[0m\r\n`);
     },
     dispose() {
       observer?.disconnect();

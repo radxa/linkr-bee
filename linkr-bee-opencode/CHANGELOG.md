@@ -91,6 +91,12 @@ line, together with `linkr-bee-cli` and the DSH plugin.
   `scan`, `applyUart`); changes reconnect the console and start/stop the page
   server at once. The settings page uses the host's own `SettingsPage` /
   `SettingsLayout` components and degrades read-only when the RPC is missing.
+- Separates the plugin's own log from the serial terminal on every surface:
+  the desktop panel, TUI panel and browser page gain a **Log** view that shows
+  link changes, reconnect notices, errors, truncation and tool requests, while
+  the reading log and raw VT100 terminal receive board bytes only. A
+  full-screen program on the target is therefore never disturbed by plugin
+  messages; Clear in the Log view clears the log alone.
 - Shows the bridge UART baud rate in every status bar (desktop panel, TUI
   header and sidebar, browser page): the saved setting is used first, then the
   live session asks the bridge for its own UART settings and the `state` report

@@ -76,6 +76,16 @@ async function dropLan(page) {
   });
 }
 
+/** App messages are in the event log drawer now, never in the terminal. */
+async function eventLogText(page) {
+  const panel = page.locator("#eventLogPanel");
+  if (await panel.isHidden()) {
+    await page.locator("#eventLogBtn").click();
+  }
+  await expect(panel).toBeVisible();
+  return panel.innerText();
+}
+
 test("an unexpected LAN drop reconnects automatically and keeps the log", async ({ page }) => {
   await connectLan(page);
   const before = await page.evaluate(() => window.__ws.instances.length);
@@ -90,12 +100,14 @@ test("an unexpected LAN drop reconnects automatically and keeps the log", async 
   await expect
     .poll(() => page.evaluate(() => window.__test.autoReconnect.active))
     .toBe(false);
-  const text = await page.locator("#terminalOutput").innerText();
+  const text = await eventLogText(page);
   expect(text).toContain("[reconnect]");
   expect(text).toContain("restored");
   await expect(page.locator("#mobileConnectBtn .btn-label")).toHaveText("Disconnect");
   /* The journal is not cleared by the reconnect. */
   expect(text).toContain("[connect]");
+  /* The serial terminal never receives app log lines. */
+  await expect(page.locator("#terminalOutput")).not.toContainText("[reconnect]");
 });
 
 test("auto-reconnect gives up after the configured attempts and offers the manual button", async ({ page }) => {
@@ -112,7 +124,7 @@ test("auto-reconnect gives up after the configured attempts and offers the manua
   /* The drop's own reconnect plus one dial per configured attempt. */
   expect(after).toBe(before + 3);
   await expect(page.locator("#connectButton .btn-label")).toHaveText(/Connect/i);
-  const text = await page.locator("#terminalOutput").innerText();
+  const text = await eventLogText(page);
   expect(text).toContain("Automatic reconnect failed");
 });
 
@@ -129,7 +141,7 @@ test("clicking the button while reconnecting cancels the schedule", async ({ pag
     .toBe(false);
   await page.waitForTimeout(200);
   expect(await page.evaluate(() => window.__ws.instances.length)).toBe(before);
-  const text = await page.locator("#terminalOutput").innerText();
+  const text = await eventLogText(page);
   expect(text).toContain("cancelled");
 });
 
@@ -144,7 +156,7 @@ test("a manual disconnect is not treated as a lost link", async ({ page }) => {
     .toBe(false);
   await page.waitForTimeout(200);
   expect(await page.evaluate(() => window.__ws.instances.length)).toBe(before);
-  const text = await page.locator("#terminalOutput").innerText();
+  const text = await eventLogText(page);
   expect(text).not.toContain("[reconnect]");
 });
 
@@ -288,7 +300,7 @@ test("unavailable BLE offers same-device reselection without a pairing warning",
   await expect(page.locator("#mobileConnectBtn .btn-label")).toHaveText("Reselect device");
   await expect(page.locator("#connectButton .btn-label")).toHaveText("Reselect device");
   expect(await page.evaluate(() => window.__test.state.device.id)).toBe("original-bee");
-  expect(await page.locator("#terminalOutput").innerText()).not.toContain("If pairing failed");
+  expect(await eventLogText(page)).not.toContain("If pairing failed");
   await page.evaluate(() => { window.__reselect.failing = false; });
   await page.locator("#mobileConnectBtn").click();
   await expect.poll(() => page.evaluate(() => window.__test.state.connected)).toBe(true);
@@ -307,7 +319,7 @@ test("reselection cancellation or another Bee never changes the pinned target", 
     expect(await page.evaluate(() => window.__reselect.connects)).toEqual(["original-bee"]);
     expect(await page.evaluate(() => window.__test.state.connected)).toBe(false);
   }
-  await expect(page.locator("#terminalOutput")).toContainText("That is a different Bee");
+  await expect.poll(() => eventLogText(page)).toContain("That is a different Bee");
 });
 
 test("background rediscovery failure stops retries without opening a chooser", async ({ page }) => {
@@ -346,7 +358,7 @@ test("a pairing refusal during automatic reconnect stops the retries", async ({ 
   expect(await page.evaluate(() => window.__ble.connects)).toBe(1);
   await expect(page.locator(".toast").filter({ hasText: /pairing key|配对键/i })).toBeVisible();
   await expect(page.locator("#connectButton")).toBeEnabled();
-  const text = await page.locator("#terminalOutput").innerText();
+  const text = await eventLogText(page);
   expect(text).toContain("Automatic reconnect stopped");
 });
 
@@ -375,7 +387,7 @@ for (const failure of [
     }, failure);
     await expect.poll(() => page.evaluate(() => window.__ble.connects)).toBe(3);
     await expect.poll(() => page.evaluate(() => window.__test.autoReconnect.active)).toBe(false);
-    const text = await page.locator("#terminalOutput").innerText();
+    const text = await eventLogText(page);
     expect(text).toMatch(/Automatic reconnect failed after\s+3 attempts/);
     expect(text).not.toContain("Automatic reconnect stopped");
     expect(text).not.toContain("Pairing was refused");

@@ -23,6 +23,7 @@ import {
   type EventSubscription,
   type LinkState,
   type OutputEvent,
+  type ReadView,
   type RequestEvent,
   type View,
 } from './client';
@@ -50,8 +51,10 @@ function boot() {
   let streamOpen = false;
   let view: View = 'reading';
   let disposed = false;
+  /** Plugin notices; rendered by the Log view, never written into xterm. */
+  let logs: string[] = [];
 
-  const cursor: Record<View, number> = { reading: 0, raw: 0 };
+  const cursor: Record<ReadView, number> = { reading: 0, raw: 0 };
   let epoch = '';
   let initializing = true;
   let pending: OutputEvent[] = [];
@@ -97,7 +100,16 @@ function boot() {
   });
 
   function render() {
-    ui.update({ phase, state, view, stream: streamOpen, error });
+    ui.update({ phase, state, view, stream: streamOpen, error, logs });
+  }
+
+  /** Adds one plugin log line; never touches the serial terminal. */
+  function addLog(text: string) {
+    const line = String(text ?? '').replace(/\s+/g, ' ').trim();
+    if (line === '') return;
+    const stamp = new Date().toLocaleTimeString();
+    logs = [...logs, `[${stamp}] ${line}`].slice(-500);
+    render();
   }
 
   function describe(caught: unknown): string {
@@ -117,11 +129,16 @@ function boot() {
       void reloadView(false);
       return;
     }
-    // Notices are chrome, not target bytes: print them as dim prefixed lines.
+    // Notices are plugin log lines, not target bytes.
     if (event.kind === 'meta') {
-      if (event.text) terminal.notice(event.text);
+      if (event.text) addLog(event.text);
       return;
     }
+    // The Log view does not draw the terminal; switching back reloads the ring.
+    if (view === 'log') return;
+    // Raw shows device bytes only; a synthetic user echo would duplicate the
+    // bytes the target already echoes.
+    if (view === 'raw' && event.kind === 'user') return;
     const wanted = view;
     const text = wanted === 'reading' ? event.reading ?? event.text : event.text;
     const next = wanted === 'reading' ? event.readingBytes ?? event.bytes : event.bytes;
@@ -132,6 +149,7 @@ function boot() {
 
   /** Reads one view's tail from the server and re-anchors its cursor. */
   async function reloadView(clear: boolean) {
+    if (view === 'log') return;
     try {
       const result = await client.read(view);
       if (disposed) return;
@@ -140,7 +158,7 @@ function boot() {
       epoch = result.epoch;
       cursor[view] = result.bytes;
       if (result.text) terminal.terminal.write(result.text);
-      if (result.truncated) terminal.notice('older console bytes were already dropped (ring truncated)');
+      if (result.truncated) addLog('older console bytes were already dropped (ring truncated)');
     } catch (caught) {
       handleError(caught);
     }
@@ -154,6 +172,7 @@ function boot() {
       state = snapshot;
       clearTransientError();
       render();
+      if (view === 'log') return;
       const result = await client.read(view, cursor[view]);
       if (disposed) return;
       if (result.epoch !== epoch || result.bytes < cursor[view]) {
@@ -258,18 +277,18 @@ function boot() {
       if (!result.ok) {
         if (!resizeWarned) {
           resizeWarned = true;
-          terminal.notice(`resize not applied: ${result.error ?? result.reason ?? 'unknown reason'}`);
+          addLog(`resize not applied: ${result.error ?? result.reason ?? 'unknown reason'}`);
         }
         return;
       }
       if (result.applied === false && !resizeWarned) {
         resizeWarned = true;
-        terminal.notice(`resize not applied: ${result.reason ?? 'unknown reason'}`);
+        addLog(`resize not applied: ${result.reason ?? 'unknown reason'}`);
       }
     } catch (caught) {
       if (!resizeWarned) {
         resizeWarned = true;
-        terminal.notice(`resize not sent: ${describe(caught)}`);
+        addLog(`resize not sent: ${describe(caught)}`);
       }
     }
   }
@@ -279,24 +298,30 @@ function boot() {
       const result = await client.input(data);
       if (!result.ok && !inputWarned) {
         inputWarned = true;
-        terminal.notice(`input not sent: ${result.error ?? 'unknown error'}`);
+        addLog(`input not sent: ${result.error ?? 'unknown error'}`);
       }
     } catch (caught) {
       if (!inputWarned) {
         inputWarned = true;
-        terminal.notice(`input not sent: ${describe(caught)}`);
+        addLog(`input not sent: ${describe(caught)}`);
       }
     }
   }
 
   async function clearConsole() {
+    // In the Log view, Clear empties the local log instead of the shared ring.
+    if (view === 'log') {
+      logs = [];
+      render();
+      return;
+    }
     terminal.clear();
     if (phase === 'unauthorized') return;
     try {
       const result = await client.clear();
-      if (!result.ok) terminal.notice(`clear failed: ${result.error ?? 'unknown error'}`);
+      if (!result.ok) addLog(`clear failed: ${result.error ?? 'unknown error'}`);
     } catch (caught) {
-      terminal.notice(`clear failed: ${describe(caught)}`);
+      addLog(`clear failed: ${describe(caught)}`);
     }
   }
 
@@ -305,10 +330,10 @@ function boot() {
     phase = 'connecting';
     error = null;
     render();
-    terminal.notice('reconnecting to the board…');
+    addLog('reconnecting to the board…');
     try {
       const result = await client.reconnect();
-      if (!result.ok) terminal.notice(`reconnect failed: ${result.error ?? 'unknown error'}`);
+      if (!result.ok) addLog(`reconnect failed: ${result.error ?? 'unknown error'}`);
     } catch (caught) {
       handleError(caught);
     }
@@ -322,6 +347,7 @@ function boot() {
     if (view === next) return;
     view = next;
     render();
+    if (next === 'log') return;
     void reloadView(true);
   }
 

@@ -202,3 +202,25 @@ body {
 .lbw-term-host .xterm-viewport {
   scrollbar-width: thin;
 }
+
+/* Plugin log: separate from the serial terminal so notices cannot disturb it. */
+.lbw-log {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 10px 14px;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  background: var(--lbw-panel, #f6f8fa);
+  color: var(--lbw-muted, #57606a);
+}
+
+.lbw-log-line {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.lbw-log-empty {
+  font-style: italic;
+}

@@ -199,3 +199,27 @@
 .lb-console__settings {
   min-width: 26px;
 }
+
+/* Plugin log: a separate pane so notices never reach the serial terminal. */
+.lb-console__log {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 6px 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--lb-fg, #24292f);
+  background: var(--lb-bg, #f6f8fa);
+}
+
+.lb-console__log-line {
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--lb-muted, #6e7781);
+}
+
+.lb-console__log-empty {
+  color: var(--lb-muted, #6e7781);
+  font-style: italic;
+}

@@ -297,8 +297,8 @@ toast when there is none.
 
 ### What it shows
 
-Two views over the same RPC, toggled from the palette, `/linkr-bee raw`, or
-**Ctrl+Y**:
+Three views, cycled from the palette, `/linkr-bee raw`, or **Ctrl+Y**
+(reading → raw → log), and remembered across TUI runs:
 
 - **reading** (the default) is the server's filtered text log, rendered by
   `src/tui/render.js`: agent probe/setup echoes are hidden, `LINKR_RC_*`
@@ -312,6 +312,11 @@ Two views over the same RPC, toggled from the palette, `/linkr-bee raw`, or
   verbatim, so full-screen programs, arrow-key menus and curses UIs work, and
   the terminal answers device queries the board's program sends. Typing and
   output are per-keystroke, not line-buffered.
+- **log** is the plugin's own event log: link changes, reconnect notices,
+  errors, truncation and tool requests. It is drawn in a separate pane and is
+  *never* written into the reading log or the raw VT100 terminal, so a
+  full-screen program on the target cannot be disturbed by plugin messages.
+  Clear in this view empties the log only.
 - A header with the connected/offline dot, the active view, the bridge baud
   rate (when the board reports it), the size applied to the board, the byte
   cursor and the link target (or the last link error).
@@ -483,6 +488,8 @@ It is the same console the agent, TUI and desktop panel use: same session, same
 The page server starts with the plugin (`webConsole: true`, the default) and
 the URL is available in two places:
 
+- the page's Reading/Raw views show board bytes; the third **Log** tab shows the
+  plugin's notices out of band, so nothing is injected into the terminal;
 - the `state` RPC output carries `webUrl` (additive field);
 - the `webUrl({})` RPC method returns `{ url, enabled }`.
 
