@@ -36,6 +36,9 @@ static const struct linkr_rgb led_activity_color = {
 static const struct linkr_rgb led_blue = {0, 0, 32};
 static const struct linkr_rgb led_white = {24, 24, 24};
 static const struct linkr_rgb led_cyan = {0, 24, 24};
+/* Idle is green, not dark: a board with nobody attached still has to look
+ * powered and ready from across the room. */
+static const struct linkr_rgb led_green = {0, 32, 0};
 #define LED_BLINK_MS 100
 #define LED_PREVIEW_MS 5000
 #define LED_AI_LEASE_MS 15000
@@ -67,7 +70,7 @@ static struct linkr_rgb led_color(int64_t now)
 	if (now < led_preview_deadline) return led_base;
 	if (led_wifi_connected) return led_white;
 	if (led_ble_connected) return led_blue;
-	return (struct linkr_rgb){0, 0, 0};
+	return led_green;
 }
 
 static void led_next(int64_t *next, int64_t deadline, int64_t now)
@@ -130,6 +133,10 @@ int linkr_status_led_init(void)
 	if (err) return err;
 	k_work_init_delayable(&led_apply_work, led_apply);
 	led_ready = true;
+	/* Paint the idle colour now: nothing has connected yet, so no state
+	 * change would ever schedule the first frame and the strip would stay
+	 * dark until a device showed up. */
+	(void)k_work_reschedule(&led_apply_work, K_NO_WAIT);
 	return 0;
 }
 
