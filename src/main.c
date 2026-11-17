@@ -135,7 +135,42 @@ static struct bt_conn *wifi_scan_conn;
 #if LINKR_UART_AUTOBAUD
 static struct bt_conn *autobaud_conn;
 #endif
-static atomic_t ble_connection_count;
+/* Which connections are actually up, by identity.
+ *
+ * This used to be a counter incremented on connect and decremented only when
+ * the peer table still pointed at that same connection. A connection whose
+ * slot had already been reused by a new one matched nothing, so the counter
+ * drifted upward: the status LED stayed blue with nothing attached, and
+ * `advertise_start()` eventually believed the board was full. Remembering the
+ * connection pointers cannot drift that way. */
+static struct bt_conn *ble_links[CONFIG_BT_MAX_CONN];
+
+static void ble_link_hold(struct bt_conn *conn)
+{
+	for (size_t i = 0; i < ARRAY_SIZE(ble_links); i++) {
+		if (ble_links[i] == NULL) {
+			ble_links[i] = conn;
+			return;
+		}
+	}
+}
+
+static void ble_link_drop(struct bt_conn *conn)
+{
+	for (size_t i = 0; i < ARRAY_SIZE(ble_links); i++) {
+		if (ble_links[i] == conn) ble_links[i] = NULL;
+	}
+}
+
+static int ble_link_count(void)
+{
+	int count = 0;
+
+	for (size_t i = 0; i < ARRAY_SIZE(ble_links); i++) {
+		if (ble_links[i] != NULL) count++;
+	}
+	return count;
+}
 static struct k_mutex conn_lock;
 static struct k_mutex uart_config_lock;
 static struct k_work_delayable advertise_work;
@@ -854,7 +889,7 @@ static int advertise_start(void)
 	struct bt_le_adv_param params = *BT_LE_ADV_CONN_FAST_1;
 	int err;
 
-	if (atomic_get(&ble_connection_count) >= CONFIG_BT_MAX_CONN) return 0;
+	if (ble_link_count() >= CONFIG_BT_MAX_CONN) return 0;
 	params.id = linkr_identity;
 	params.options |= BT_LE_ADV_OPT_USE_IDENTITY;
 	err = bt_le_adv_start(&params, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
@@ -933,7 +968,7 @@ static void connected(struct bt_conn *conn, uint8_t err)
 		(void)bt_conn_disconnect(conn, BT_HCI_ERR_CONN_LIMIT_EXCEEDED);
 		return;
 	}
-	atomic_inc(&ble_connection_count);
+	ble_link_hold(conn);
 	linkr_status_led_ble(true);
 	linkr_mgmt_connected(conn);
 	advertise_schedule(K_MSEC(100));
@@ -948,8 +983,8 @@ static void connected(struct bt_conn *conn, uint8_t err)
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
-	if (linkr_ble_peer_disconnected(conn)) atomic_dec(&ble_connection_count);
-	linkr_status_led_ble(atomic_get(&ble_connection_count) > 0);
+	ble_link_drop(conn);
+	linkr_status_led_ble(ble_link_count() > 0);
 	k_mutex_lock(&conn_lock, K_FOREVER);
 	if (wifi_operation_conn == conn) {
 		bt_conn_unref(wifi_operation_conn);
@@ -1515,8 +1550,8 @@ static void diagnostics_response(struct bt_conn *conn)
 				    CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION,
 				    KERNEL_VERSION_STRING);
 	(void)send_control_response(conn,
-				    "@info sys uptime_ms=%lld owner=%u security=%u\r\n",
-				    (long long)k_uptime_get(), 0U,
+				    "@info sys uptime_ms=%lld owner=%u links=%d security=%u\r\n",
+				    (long long)k_uptime_get(), 0U, ble_link_count(),
 				    (unsigned int)security);
 	(void)send_control_response(conn,
 				    "@info uart dropped=%u dropped_no_conn=%u buffer=%u/%u\r\n",

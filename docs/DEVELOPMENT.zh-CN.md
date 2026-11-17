@@ -612,7 +612,7 @@ rel 分组分别提供 UART 发送队列丢弃、BLE 输出队列丢弃和 BLE i
 
 ```text
 @info fw version=0.1.2 zephyr=4.5.0
-@info sys uptime_ms=123456 owner=0 security=1
+@info sys uptime_ms=123456 owner=0 links=1 security=1
 @info uart dropped=0 dropped_no_conn=0 buffer=0/16384
 @info wifi state=connected ip=ready error=0
 @info upload state=on queue=0 dropped=0 http=201 failures=0 successes=4
