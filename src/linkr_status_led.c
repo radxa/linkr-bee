@@ -32,12 +32,19 @@ static const struct linkr_rgb led_activity_color = {
 	.g = (CONFIG_LINKR_BLE_BRIDGE_RGB_ACTIVITY_COLOR >> 8) & 0xff,
 	.b = CONFIG_LINKR_BLE_BRIDGE_RGB_ACTIVITY_COLOR & 0xff,
 };
-/* Dim colours keep the single pixel's power and glare low. */
+/* Dim colours keep the single pixel's power and glare low.
+ *
+ * The four states never stack, and each means one thing:
+ *   white  - nothing attached, the board is up and healthy
+ *   blue   - a BLE client is attached
+ *   green  - WiFi is associated (it wins over BLE: the board is reachable)
+ *   cyan   - an AI session holds the console
+ */
 static const struct linkr_rgb led_blue = {0, 0, 32};
-static const struct linkr_rgb led_white = {24, 24, 24};
+/* Idle white is the one colour seen for hours, so it matches blue/green in
+ * level instead of sitting a step dimmer. */
+static const struct linkr_rgb led_white = {32, 32, 32};
 static const struct linkr_rgb led_cyan = {0, 24, 24};
-/* Idle is green, not dark: a board with nobody attached still has to look
- * powered and ready from across the room. */
 static const struct linkr_rgb led_green = {0, 32, 0};
 #define LED_BLINK_MS 100
 #define LED_PREVIEW_MS 5000
@@ -68,9 +75,11 @@ static struct linkr_rgb led_color(int64_t now)
 {
 	if (now < led_ai_deadline) return led_cyan;
 	if (now < led_preview_deadline) return led_base;
-	if (led_wifi_connected) return led_white;
+	/* WiFi association is the wider state: a board on the network is
+	 * reachable whether or not a BLE client also happens to be attached. */
+	if (led_wifi_connected) return led_green;
 	if (led_ble_connected) return led_blue;
-	return led_green;
+	return led_white;
 }
 
 static void led_next(int64_t *next, int64_t deadline, int64_t now)

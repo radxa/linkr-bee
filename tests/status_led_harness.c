@@ -104,9 +104,9 @@ int main(int argc, char **argv)
     }
     assert(linkr_status_led_init() == 0);
     if (scenario == 12) {
-        /* Nothing has ever connected: the board is visibly alive, not dark. */
+        /* Nothing has ever connected: white says the board is up and well. */
         advance(100);
-        expect(0, 10, 0);
+        expect(10, 10, 10);
         assert(!locks);
         return 0;
     }
@@ -141,7 +141,7 @@ int main(int argc, char **argv)
             advance(220);
             expect(0, 0, 0);
             advance(240);
-            expect(7, 7, 7);
+            expect(0, 10, 0);
         } else {
             advance(239);
             now_ms = 240; /* New RX arrives before the due work runs. */
@@ -152,11 +152,11 @@ int main(int argc, char **argv)
             expect(0, 0, 10);
         }
     } else if (scenario == 5) {
-        linkr_status_led_wifi(true); advance(200); expect(7, 7, 7);
+        linkr_status_led_wifi(true); advance(200); expect(0, 10, 0);
         advance(300); linkr_status_led_ai(true); advance(300); expect(0, 7, 7);
         advance(400); linkr_status_led_ble(false); advance(400); expect(0, 7, 7);
-        advance(500); linkr_status_led_ai(false); advance(500); expect(7, 7, 7);
-        advance(600); linkr_status_led_wifi(false); advance(600); expect(0, 10, 0);
+        advance(500); linkr_status_led_ai(false); advance(500); expect(0, 10, 0);
+        advance(600); linkr_status_led_wifi(false); advance(600); expect(10, 10, 10);
     } else if (scenario == 6) {
         linkr_status_led_ai(true); advance(200); expect(0, 7, 7);
         advance(15199); expect(0, 7, 7);
@@ -186,12 +186,12 @@ int main(int argc, char **argv)
         advance(1240);
         assert(writes <= 27); /* All sources, including manual, stay bounded. */
     } else if (scenario == 11) {
-        /* Disconnected the base colour is green, so UART traffic shows as that
-         * green blinking off rather than an activity colour on a black base. */
-        linkr_status_led_ble(false); advance(200); expect(0, 10, 0);
+        /* Disconnected the base colour is white, so UART traffic shows as that
+         * white blinking off rather than an activity colour on a black base. */
+        linkr_status_led_ble(false); advance(200); expect(10, 10, 10);
         advance(300); linkr_status_led_activity();
         advance(310); expect(0, 0, 0);
-        advance(345); expect(0, 10, 0);
+        advance(345); expect(10, 10, 10);
     } else assert(false);
     assert(!locks);
     return 0;
