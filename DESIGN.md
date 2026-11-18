@@ -264,8 +264,24 @@ components:
 - Use quiet conversation surfaces, an inset user bubble, existing focus tokens
   and a growing composer. Hide secondary queue guidance behind a disclosure.
 
-### Assistant choices and terminal ownership
+### Assistant layout and the terminal pane
 
+- 打开助手有两种视图，由头部动作组最左侧的视图按钮切换，**所有宽度都显示该按钮**：
+  「仅助手」把终端面板隐藏（终端继续接收数据），助手占满整个工作区；
+  另一种视图看窗口余量——窄屏（<960px）是上下分屏（终端 45% / 助手 55%），
+  宽屏是左右分栏。窗口宽度只决定"分屏长什么样"，不决定按钮是否出现。
+- 默认视图按窗口宽度给：窄屏打开即「仅助手」，宽屏打开即分屏。用户点过之后
+  在当前会话内保持，关闭助手再打开时重新按当前宽度决定（不写 localStorage）。
+- 视图按钮是 44×44 图标按钮，`aria-pressed` 表示"分屏已开"，按下时用
+  `--panel-2` + `--line-strong` 与相邻文字按钮区分；`aria-label` 随状态换成
+  显示/隐藏终端，两语言都要有文案。
+- 键盘弹出、等待选择只压缩分屏里的终端；仅助手已经是最宽布局，不再折叠。
+- 助手对话区自动跟随到底的条件是"距底 <64px"：工具行、执行过程、展开的活动组、
+  执行结果更新都算一次内容变化，必须一起跟随；用户主动上滚阅读历史时不得被拉回。
+- ≤400px 动作按钮保持 10px 内边距且不收缩（8px 时"设置/退出"会挤成一列）；
+  ≤360px 由档位选择器让出空间：隐藏 caption、去掉 112px 最小宽度。
+
+### Assistant choices and terminal ownership
 - Assistant questions use an inline fieldset in the tool message: a question,
   2–6 radio or checkbox options with short descriptions, optional free text,
   and an explicit Continue action. Nothing is preselected or sent on selection.

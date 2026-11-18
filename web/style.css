@@ -2939,6 +2939,10 @@ html.agent-mode.settings-drawer-layout .drawer-backdrop { display: none; }
 html.agent-mode.settings-drawer-layout .workpanel { grid-column: 1; grid-row: 1; gap: 0; min-height: 0; }
 html.agent-mode .terminal-workspace { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, .45fr) minmax(0, .55fr); gap: 8px; }
 html.agent-mode .terminal-workspace[data-agent-layout="columns"] { grid-template-columns: minmax(0, 1.35fr) minmax(360px, 1fr); grid-template-rows: minmax(0, 1fr); }
+/* A narrow window opens the assistant alone; the header toggle puts the split
+ * back. The terminal keeps running behind it — only its pane is hidden. */
+html.agent-mode .terminal-workspace[data-agent-layout="agent"] { grid-template-rows: minmax(0, 1fr); }
+html.agent-mode .terminal-workspace[data-agent-layout="agent"] #terminalCard { display: none; }
 html.agent-mode .terminal-card { height: 100%; min-width: 0; min-height: 0; }
 html.agent-mode .terminal-head { min-height: 44px; padding: 2px 6px; flex: 0 0 auto; }
 html.agent-mode .term-tool { min-width: 44px; min-height: 44px; height: 44px; }
@@ -2954,6 +2958,11 @@ html.agent-keyboard-terminal .agent-console { display: none; }
 .agent-header { display: flex; justify-content: space-between; align-items: center; gap: 8px; border-bottom: 1px solid var(--line); }
 .agent-actions { display: flex; gap: 8px; justify-content: flex-end; }
 .agent-panel .btn { min-height: 44px; padding-inline: 10px; }
+/* The view toggle is the one icon-only button in the assistant header: a square
+ * target with the same surface and radius as the text buttons beside it. It is
+ * shown at every width — a desktop window can still want the assistant alone. */
+.agent-panel .agent-view-toggle { width: 44px; min-width: 44px; padding: 0; }
+.agent-panel .agent-view-toggle[aria-pressed="true"] { border-color: var(--line-strong); background: var(--panel-2); }
 .agent-settings[hidden], .settings-tab[hidden] { display: none; }
 .agent-settings { flex: 0 0 auto; }
 .agent-settings fieldset { padding: 0; margin: 0; border: 0; min-width: 0; }
@@ -3093,6 +3102,18 @@ html:not(.settings-drawer-layout) :is(#drawerThemeButton, #drawerLangButton) { d
 .agent-panel .agent-form #agentStop:disabled { display: none; }
 .agent-terminal-peek:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
 @media (max-width: 380px) { .agent-header { gap: 4px; } .agent-header .agent-actions { gap: 4px; } .agent-header .btn { padding-inline: 8px; } }
+/* Four header actions leave each label less than its own width at 8px padding, and
+ * a squeezed label reads as one character per row. Keep them at the normal
+ * padding and let them hold their natural width; the mode selector is what gives
+ * way on the narrowest phones (its 112px floor exists for the caption). */
+@media (max-width: 400px) {
+  .agent-header .btn { padding-inline: 10px; }
+  .agent-header .agent-actions > .btn { flex: 0 0 auto; white-space: nowrap; }
+}
+@media (max-width: 360px) {
+  .agent-narrow .agent-gear-caption { display: none; }
+  .agent-narrow .agent-gear { min-width: 0; padding-inline: 6px; }
+}
 
 .agent-history { flex: 0 1 auto; min-height: 24px; max-height: 28%; overflow: auto; padding: 4px 10px; border-bottom: 1px solid var(--line); font-size: 12px; }
 .agent-history summary { cursor: pointer; overflow-wrap: anywhere; }

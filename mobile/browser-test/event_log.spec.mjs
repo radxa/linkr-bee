@@ -56,6 +56,12 @@ test.describe('event log in native keyboard layouts', () => {
     await expect.poll(async () => Math.abs((await panel.boundingBox()).height - preferred)).toBeLessThan(2);
     // Opening Agent changes the card height without a window resize event.
     await page.locator('#agentButton').click();
+    /* A phone opens the assistant alone, which hides the terminal card and the
+     * drawer inside it. Ask for the split first: a hidden card would satisfy
+     * headerIsAccessible trivially (every rect measures zero) while the close
+     * button cannot be clicked at all. */
+    await page.locator('#agentToggleTerminal').click();
+    await expect(page.locator('#terminalCard')).toBeVisible();
     await expect.poll(headerIsAccessible).toBe(true);
     await page.locator('#eventLogClose').click();
     await expect(panel).toBeHidden();

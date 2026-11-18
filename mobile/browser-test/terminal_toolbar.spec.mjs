@@ -74,6 +74,11 @@ for (const theme of ['light', 'dark']) {
 
       await button.click();
       await expect(button).toHaveAttribute('aria-pressed', 'true');
+      /* A narrow window opens the assistant alone, so the terminal toolbar is not
+       * on screen until the split is asked for. The same button must still leave
+       * Agent mode once it is back. */
+      if (width < 960) await page.locator('#agentToggleTerminal').click();
+      await expect(button).toBeVisible();
       expect(await checkGradient(button)).not.toBe(initial);
       await expect(button).toHaveCSS('border-top-color', 'rgba(143, 126, 201, 0.5)');
       await button.click();
