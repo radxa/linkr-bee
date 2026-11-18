@@ -12,6 +12,9 @@ export async function fetchDownload({ url, sha256, signal, onProgress = () => {}
     try { await response.body?.cancel(); } catch { /* nothing to release */ }
     throw new Error("Browser download limit is 128 MiB; use target download for larger files.");
   }
+  if (!response.body) {
+    throw new Error("The download response has no body.");
+  }
   const reader = response.body.getReader(), chunks = [];
   let bytes = 0;
   try {

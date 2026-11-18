@@ -42,6 +42,7 @@ test('computer downloads report progress and checksum without UART',async()=>{
  assert.equal(result.sha256,sha256);assert.equal(result.checksumStatus,'matched');assert.deepEqual(events,[{bytes:7,total:7}]);
  await assert.rejects(fetchDownload({url:'https://example.org/a',sha256:'0'.repeat(64),fetchImpl}),/mismatch/);
  await assert.rejects(fetchDownload({url:'https://example.org/a',fetchImpl,maxBytes:2}),/limit/);
+ await assert.rejects(fetchDownload({url:'https://example.org/a',fetchImpl:async()=>new Response(null,{status:204})}),/no body/);
 });
 
 // A model-proposed download must never reach the network on its own: the card is

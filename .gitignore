@@ -35,6 +35,8 @@ linkr-bee-opencode/node_modules/
 
 # Mobile app dependencies and generated output
 mobile/node_modules/
+# tools/build_agent_bundle.sh installs esbuild here
+web/node_modules/
 mobile/dist/
 mobile/test-results/
 mobile/playwright-report/

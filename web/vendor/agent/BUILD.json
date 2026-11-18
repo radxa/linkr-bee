@@ -28,7 +28,7 @@
     "web/target_files.js": "cc6085e526f699e91672a9bf5036ef74a3fac27f8289e3cf234b9012bcfbde16",
     "web/target_verify.js": "8293c4f3f6fac047b77ddeee98730d5837b88884a730512b6326d6ba3dd5b540",
     "web/serial_watch.js": "e24f5d6c50e1dd5596557f3d7a79166fb5f87f81afcb43b7d76361d9c43caafa",
-    "mobile/src/web-reader.mjs": "5450ddebc84ada185137b1c14189c2748a3242a3e29fc9ea89a8f546e6bbb770",
+    "mobile/src/web-reader.mjs": "d3c7dadb8bda6dcf5530b82818fe9553a24b084da18535c39b31c6d1db869168",
     "mobile/src/agent-context.mjs": "184cad3271ba69dfc3a9a81dadbf4427d8b31be455dd39ba9024bcab1021eace",
     "mobile/src/model-stream.mjs": "e7a1f6a6563132ff2940a35db70f19d684bba5bab608bb5ccac5184a47569240",
     "mobile/src/radxa-docs.mjs": "ca964357173b831e2b661694ba7c4d844648db7f2d9e4dc2e8da045170dea9da",
@@ -37,5 +37,5 @@
     "mobile/src/pi-agent.mjs": "3799b449ba771f671eb3aaaca0f67070ddc0a77f363b8cd1f6257f221960a655",
     "mobile/src/agent-runtime.mjs": "485643cb60ba92dae424f123ab2b0a39e711b9786cbbe520556cf21ec83f3676"
   },
-  "sha256": "2b380815140f0101a8855b958033de4f6e4e6723eedc98d0deda185e25ad0a7b"
+  "sha256": "75de826dfce4bdd8d6b1bb34e4a80861f8bb355c08412a6c86dcabe22563dee4"
 }
