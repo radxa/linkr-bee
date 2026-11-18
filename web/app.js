@@ -45,6 +45,7 @@ import {
 } from "./prompt_store.js";
 import { demoModeRequested, installDemoMode } from "./demo_mode.js";
 import {
+  ACCESSORY_LIMITS,
   BLE_NAME_QUERY_COMMAND,
   DIAGNOSTICS_COMMAND,
   LAN_BRIDGE_QUERY_COMMAND,
@@ -415,6 +416,9 @@ const elements = {
   pasteTerminalButton: $("pasteTerminalButton"),
   terminalKeyButtons: document.querySelectorAll("[data-terminal-key]"),
   uartInput: $("uartInput"),
+  baudSelect: $("baudSelect"),
+  baudCustomField: $("baudCustomField"),
+  baudCustomInput: $("baudCustomInput"),
   enterSelect: $("enterSelect"),
   chunkInput: $("chunkInput"),
   uartModeField: $("uartModeField"),
@@ -722,6 +726,10 @@ const I18N = {
     pasteUnavailable: "Clipboard unavailable. Long-press in the terminal to paste.",
     keyboard: "Keyboard",
     uart: "UART",
+    baudRate: "Baud rate",
+    baudHint: "Picking a rate updates the UART string below; press Set to apply it.",
+    baudCustom: "Custom…",
+    baudCustomRate: "Custom baud rate",
     uartMode: "BLE UART mode",
     uartModeInteractive: "Interaction first",
     uartModeReliable: "Reliability first",
@@ -1049,6 +1057,10 @@ const I18N = {
     pasteUnavailable: "无法读取剪贴板，请长按终端进行粘贴。",
     keyboard: "键盘",
     uart: "UART",
+    baudRate: "波特率",
+    baudHint: "选择预设会更新下方 UART 参数，点击「设置」后生效。",
+    baudCustom: "自定义…",
+    baudCustomRate: "自定义波特率",
     uartMode: "BLE 串口模式",
     uartModeInteractive: "交互优先",
     uartModeReliable: "可靠优先",
@@ -6677,6 +6689,7 @@ function loadPersisted() {
   if (uart) {
     elements.uartInput.value = uart;
   }
+  syncBaudControls();
   const enter = localStorage.getItem("linkr-enter");
   if (enter) {
     elements.enterSelect.value = enter;
@@ -6716,6 +6729,54 @@ function updateBaudLabel() {
   if (elements.baudLabel && baud) {
     elements.baudLabel.textContent = baud;
   }
+}
+
+/* The presets live in the select itself, so its options are the single source
+ * of truth. Anything else in the UART string selects "Custom…" and opens the
+ * numeric field with the current value. */
+function supportedBaud(rate) {
+  return (
+    Number.isInteger(rate) &&
+    rate >= ACCESSORY_LIMITS.minBaud &&
+    rate <= ACCESSORY_LIMITS.maxBaud
+  );
+}
+
+function uartBaudToken(value) {
+  const token = String(value ?? "").split(",")[0].trim();
+  return /^\d+$/.test(token) ? Number(token) : NaN;
+}
+
+function syncBaudControls() {
+  if (!elements.baudSelect || !elements.baudCustomField) {
+    return;
+  }
+  const rate = uartBaudToken(elements.uartInput.value);
+  const preset = supportedBaud(rate)
+    ? [...elements.baudSelect.options].find(
+        (option) => option.value === String(rate),
+      )
+    : null;
+  if (preset) {
+    elements.baudSelect.value = preset.value;
+    elements.baudCustomField.hidden = true;
+    return;
+  }
+  elements.baudSelect.value = "custom";
+  elements.baudCustomField.hidden = false;
+  elements.baudCustomInput.value = Number.isInteger(rate) ? String(rate) : "";
+}
+
+/* Rewrite only the baud field of "baud,data,parity,stop,flow" so a preset never
+ * discards the frame settings the user already typed. */
+function setUartBaud(rate) {
+  const current = String(elements.uartInput.value || "").trim();
+  const comma = current.indexOf(",");
+  const suffix = comma >= 0 ? current.slice(comma) : ",8,n,1,n";
+  const value = `${rate}${suffix}`;
+  elements.uartInput.value = value;
+  saveSetting("linkr-uart", value);
+  updateBaudLabel();
 }
 
 function saveSetting(key, value) {
@@ -7580,9 +7641,38 @@ function bind() {
     }
   }, true);
 
+  elements.baudSelect.addEventListener("change", () => {
+    if (elements.baudSelect.value === "custom") {
+      const rate = uartBaudToken(elements.uartInput.value);
+      elements.baudCustomField.hidden = false;
+      elements.baudCustomInput.value = Number.isInteger(rate) ? String(rate) : "";
+      elements.baudCustomInput.setAttribute("aria-invalid", "false");
+      elements.baudCustomInput.focus();
+      return;
+    }
+    const rate = Number(elements.baudSelect.value);
+    if (!supportedBaud(rate)) {
+      return;
+    }
+    elements.baudCustomField.hidden = true;
+    setUartBaud(rate);
+  });
+  elements.baudCustomInput.addEventListener("input", () => {
+    const raw = String(elements.baudCustomInput.value || "").trim();
+    const rate = Number(raw);
+    const valid = supportedBaud(rate);
+    elements.baudCustomInput.setAttribute(
+      "aria-invalid",
+      raw && !valid ? "true" : "false",
+    );
+    if (valid) {
+      setUartBaud(rate);
+    }
+  });
   elements.uartInput.addEventListener("change", () => {
     saveSetting("linkr-uart", elements.uartInput.value.trim());
     updateBaudLabel();
+    syncBaudControls();
   });
   elements.enterSelect.addEventListener("change", () =>
     saveSetting("linkr-enter", elements.enterSelect.value),
