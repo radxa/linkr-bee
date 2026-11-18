@@ -15,6 +15,62 @@
     <link rel="stylesheet" href="./ble_guidance.css?v=20261029" />
     <link rel="stylesheet" href="./agent_choices.css?v=20261029" />
     <link rel="stylesheet" href="./agent_ui.css?v=20261029" />
+    <script>
+      /* Android WebView below Chrome 100 lacks AbortSignal.prototype.throwIfAborted
+       * (Chrome 100), AbortSignal.timeout (103) and AbortSignal.any (116). Every
+       * abort check in this app calls throwIfAborted(), so on such a WebView the
+       * automatic reconnect dies with "n?.throwIfAborted is not a function"
+       * before it can dial. Loaded here, ahead of every module, so nothing can
+       * capture the missing methods first. */
+      (function patchAbortSignal() {
+        if (typeof AbortSignal !== "function") return;
+        var proto = AbortSignal.prototype;
+        if (!proto.throwIfAborted) {
+          proto.throwIfAborted = function throwIfAborted() {
+            if (!this.aborted) return;
+            throw this.reason === undefined
+              ? new DOMException("The operation was aborted.", "AbortError")
+              : this.reason;
+          };
+        }
+        if (!AbortSignal.timeout) {
+          AbortSignal.timeout = function timeout(ms) {
+            var delay = Number(ms);
+            if (!Number.isFinite(delay) || delay < 0) {
+              throw new RangeError("AbortSignal.timeout() needs a non-negative number");
+            }
+            var controller = new AbortController();
+            setTimeout(function () {
+              controller.abort(new DOMException("The operation timed out.", "TimeoutError"));
+            }, delay);
+            return controller.signal;
+          };
+        }
+        if (!AbortSignal.any) {
+          AbortSignal.any = function any(signals) {
+            var controller = new AbortController();
+            var listeners = [];
+            Array.prototype.forEach.call(signals, function (signal) {
+              if (signal.aborted) {
+                controller.abort(signal.reason);
+                return;
+              }
+              var onAbort = function () {
+                controller.abort(signal.reason);
+              };
+              signal.addEventListener("abort", onAbort, { once: true });
+              listeners.push([signal, onAbort]);
+            });
+            if (controller.signal.aborted) {
+              listeners.forEach(function (pair) {
+                pair[0].removeEventListener("abort", pair[1]);
+              });
+            }
+            return controller.signal;
+          };
+        }
+      })();
+    </script>
   </head>
   <body>
     <main class="app-shell">
