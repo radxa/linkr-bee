@@ -73,8 +73,10 @@ test('explicit enable handshakes with a real POSIX shell and later calls have no
   expect(record.exitCode).toBe(7);expect(record.payload).toBe("__linkr_run_v1 'printf \"result\\n\"; exit 7'\r");
   expect(record.payload).not.toContain(record.shellTracking.nonce);expect(record.evidence).not.toContain('\x1b]');
   expect(await page.evaluate(()=>window.shellSent.join(''))).not.toContain('LINKR_EXIT_');
-  const output=await page.evaluate(()=>{const b=window.__shellTest.state.term.buffer.active;return Array.from({length:b.length},(_,i)=>b.getLine(i).translateToString(true)).join('\n');});
-  expect(output).toContain('[Agent] exit=7');
+  await expect.poll(() => page.evaluate(() => {
+    const buffer = window.__shellTest.state.term.buffer.active;
+    return Array.from({ length: buffer.length }, (_, i) => buffer.getLine(i).translateToString(true)).join('\n');
+  })).toContain('[Agent] exit=7');
 });
 test('OSC raw export retains bytes while reading export has short statuses; replay sends no input',async({page})=>{
   await enable(page);await run(page,'printf output');

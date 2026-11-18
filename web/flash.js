@@ -1,4 +1,6 @@
-import { ESPLoader, Transport } from "./vendor/esptool-js/bundle.js";
+import { ESPLoader } from "./vendor/esptool-js/bundle.js";
+
+import { FlasherTransport, observeBoot, restartBoard } from "./flash_reset.js";
 
 const DEFAULT_REPO = "radxa/linkr-bee";
 const BOARD_NAMES = {
@@ -34,9 +36,8 @@ const state = {
   port: null,
   ports: [],
   transport: null,
-  loader: null,
   image: null,
-  flashing: false,
+  busy: false,
 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -96,19 +97,14 @@ function rebuildPortSelect(preferred) {
 
 // Granted ports survive a reload. Ask for one only when the list is empty or
 // the user explicitly picks another device.
-async function refreshPorts({ request = false } = {}) {
+async function refreshPorts() {
   if (!navigator.serial) return;
   try {
-    if (request) {
-      const picked = await navigator.serial.requestPort();
-      await releaseConnection();
-      state.port = picked;
-    }
     state.ports = await navigator.serial.getPorts();
     if (state.port && !state.ports.includes(state.port)) {
       state.ports.push(state.port);
     }
-    if (!state.port && state.ports.length) state.port = state.ports[0];
+    if (!state.busy && !state.port && state.ports.length) state.port = state.ports[0];
     rebuildPortSelect(state.port);
     if (state.port) {
       const { vid, pid, name } = portInfo(state.port);
@@ -124,7 +120,7 @@ async function refreshPorts({ request = false } = {}) {
       setPortHint(`读取串口失败：${error?.message || error}`, true);
     }
   }
-  updateResetAvailability();
+  updateControls();
 }
 
 function serialErrorHint(message) {
@@ -137,33 +133,23 @@ function serialErrorHint(message) {
   return "";
 }
 
-// esptool-js' disconnect waits for the reader lock without a timeout. A failed
-// handshake can leave the read loop pending, which used to freeze the page
-// until reload. Bound every cleanup step and always release the OS port.
+async function pickPort() {
+  if (state.busy) return;
+  setBusy(true);
+  try {
+    state.port = await navigator.serial.requestPort();
+    await refreshPorts();
+  } catch (error) {
+    if (error?.name !== "NotFoundError") setPortHint(String(error?.message || error), true);
+  } finally {
+    setBusy(false);
+  }
+}
+
 async function releaseConnection() {
   const transport = state.transport;
-  const port = state.port;
   state.transport = null;
-  state.loader = null;
-  if (transport?.reader) {
-    try {
-      await Promise.race([transport.reader.cancel(), sleep(400)]);
-    } catch {
-      // Already cancelled.
-    }
-  }
-  if (transport) {
-    try {
-      await Promise.race([transport.disconnect(), sleep(1200)]);
-    } catch {
-      // Already closed.
-    }
-  }
-  try {
-    await Promise.race([port?.close?.(), sleep(600)]);
-  } catch {
-    // The port was not open or is already closed.
-  }
+  if (transport) await transport.disconnect();
 }
 
 // The flasher is deployed from the fork's Pages site while the PR is open and
@@ -201,18 +187,31 @@ function setProgress(fraction) {
   progressTrack.classList.toggle("active", value > 0);
 }
 
-function updateResetAvailability() {
-  resetButton.disabled = state.flashing || !navigator.serial || !state.port;
+function setBusy(busy) {
+  state.busy = busy;
+  updateControls();
+}
+
+function updateControls() {
+  const serial = !!navigator.serial && window.isSecureContext && location.protocol !== "file:";
+  connectButton.disabled = state.busy || !serial || !state.board;
+  retryButton.disabled = connectButton.disabled;
+  boardSelect.disabled = state.busy || !state.manifest;
+  baudSelect.disabled = state.busy;
+  portSelect.disabled = state.busy || !serial;
+  pickPortButton.disabled = state.busy || !serial;
+  refreshPortsButton.disabled = state.busy || !serial;
+  resetButton.disabled = state.busy || !serial || !state.port;
   // The watchdog reset writes ESP32-C3 RTC registers through the stub, so it
   // only makes sense on the X1.0's own USB port. Other boards keep the plain
   // EN restart above. The X1.0 entry still shows the button before a port is
   // picked, disabled, so the fallback is discoverable instead of appearing
   // only after the reset it is meant to rescue has failed.
   const onX1 = state.board?.slug === "linkr-bee-x1-0";
-  const offered = onX1 && !!navigator.serial;
+  const offered = onX1 && serial;
   const nativeUsb = onX1 && isNativeUsb();
   watchdogButton.hidden = !offered;
-  watchdogButton.disabled = !offered || !nativeUsb || state.flashing || !state.port;
+  watchdogButton.disabled = !offered || !nativeUsb || state.busy || !state.port;
   watchdogButton.title = !offered
     ? ""
     : !state.port
@@ -315,19 +314,17 @@ function parseChip(text) {
 function selectBoard(slug) {
   const board = state.manifest.boards.find((item) => item.slug === slug);
   state.board = board || null;
-  state.loader = null;
   state.image = null;
   $("factChip").textContent = board?.chip || "读取中…";
   $("factAddress").textContent = board?.flash_address || "读取中…";
   $("factSize").textContent = board ? formatBytes(board.size) : "—";
   $("factHash").textContent = board ? shortHash(board.sha256) : "—";
   $("factHash").title = board?.sha256 || "";
-  connectButton.disabled = !board;
   downloadButton.disabled = !board;
   camPrep.hidden = true;
   setProgress(0);
   if (board) setStatus(`已选择 ${board.name}。点击“连接串口并烧录”开始。`);
-  updateResetAvailability();
+  updateControls();
 }
 
 function populateBoards(manifest) {
@@ -339,7 +336,6 @@ function populateBoards(manifest) {
     option.textContent = board.name || boardLabel(board.slug);
     boardSelect.append(option);
   }
-  boardSelect.disabled = false;
   const releasePill = $("releasePill");
   releasePill.classList.toggle("stale", manifest.source === "api");
   releasePill.textContent =
@@ -453,15 +449,10 @@ function terminal() {
 }
 
 async function flash({ noReset = false } = {}) {
-  if (!state.board) return;
-  state.flashing = true;
-  connectButton.disabled = true;
+  if (state.busy || !state.board) return;
+  const board = state.board;
+  setBusy(true);
   retryButton.hidden = true;
-  resetButton.disabled = true;
-  watchdogButton.disabled = true;
-  portSelect.disabled = true;
-  pickPortButton.disabled = true;
-  refreshPortsButton.disabled = true;
   setProgress(0);
   setStatus("正在准备固件…");
   try {
@@ -473,26 +464,25 @@ async function flash({ noReset = false } = {}) {
     // activation window and make the chooser fail with a SecurityError.
     if (!state.port) {
       setStatus("请选择开发板串口…");
-      await refreshPorts({ request: true });
+      state.port = await navigator.serial.requestPort();
+      await refreshPorts();
     }
     if (!state.port) {
       throw new Error("尚未选择串口");
     }
+    const port = state.port;
     {
-      const { vid, pid, name } = portInfo(state.port);
+      const { vid, pid, name } = portInfo(port);
       logLine(
         `串口：${name}${vid ? `（VID ${vid} / PID ${pid}）` : ""}` +
-          ` · 板型：${state.board.slug} · 固件：${state.manifest?.tag || state.manifest?.version || "?"}` +
+          ` · 板型：${board.slug} · 固件：${state.manifest?.tag || state.manifest?.version || "?"}` +
           ` · 来源：${state.manifest?.source || "?"}`,
       );
     }
     setStatus("正在准备固件…");
-    const image = await ensureImage(state.board);
+    const image = await ensureImage(board);
 
-    // A previous attempt can leave the Web Serial port open (or its reader
-    // lock pending). Bounded cleanup lets the user retry without reloading.
-    await releaseConnection();
-    state.transport = new Transport(state.port, false);
+    state.transport = new FlasherTransport(port, false);
 
     setStatus(noReset ? "正在连接（跳过自动复位）…" : "正在连接引导程序…");
     const loader = new ESPLoader({
@@ -501,22 +491,21 @@ async function flash({ noReset = false } = {}) {
       terminal: terminal(),
       debugLogging: false,
     });
-    state.loader = loader;
     const chip = await loader.main(noReset ? "no_reset" : "default_reset");
     logLine(`检测到芯片：${chip}`);
 
-    const expected = parseChip(state.board.chip);
+    const expected = parseChip(board.chip);
     if (expected && !parseChip(chip).includes(expected)) {
-      throw new Error(`板型不匹配：选择的是 ${state.board.name}（${state.board.chip}），实际是 ${chip}`);
+      throw new Error(`板型不匹配：选择的是 ${board.name}（${board.chip}），实际是 ${chip}`);
     }
 
-    const address = Number.parseInt(state.board.flash_address || "0x0", 16);
+    const address = Number.parseInt(board.flash_address || "0x0", 16);
     if (!Number.isFinite(address)) {
-      throw new Error(`无效的烧录地址：${state.board.flash_address}`);
+      throw new Error(`无效的烧录地址：${board.flash_address}`);
     }
 
     setStatus("正在写入固件，请勿断开 USB…");
-    logLine(`写入 ${state.board.image || "firmware"} 到 0x${address.toString(16)} …`);
+    logLine(`写入 ${board.image || "firmware"} 到 0x${address.toString(16)} …`);
     await loader.writeFlash({
       fileArray: [{ data: toBinaryString(image), address }],
       flashSize: "keep",
@@ -538,25 +527,25 @@ async function flash({ noReset = false } = {}) {
     // (USB re-enumeration, a cable pulled at the wrong moment) is not a failed
     // flash, and saying so would invite the user to erase and write again.
     // `sent` is the honest middle: the edge went out but no boot was read back.
-    let restart = "confirmed";
+    let restart;
+    let restartError;
     try {
-      restart = await restartBoard();
+      await releaseConnection();
+      restart = await restartBoard(port, isNativeUsb(port));
     } catch (error) {
       restart = "failed";
-      logLine(`自动重启失败：${error?.message || error}`);
+      restartError = error?.message || String(error);
+      logLine(`自动重启失败：${restartError}`);
     }
-    // The board is booting; hand the port back so the terminal can open it.
-    await releaseConnection();
     setProgress(1);
-    resetButton.disabled = false;
     if (restart === "confirmed") {
       setStatus("烧录完成。设备已重启，可以打开终端连接。", "ok");
       logLine("烧录完成，设备已重启。");
     } else if (restart === "sent") {
       setStatus("烧录完成，已发送重启命令；如果设备没有启动，请点“重启设备”。");
-      logLine("烧录完成，已发送重启命令（未读回启动信息）。");
+      logLine("烧录完成，已发送重启命令，尚未确认固件启动。");
     } else {
-      setStatus("烧录完成，但自动重启失败；请点“重启设备”后再打开终端。");
+      setStatus(`烧录完成，重启失败：${restartError}。`, "error");
       logLine("烧录完成；自动重启失败，请点“重启设备”。");
     }
   } catch (error) {
@@ -567,7 +556,7 @@ async function flash({ noReset = false } = {}) {
       message = `${message}。${openHint}`;
     } else if (/fail|connect|timeout|sync|boot|serial/i.test(message)) {
       retryButton.hidden = false;
-      if (state.board?.slug === "esp32-cam") {
+      if (board.slug === "esp32-cam") {
         message +=
           "。请确认 GPIO0 已接 GND，断开再重新上电，然后点“已进入下载模式，重试连接”。";
       } else {
@@ -577,137 +566,19 @@ async function flash({ noReset = false } = {}) {
     }
     setStatus(`烧录失败：${message}`, "error");
     logLine(`错误：${message}`);
-    // Release the failed session without waiting on a stuck reader lock.
-    await releaseConnection();
-    resetButton.disabled = true;
   } finally {
-    state.flashing = false;
-    connectButton.disabled = !state.board;
-    portSelect.disabled = false;
-    pickPortButton.disabled = !navigator.serial;
-    refreshPortsButton.disabled = !navigator.serial;
-    updateResetAvailability();
+    await finishOperation();
   }
 }
 
-// esptool-js' `after("hard_reset")` only drops RTS. When the line is already
-// idle that is no edge at all, so the chip keeps running the flasher stub: the
-// WROOM-32 shows only its power LED, and the X1.0 stays in USB download mode
-// with no console and no BLE. Pulse EN ourselves and leave IO0/BOOT high, so
-// the release starts the firmware instead of the ROM loader.
-async function pulseEn(transport, { hold = 120, settle = 300 } = {}) {
-  await transport.setDTR(false); // IO0/BOOT high: boot the firmware, not the loader
-  await transport.setRTS(true); // EN low: hold the chip in reset
-  await sleep(hold);
-  await transport.setRTS(false); // EN high: start
-  await sleep(settle);
-}
-
-async function ensureTransport() {
-  if (!state.transport) {
-    // Bounded cleanup first: a session left over from a failed flash may still
-    // hold the reader lock.
-    await releaseConnection();
-    state.transport = new Transport(state.port, false);
-    await state.transport.connect(115200);
-  }
-  return state.transport;
-}
-
-async function openTransport() {
+async function finishOperation() {
   try {
-    return await ensureTransport();
-  } catch {
-    // The session may have been left closed by a failed flash.
     await releaseConnection();
-    return ensureTransport();
-  }
-}
-
-async function pulseEnOnly() {
-  const transport = await openTransport();
-  await pulseEn(transport);
-  // EN and IO0 are idle again; hand the port back before the USB re-enumerates.
-  await releaseConnection();
-}
-
-// Read whatever the chip prints after a reset, long enough to tell a real boot
-// (`boot:0xf`, Zephyr banner) from a chip that fell back into USB download mode
-// (`boot:0x0`, "wait usb download").
-async function readBootOutput(port, timeout = 1600) {
-  const decoder = new TextDecoder();
-  let reader;
-  const deadline = Date.now() + timeout;
-  try {
-    await port.open({ baudRate: 115200 });
-    reader = port.readable.getReader();
-    let text = "";
-    while (Date.now() < deadline) {
-      const result = await Promise.race([
-        reader.read(),
-        sleep(Math.max(0, deadline - Date.now())).then(() => null),
-      ]);
-      if (!result || result.done) break;
-      if (result.value) {
-        text += decoder.decode(result.value, { stream: true });
-        if (/wait usb download|boot:0x0|Booting Zephyr/i.test(text)) break;
-      }
-    }
-    return text;
+  } catch (error) {
+    logLine(`释放串口失败：${error?.message || error}`);
   } finally {
-    try {
-      await reader?.cancel();
-    } catch {
-      // Already cancelled.
-    }
-    try {
-      reader?.releaseLock?.();
-    } catch {
-      // Nothing holds the lock.
-    }
-    try {
-      await port?.close?.();
-    } catch {
-      // Already closed.
-    }
+    setBusy(false);
   }
-}
-
-async function restartBoard() {
-  await releaseConnection();
-  try {
-    await pulseEnOnly();
-  } catch {
-    await pulseEnOnly();
-  }
-  if (!isNativeUsb()) {
-    // A USB-UART bridge has no console of its own to read back here; the
-    // pulse is the whole answer, and it is the same one esptool sends.
-    return "sent";
-  }
-
-  // The X1.0 only has the ESP32-C3's internal pull-up on GPIO9 (R3 is DNP and
-  // C2 is 100 nF), so the first edge can still be sampled low and drop the chip
-  // back into USB download mode. Watch the reset banner and pulse again only
-  // while the chip is still sitting in the loader; a second blind pulse would
-  // reset a board that already started.
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    await sleep(200);
-    let banner = "";
-    try {
-      banner = await readBootOutput(state.port, 1600);
-    } catch {
-      // The port can still be enumerating; retry on the next pass.
-    }
-    if (banner && !/wait usb download|boot:0x0/i.test(banner)) return "confirmed";
-    if (!banner && attempt > 0) return "sent";
-    try {
-      await pulseEnOnly();
-    } catch {
-      return "sent";
-    }
-  }
-  return "sent";
 }
 
 // The ESP32-C3 RTC watchdog reset, the same sequence `esptool --after
@@ -730,17 +601,15 @@ async function watchdogReset(loader) {
 // Re-enter the bootloader (the stub is where the registers can be written),
 // arm the watchdog and read whatever the boot prints. An empty read is the
 // normal case on the X1.0: its Zephyr console does not come up on USB CDC.
-async function watchdogRestartBoard() {
-  await releaseConnection();
-  const transport = new Transport(state.port, false);
+async function watchdogRestartBoard(port) {
+  const transport = new FlasherTransport(port, false);
   state.transport = transport;
   const loader = new ESPLoader({
     transport,
-    baudrate: Number(baudSelect.value),
+    baudrate: 115200,
     terminal: terminal(),
     debugLogging: false,
   });
-  state.loader = loader;
   const chip = await loader.main("default_reset");
   if (!/ESP32-C3/i.test(chip)) {
     throw new Error(`看门狗重启只适用于 ESP32-C3，当前芯片是 ${chip}`);
@@ -748,74 +617,30 @@ async function watchdogRestartBoard() {
   logLine("已进入引导程序，正在触发看门狗…");
   await watchdogReset(loader);
   await releaseConnection();
-  // The USB device re-enumerates; give it a moment before reading the banner.
-  await sleep(300);
-  let banner = "";
-  try {
-    banner = await readBootOutput(state.port, 1000);
-  } catch {
-    // The port can still be enumerating.
-  }
-  if (banner && /wait usb download|boot:0x0/i.test(banner)) {
-    throw new Error("看门狗复位后设备仍停在下载模式，请拔插一次 USB");
-  }
-  return banner ? "confirmed" : "sent";
+  const status = await observeBoot(port);
+  if (status === "download") throw new Error("看门狗复位后设备仍停在下载模式，请拔插一次 USB");
+  return status;
 }
 
-async function watchdogRestartDevice() {
-  if (state.flashing) return;
-  if (!navigator.serial || !state.port) {
-    setStatus("请先选择开发板串口。", "error");
-    return;
-  }
-  watchdogButton.disabled = true;
-  resetButton.disabled = true;
-  setStatus("正在通过看门狗重启 X1.0…");
-  logLine("正在通过看门狗重启 X1.0…");
+async function resetDevice(watchdog = false) {
+  const port = state.port;
+  if (state.busy || !navigator.serial || !port) return;
+  if (watchdog && (state.board?.slug !== "linkr-bee-x1-0" || !isNativeUsb(port))) return;
+  setBusy(true);
+  setStatus(watchdog ? "正在通过看门狗重启 X1.0…" : "正在重启开发板…");
   try {
-    const restart = await watchdogRestartBoard();
-    if (restart === "confirmed") {
-      setStatus("X1.0 已通过看门狗重启。", "ok");
-      logLine("X1.0 已通过看门狗重启。");
-    } else {
-      setStatus("已通过看门狗发送重启命令；X1.0 的控制台不走 USB，请在终端里确认。", "ok");
-      logLine("已通过看门狗发送重启命令；X1.0 的控制台不走 USB，请在终端里确认。");
-    }
+    const status = watchdog ? await watchdogRestartBoard(port) : await restartBoard(port, isNativeUsb(port));
+    const message = status === "confirmed"
+      ? "设备已重启，已读到 Zephyr 启动信息。"
+      : "已发送重启命令，尚未确认固件启动。";
+    setStatus(message, status === "confirmed" ? "ok" : "");
+    logLine(message);
   } catch (error) {
-    setStatus(`看门狗重启失败：${error?.message || error}`, "error");
-    logLine(`看门狗重启失败：${error?.message || error}`);
+    const message = `重启失败：${error?.message || error}`;
+    setStatus(message, "error");
+    logLine(message);
   } finally {
-    // The board is booting; free the port for the terminal or the next flash.
-    await releaseConnection();
-    updateResetAvailability();
-  }
-}
-
-async function resetDevice() {
-  if (state.flashing) return;
-  if (!navigator.serial || !state.port) {
-    setStatus("请先选择开发板串口。", "error");
-    return;
-  }
-  resetButton.disabled = true;
-  watchdogButton.disabled = true;
-  try {
-    const restart = await restartBoard();
-    if (restart === "confirmed") {
-      setStatus("设备已重启。", "ok");
-      logLine("设备已重启。");
-    } else {
-      // The edge was sent; on a bridge with no readable console there is
-      // nothing to confirm it against, so the sentence must not claim one.
-      setStatus("已发送重启命令。", "ok");
-      logLine("已发送重启命令（未读回启动信息）。");
-    }
-  } catch (error) {
-    setStatus(`重启失败：${error?.message || error}`, "error");
-  } finally {
-    // The board is booting; free the port for the terminal or the next flash.
-    await releaseConnection();
-    updateResetAvailability();
+    await finishOperation();
   }
 }
 
@@ -862,11 +687,13 @@ async function init() {
     pickPortButton.disabled = true;
     refreshPortsButton.disabled = true;
   }
-  boardSelect.addEventListener("change", () => selectBoard(boardSelect.value));
-  portSelect.addEventListener("change", async () => {
+  boardSelect.addEventListener("change", () => {
+    if (!state.busy) selectBoard(boardSelect.value);
+  });
+  portSelect.addEventListener("change", () => {
+    if (state.busy) return;
     const index = Number.parseInt(portSelect.value, 10);
     state.port = Number.isInteger(index) ? state.ports[index] || null : null;
-    await releaseConnection();
     if (state.port) {
       const { vid, pid, name } = portInfo(state.port);
       setPortHint(
@@ -876,30 +703,21 @@ async function init() {
     } else {
       setPortHint("点击“选择串口”，在浏览器弹窗里选中开发板的 USB 串口。");
     }
-    updateResetAvailability();
+    updateControls();
   });
-  pickPortButton.addEventListener("click", () => refreshPorts({ request: true }));
+  pickPortButton.addEventListener("click", pickPort);
   refreshPortsButton.addEventListener("click", () => refreshPorts());
   navigator.serial?.addEventListener?.("connect", () => refreshPorts());
   navigator.serial?.addEventListener?.("disconnect", () => refreshPorts());
   // Best effort: release the OS port when the tab is closed or reloaded, so a
   // refresh does not leave the previous page holding the serial handle.
   window.addEventListener("pagehide", () => {
-    try {
-      state.transport?.disconnect?.();
-    } catch {
-      // Page is going away.
-    }
-    try {
-      state.port?.close?.();
-    } catch {
-      // Already closed.
-    }
+    void releaseConnection().catch(() => {});
   });
   connectButton.addEventListener("click", () => flash());
   retryButton.addEventListener("click", () => flash({ noReset: true }));
-  resetButton.addEventListener("click", resetDevice);
-  watchdogButton.addEventListener("click", watchdogRestartDevice);
+  resetButton.addEventListener("click", () => resetDevice());
+  watchdogButton.addEventListener("click", () => resetDevice(true));
   downloadButton.addEventListener("click", () => {
     if (!state.board) return;
     const url = state.board.zip_url || releaseAssetUrl(state.board);
@@ -917,6 +735,7 @@ async function init() {
     }
   });
 
+  updateControls();
   logLine("读取最新固件清单…");
   try {
     populateBoards(await loadManifest());
