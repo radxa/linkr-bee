@@ -228,7 +228,20 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
   button.setAttribute("aria-pressed", "false");
   const $ = (id) => dialog.querySelector(`#${id}`);
   const messages = $("agentMessages");
-  const activity = createAgentActivity({messages, text});
+  /* A reader who is looking at the end of the transcript wants the next tool row
+   * in view; one who scrolled back up is reading history and must not be dragged
+   * down. The flag is sticky because growing content does not fire a scroll event:
+   * measuring only after a row was added would read "far from the bottom" for a
+   * row that just pushed the view there. 64px covers the pixels a render adds. */
+  const nearBottom = () => messages.scrollHeight - messages.scrollTop - messages.clientHeight < 64;
+  let followBottom = true;
+  const keepBottom = () => {
+    if (!followBottom && !nearBottom()) return;
+    messages.scrollTop = messages.scrollHeight;
+    followBottom = true;
+  };
+  messages.addEventListener("scroll", () => { followBottom = nearBottom(); }, { passive: true });
+  const activity = createAgentActivity({messages, text, onChange: keepBottom});
   const reasoningBlocks = new Map();
   const modeButton = $("agentModeButton");
   const modePicker = $("agentModePicker");
@@ -522,7 +535,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
   }
   function addMessage(role, content = "", {process = false} = {}) {
     if (role === "user") activity.boundary();
-    const follow = role === "user" || messages.scrollHeight - messages.scrollTop - messages.clientHeight < 64;
+    const follow = role === "user" || nearBottom();
     messages.querySelector(".agent-empty")?.remove();
     const row = document.createElement("section");
     row.className = `agent-message agent-${role}`;
@@ -669,6 +682,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     if (record.observationClosed && !busy && !isResidentBusy()) {
       activity.finish(record.executionStatus === "completed" ? "done" : "error");
     }
+    keepBottom();
     refreshConsole();
   }
   function refreshConsole() {
@@ -782,7 +796,7 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
       }
     }
     if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
-      const follow = messages.scrollHeight - messages.scrollTop - messages.clientHeight < 64;
+      const follow = nearBottom();
       answer ??= addMessage("assistant");
       renderAssistantMarkdown(answer, event.assistantMessageEvent.delta, { append: true });
       if (currentTask) { currentTask.summary = (currentTask.summary + event.assistantMessageEvent.delta).slice(-4000); scheduleTaskSave(); }
@@ -857,6 +871,9 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
       const body = toolRows.get(event.toolCallId) || addMessage(event.toolName);
       if (!body.dataset.execution && !body.dataset.download && !body.dataset.choice) body.textContent = preview.slice(0, 2000) + (preview.length > 2000 ? "…" : "");
       if (event.isError) activity.reveal(body, {error:true});
+      /* The result text replaced the "working" placeholder in a row that is
+       * already on screen: nothing else would move the view to it. */
+      keepBottom();
       toolRows.delete(event.toolCallId);
       if (["send_serial_input", "run_shell_command", "probe_device_profile", "probe_download_tools", "download_to_target"].includes(event.toolName)) activeInputRow = null;
     }
@@ -1197,6 +1214,8 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
       dialog.classList.toggle("agent-tight", dialog.clientHeight < 260);
       dialog.classList.toggle("agent-narrow", dialog.clientWidth < 520);
       positionModePicker();
+      /* A layout change moves the composer and the transcript height with it. */
+      keepBottom();
       onLayout?.();
     });
   }

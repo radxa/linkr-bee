@@ -913,6 +913,37 @@ test("the assistant opens full height and its toggle brings the split back", asy
   expect(await page.evaluate(() => Array.from({length: window.__test.state.term.buffer.active.length}, (_,i) => window.__test.state.term.buffer.active.getLine(i)?.translateToString()).join("\n"))).toContain("KEEP_THIS_LOG");
 });
 
+test("a tool row and its approval keep the newest step in view", async ({ page }) => {
+  await chooseMode(page, "manual");
+  // A transcript taller than the pane first, so falling behind is possible at all.
+  await mockModel(page, async (_request, count) => {
+    if (count === 1) return { text: Array.from({ length: 30 }, (_, index) => `日志段 ${index + 1}：` + "串口输出的一长行内容，用来把对话区撑出滚动条。").join("\n\n") };
+    if (count === 2) return { tool: { name: "send_serial_input", args: { text: "uname -a", appendEnter: true } } };
+    if (count === 3) return { text: "已发送，等待目标输出。" };
+    // Delayed, so the person can scroll back while this answer is still coming.
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    return { text: Array.from({ length: 20 }, (_, index) => `补充说明 ${index + 1}：` + "这一段在用户已经上滚之后才到达。").join("\n\n") };
+  });
+  const gap = () => page.locator("#agentMessages").evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight);
+  await ask(page, "先读一段长日志");
+  await expect(page.locator("#agentMessages")).toContainText("日志段 30");
+  await expect.poll(gap).toBeLessThan(8);
+  // The approval opens inside the activity group, which grows the pane without
+  // adding a message: this is the step that used to stay off screen.
+  await ask(page, "发送一条命令");
+  await expect(page.locator("#agentMessages .agent-actions .btn-primary")).toBeVisible();
+  await expect.poll(gap).toBeLessThan(70);
+  // Someone reading older output keeps their place: the turn continues (approval,
+  // the execution result, then the answer) and none of it may drag them down.
+  await page.locator("#agentMessages .agent-actions .btn-primary").tap();
+  await expect(page.locator("#agentMessages")).toContainText("已发送，等待目标输出");
+  // Reading history while the next answer streams in must not drag the view down.
+  await ask(page, "再补一条");
+  await page.locator("#agentMessages").evaluate((el) => { el.scrollTop = 0; });
+  await expect(page.locator("#agentMessages")).toContainText("补充说明 20");
+  expect(await page.locator("#agentMessages").evaluate((el) => el.scrollTop)).toBeLessThan(80);
+});
+
 test("AI keyboard collapses the split terminal and restores it when dismissed", async ({ page }) => {
   // Full height has no terminal pane to collapse; the split is what the keyboard
   // shortens, and the peek keeps the log one tap away while it is out of view.
