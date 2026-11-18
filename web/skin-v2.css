@@ -1519,15 +1519,19 @@ html.settings-drawer-layout .settings-tabs,
   }
 
   .brand {
-    flex: 0 1 auto;
-    min-width: 0;
+    /* Keep the product name readable. With `min-width: 0` the pill and the
+     * action buttons took everything and the title collapsed to zero width,
+     * leaving only the hexagon. */
+    flex: 1 1 auto;
+    min-width: 148px;
   }
 
   .brand > div {
     min-width: 0;
   }
 
-  .brand h1 {
+  .brand h1,
+  .brand .support-text {
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
@@ -1548,22 +1552,22 @@ html.settings-drawer-layout .settings-tabs,
     font-size: 11px;
   }
 
-  @media (max-width: 600px) {
-    .status-pill .device-name {
-      display: none;
-    }
+  /* The reconnect line is much longer than "Disconnected" ("6 秒后重连（第
+   * 4/6 次）"). Left at its content width it pushed the brand down to a
+   * one-character column; let it shrink and ellipsize instead, but keep a floor
+   * so the countdown itself stays readable. */
+  .status-pill {
+    flex: 0 1 auto;
+    min-width: 96px;
+    max-width: 42vw;
+  }
 
-    /* Keep the board identity visible on a phone: the support line is hidden
-     * there, so the brand block gets a dedicated one-line device name. */
-    .brand .compact-device:not([hidden]) {
-      display: block;
-      margin-top: 1px;
-      overflow: hidden;
-      font-size: 11px;
-      color: var(--placeholder);
-      white-space: nowrap;
-      text-overflow: ellipsis;
-    }
+  .status-pill #statusText,
+  .status-pill .device-name {
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
   }
 
   .terminal-card .terminal-key,
@@ -1592,6 +1596,45 @@ html.settings-drawer-layout .settings-tabs,
     padding: 4px 6px 0;
   }
 }
+/* Phones. This used to be nested inside the 900 px block above, which plain CSS
+ * does not support: the whole phone layer was ignored, so the pill kept its
+ * device name, the brand kept the long support line, and the header could
+ * squeeze that line into a one-character-wide column. */
+@media (max-width: 600px) {
+  .status-pill .device-name {
+    display: none;
+  }
+
+  /* Reserve room for the countdown. Without a floor the pill collapsed to the
+   * dot alone once the brand and the action buttons had taken their share, so
+   * "6 秒后重连（第 4/6 次）" became invisible. */
+  .status-pill {
+    flex: 0 1 auto;
+    min-width: 96px;
+    max-width: 52vw;
+  }
+
+  .status-pill #statusText {
+    flex: 1 1 auto;
+  }
+
+  /* The support line gives way to the compact device line; it is the one that
+   * could be squeezed into a vertical column. */
+  .brand .support-text {
+    display: none;
+  }
+
+  .brand .compact-device:not([hidden]) {
+    display: block;
+    margin-top: 1px;
+    overflow: hidden;
+    font-size: 11px;
+    color: var(--placeholder);
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+}
+
 
 /* Phones: theme and language already live in the drawer header, so the topbar
  * keeps only the two controls that matter while a device is in hand. */
