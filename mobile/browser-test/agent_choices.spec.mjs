@@ -88,7 +88,14 @@ test('the static vendored Pi runtime exposes and completes a choice',async({page
 });
 
 test('a pending phone question keeps the terminal accessible and restores the split after answering',async({page})=>{
-  await open(page);await expect(page.locator('#terminalCard')).toBeHidden();
+  await open(page);
+  // The assistant opens alone; the header toggle is what brings the terminal back.
+  await expect(page.locator('#terminalCard')).toBeHidden();
+  await expect(page.locator('#agentToggleTerminal')).toBeVisible();
+  await page.locator('#agentToggleTerminal').click();
+  await expect(page.locator('#terminalWorkspace')).toHaveAttribute('data-agent-layout','rows');
+  // A required choice keeps the split for the question and leaves the log one tap away.
+  await expect(page.locator('#agentShowTerminal')).toBeVisible();
   await page.locator('#agentShowTerminal').click();await expect(page.locator('#terminalCard')).toBeVisible();
   const card=page.locator('.agent-choice');await card.getByRole('radio',{name:/Target machine/}).check();
   await card.getByRole('button',{name:'Continue',exact:true}).click();await expect(page.locator('#agentAsk')).toBeEnabled();

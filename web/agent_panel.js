@@ -56,6 +56,7 @@ const labels = {
   title: ["Agent", "Agent"], settingsButton: ["设置", "Settings"],
   enterMode: ["进入 Agent 模式", "Enter Agent mode"], exitMode: ["退出 Agent 模式", "Exit Agent mode"],
   showTerminal: ["终端已收起 · 查看终端", "Terminal collapsed · Show terminal"],
+  viewSplit: ["显示终端", "Show terminal"], viewFull: ["隐藏终端", "Hide terminal"],
   mode: ["执行档位", "Execution mode"],
   modeCaption: ["档位", "Mode"],
   shiftMode: ["切换执行档位", "Change execution mode"],
@@ -174,7 +175,8 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
         <span class="agent-gear-label"><span class="agent-gear-caption" data-ai="modeCaption"></span><span id="agentActiveMode" aria-live="polite"></span><span id="agentModeCountdown" class="agent-mode-countdown" aria-hidden="true"></span></span>
         <svg class="agent-gear-chevron" aria-hidden="true" viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m4 6 4 4 4-4"/></svg>
       </button></div>
-      <div class="agent-actions"><button type="button" class="btn" id="agentSettingsButton" data-ai="settingsButton" aria-controls="controlsPanel"></button>
+      <div class="agent-actions"><button type="button" class="btn agent-view-toggle" id="agentToggleTerminal" aria-controls="terminalCard" aria-pressed="false"><svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M3 10h18"/></svg></button>
+      <button type="button" class="btn" id="agentSettingsButton" data-ai="settingsButton" aria-controls="controlsPanel"></button>
       <button type="button" class="btn" id="agentNew"><svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M12 5v14M5 12h14"/></svg><span data-ai="clear"></span></button>
       <button type="button" class="btn" id="agentClose" data-ai="close"></button></div></header>
     <fieldset class="agent-mode-picker window-surface" id="agentModePicker" hidden aria-label="Execution mode">
@@ -230,12 +232,19 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
   const reasoningBlocks = new Map();
   const modeButton = $("agentModeButton");
   const modePicker = $("agentModePicker");
+  const viewToggle = $("agentToggleTerminal");
   const modeOptions = [...dialog.querySelectorAll('[name="agentMode"]')];
   let runner = null;
   let opened = false;
   let opening = false;
   let keyboardOpen = false;
   let editingAgent = false;
+  /* A narrow window opens the assistant alone; a wide one keeps both panes on
+   * screen, which is the state its toggle then leaves. Either way the choice is
+   * session-only and starts over the next time the panel opens. */
+  const defaultViewMode = () => (window.innerWidth < 960 ? "agent" : "split");
+  let viewMode = defaultViewMode();
+  let viewModeExplicit = false;
   let awaitingChoice = false, peekWhileChoosing = false;
   let layoutRaf = 0;
   // Session-only preference: a fresh app starts in recommended Auto mode.
@@ -1136,6 +1145,8 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
     if (autoVerifyAborted) autoIdentitySession = null;
     showModePicker(false);
     opened = false;
+    viewMode = defaultViewMode();
+    viewModeExplicit = false;
     dialog.hidden = true;
     terminalPeek.hidden = true;
     document.documentElement.classList.remove("agent-mode", "agent-keyboard-chat", "agent-keyboard-terminal");
@@ -1156,14 +1167,33 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
       else if (dialog.contains(active) && active.matches("input:not([type=radio]), textarea")) editingAgent = true;
       // A required choice needs the same room as editing on a phone. The peek
       // remains available; the ordinary terminal split returns after answering.
-      const choiceFocus = awaitingChoice && workspace.clientWidth < 960 && !peekWhileChoosing;
-      const collapsed = (keyboardOpen && editingAgent) || choiceFocus;
+      /* "Narrow" is a property of the window, not of the space the sidebar left
+       * behind: a desktop window with the settings panel open is cramped, but it
+       * still gets the same two panes it always had. */
+      const narrow = window.innerWidth < 960;
+      const columns = workspace.clientWidth >= 960;
+      /* The toggle means one thing at every width: the assistant alone on screen,
+       * or the terminal beside/above it. Which split that is depends on the room
+       * the window has, not on the choice itself. */
+      /* Until the person picks a view, the window decides: rotating a tablet must
+       * not strand the assistant alone on a wide screen (or hide the terminal on a
+       * narrow one). Once they pick, their choice wins for the rest of the session. */
+      if (!viewModeExplicit) viewMode = defaultViewMode();
+      const split = viewMode === "split";
+      const choiceFocus = awaitingChoice && narrow && !peekWhileChoosing;
+      /* Only the split has a terminal pane to collapse: the assistant alone is
+       * already the roomiest layout, so the keyboard must not shorten it. */
+      const collapsed = split && ((keyboardOpen && editingAgent) || choiceFocus);
       const root = document.documentElement;
       root.style.setProperty("--agent-viewport-top", `${window.visualViewport?.offsetTop || 0}px`);
       root.classList.toggle("agent-keyboard-chat", collapsed);
       root.classList.toggle("agent-keyboard-terminal", keyboardOpen && !editingAgent);
       terminalPeek.hidden = !collapsed;
-      workspace.dataset.agentLayout = workspace.clientWidth >= 960 ? "columns" : "rows";
+      workspace.dataset.agentLayout = !split ? "agent" : columns ? "columns" : "rows";
+      viewToggle.setAttribute("aria-pressed", String(split));
+      const viewLabel = text(split ? "viewFull" : "viewSplit");
+      viewToggle.setAttribute("aria-label", viewLabel);
+      viewToggle.title = viewLabel;
       dialog.classList.toggle("agent-tight", dialog.clientHeight < 260);
       dialog.classList.toggle("agent-narrow", dialog.clientWidth < 520);
       positionModePicker();
@@ -1199,6 +1229,16 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
   }
   $("agentClose").addEventListener("click", closePanel);
   $("agentSettingsButton").addEventListener("click", openSettings);
+  viewToggle.addEventListener("click", () => {
+    viewMode = viewMode === "split" ? "agent" : "split";
+    viewModeExplicit = true;
+    /* The terminal pane is display:none in the full-height layout, so focus
+     * cannot stay inside it: hand it to the composer the user will type in. */
+    if (viewMode === "agent" && terminal.contains(document.activeElement)) {
+      $("agentQuestion").focus({ preventScroll: true });
+    }
+    syncLayout();
+  });
   terminalPeek.addEventListener("click", () => { peekWhileChoosing = awaitingChoice; editingAgent = false; focusTerminal(); syncLayout(); });
   // Mobile app switches must cancel active work, but an idle conversation should
   // still match the visible history when the user returns with more information.
