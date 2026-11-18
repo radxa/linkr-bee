@@ -36,6 +36,75 @@ pub const RELIABLE_UART_API_MAJOR: u8 = 1;
 /// The largest payload a single Reliable UART frame may declare.
 pub const RELIABLE_UART_MAX_PAYLOAD: usize = 232;
 
+/// `MGMT_CAP_RELIABLE_UART` — the bridge offers the Reliable UART service.
+pub const MGMT_CAP_RELIABLE_UART: u32 = 1 << 5;
+/// `MGMT_CAP_MULTI_SESSION` — the bridge arbitrates console ownership.
+pub const MGMT_CAP_MULTI_SESSION: u32 = 1 << 7;
+
+/// What a read of the Management service's protocol characteristic says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProtocolInfo {
+    /// The management protocol major version.
+    pub major: u8,
+    /// The management protocol minor version.
+    pub minor: u8,
+    /// The largest management payload the bridge accepts.
+    pub max_payload: u16,
+    /// The capability word; see `MGMT_CAP_*`.
+    pub capabilities: u32,
+}
+
+/// Parse the protocol characteristic (`major`, `minor`, `max_payload`,
+/// `capabilities`, `reserved`, all little-endian after the two version bytes).
+///
+/// A value this side cannot use — short, another major version, or a zero
+/// payload limit — is `None` rather than a partial reading: the caller then
+/// keeps the historical assumptions instead of trusting half a word.
+pub fn parse_protocol_info(bytes: &[u8]) -> Option<ProtocolInfo> {
+    const PROTOCOL_SIZE: usize = 10;
+
+    if bytes.len() < PROTOCOL_SIZE || bytes[0] != MGMT_API_MAJOR {
+        return None;
+    }
+    let max_payload = u16::from_le_bytes([bytes[2], bytes[3]]);
+    if max_payload == 0 {
+        return None;
+    }
+    Some(ProtocolInfo {
+        major: bytes[0],
+        minor: bytes[1],
+        max_payload,
+        capabilities: u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+    })
+}
+
+/// The next sequence number of a Reliable UART stream, with the firmware's
+/// `0xffffffff → 1` wraparound (zero is never a sequence).
+pub fn next_reliable_sequence(sequence: u32) -> u32 {
+    if sequence == u32::MAX {
+        1
+    } else {
+        sequence + 1
+    }
+}
+
+/// Encode one Reliable UART frame: the 12-byte header and its payload.
+///
+/// `payload` must be non-empty and no larger than the peer's advertised limit;
+/// the caller cuts a write into frames, so this only writes down what it is
+/// given.
+pub fn encode_reliable_frame(sequence: u32, payload: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(RELIABLE_UART_HEADER_SIZE + payload.len());
+    frame.extend_from_slice(&RELIABLE_MAGIC);
+    frame.push(RELIABLE_UART_API_MAJOR);
+    frame.push(0); // flags: reserved in v1
+    frame.extend_from_slice(&sequence.to_le_bytes());
+    frame.extend_from_slice(&(payload.len() as u16).to_le_bytes());
+    frame.extend_from_slice(&[0, 0]); // reserved
+    frame.extend_from_slice(payload);
+    frame
+}
+
 /// `"LK"` — the management magic.
 const MGMT_MAGIC: [u8; 2] = [0x4c, 0x4b];
 /// `"LR"` — the Reliable UART magic.
@@ -703,6 +772,58 @@ mod tests {
         let h = parse_reliable_header(&b).unwrap();
         assert_eq!(h.sequence, 3);
         assert_eq!(h.expected, 10);
+    }
+
+    /// The frame this host writes is the one the firmware's `struct
+    /// reliable_header` describes: `"LR"`, version 1, the sequence and the
+    /// payload length little-endian at offsets 4 and 8, two reserved bytes, then
+    /// the payload bare.
+    #[test]
+    fn writes_the_frame_the_firmware_reads() {
+        let frame = encode_reliable_frame(0x0102_0304, b"hello");
+        assert_eq!(&frame[..4], &[0x4c, 0x52, 1, 0]);
+        assert_eq!(&frame[4..8], &[0x04, 0x03, 0x02, 0x01]);
+        assert_eq!(&frame[8..10], &[5, 0]);
+        assert_eq!(&frame[10..12], &[0, 0]);
+        assert_eq!(&frame[12..], b"hello");
+        assert_eq!(frame.len(), RELIABLE_UART_HEADER_SIZE + 5);
+        // Our own parser accepts it, so writer and reader cannot drift.
+        let header = parse_reliable_header(&frame).unwrap();
+        assert_eq!(header.sequence, 0x0102_0304);
+        assert_eq!(header.expected, 5);
+    }
+
+    #[test]
+    fn the_reliable_sequence_skips_zero_on_wrap() {
+        assert_eq!(next_reliable_sequence(1), 2);
+        assert_eq!(next_reliable_sequence(0xffff_fffe), 0xffff_ffff);
+        assert_eq!(next_reliable_sequence(0xffff_ffff), 1);
+    }
+
+    /// A protocol read is only trusted whole: the capabilities live after the
+    /// version and payload limit, and half a word would silently hide the
+    /// transport the board actually offers.
+    #[test]
+    fn parses_the_management_protocol_word() {
+        let mut value = vec![1, 2];
+        value.extend_from_slice(&512u16.to_le_bytes());
+        value.extend_from_slice(&(MGMT_CAP_RELIABLE_UART | MGMT_CAP_MULTI_SESSION).to_le_bytes());
+        value.extend_from_slice(&[0, 0]); // the reserved tail
+        let info = parse_protocol_info(&value).expect("a whole word");
+        assert_eq!(info.major, 1);
+        assert_eq!(info.minor, 2);
+        assert_eq!(info.max_payload, 512);
+        assert!(info.capabilities & MGMT_CAP_RELIABLE_UART != 0);
+        assert!(info.capabilities & MGMT_CAP_MULTI_SESSION != 0);
+
+        assert!(parse_protocol_info(&value[..9]).is_none(), "short");
+        let mut other_version = value.clone();
+        other_version[0] = 2;
+        assert!(parse_protocol_info(&other_version).is_none(), "major");
+        let mut no_payload = value.clone();
+        no_payload[2] = 0;
+        no_payload[3] = 0;
+        assert!(parse_protocol_info(&no_payload).is_none(), "zero limit");
     }
 
     #[test]

@@ -44,6 +44,8 @@ and closes its eventual result; a new dial waits for that cleanup to finish.
 | Configure the model | Ctrl+S opens Endpoint / Model / API Key from any workspace or the sidebar; F2 or click Advanced reveals protocol, headers and token limits; Ctrl+S saves |
 | Resume a conversation | Ctrl+G opens conversation history; Enter or click resumes; Esc returns |
 | Start / switch a conversation | Ctrl+N / Alt+Up or Alt+Down while the assistant has focus |
+| Shared console | The top bar says `In control`, `Read only` or `No controller` when the board arbitrates ownership, over Bluetooth or the LAN bridge. Typing while read-only holds the keystrokes, asks for an idle hand-over, and sends them once it is granted; a busy owner refuses and the line is dropped. Ctrl+P → Take console control preempts, Release gives it up, and Hand over returns it to the session this one took it from |
+| Shared console (CLI) | `--query-control` prints `self`, `owner`, `mode`, `epoch` and `peers`; `--control claim\|idle\|release\|yield` takes, shares, gives up or hands back the console. `--send` waits for the console before its first byte and fails rather than typing into a session that is still writing |
 
 The message composer remains at the bottom of the assistant. Long drafts and
 URLs scroll horizontally with the caret, including CJK and combined emoji.
@@ -209,9 +211,12 @@ can become `�`, but these symptoms alone do not prove transport loss.
 Inspect Diagnostics' `@i?` UART drops, UART TX queue drops and Reliable UART
 timing counters alongside the target's encoding and framing. Sustained output
 can fill the RX ring when forwarding cannot keep up; BLE, WebSocket and log
-delivery still share a worker. The TUI's legacy NUS path is best effort and
-has no retry. The browser's Reliable UART channel can detect sequence gaps,
-but neither path guarantees lossless capture at an arbitrary output rate.
+delivery still share a worker. When the board advertises the Reliable UART
+service, the TUI uses it: frames are numbered, reassembled after fragmentation,
+and a sequence gap stops delivery with one notice instead of silently feeding
+the pane garbage. Boards without it fall back to the legacy NUS path, which is
+best effort and has no retry. Neither path guarantees lossless capture at an
+arbitrary output rate.
 `stdio` links get no bridge sentence: there is a pipe the user opened, not a
 bridge in the middle.
 
@@ -258,10 +263,22 @@ cargo run -- --ble-name Linkr --wifi-scan --loopback-test --no-terminal
 cargo run -- --ble-name Linkr --query-ble-name --json
 cargo run -- --ble-name Linkr --rename-ble "测试😀" --json
 cargo run -- --ble-name Linkr --reset-ble-name --json
+cargo run -- --ble-name Linkr --query-control --json
+cargo run -- --ble-name Linkr --control idle
 cargo run -- --print-completion zsh
 cargo run -- --scan --timeout 5
 cargo run -- --ble-name Linkr --serve
 ```
+
+The shared console is part of the shell surface, not only the terminal.
+`--query-control` reports who owns it, `--control claim` takes it, `--control
+idle` takes it only when the owner has stopped typing, and `--control release`
+or `--control yield` gives it up or hands it back. On an arbitrated link,
+`--send` and `--exec` wait for ownership before writing. If an active session holds the console, or a BLE
+board advertises arbitration but never reports its owner, the command fails
+before sending input. An ownership refusal before `--exec` dispatch is
+reported as `control_refused` in JSON. Releasing or handing over a LAN
+console discards the portion of a paste still waiting to be sent.
 
 The advertised BLE name has an entry in the terminal as well: the network view
 carries the current name, *Rename*, *Restore default* and *Read name*. A name

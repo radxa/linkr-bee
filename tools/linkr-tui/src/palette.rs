@@ -72,6 +72,9 @@ const T_VIEW_NETWORK: Entry = ["Open network view", "打开网络视图"];
 const T_VIEW_ASSISTANT: Entry = ["Open assistant view", "打开助手视图"];
 const T_CONNECT: Entry = ["Connect", "连接"];
 const T_DISCONNECT: Entry = ["Disconnect", "断开连接"];
+const T_TAKE_CONTROL: Entry = ["Take console control", "申请控制"];
+const T_RELEASE_CONTROL: Entry = ["Release console control", "释放控制"];
+const T_HAND_OVER: Entry = ["Hand over console control", "交接控制权"];
 const T_TRANSPORT: Entry = ["Switch the transport", "切换传输方式"];
 const T_UART_SETTINGS: Entry = ["UART settings…", "UART 设置…"];
 const T_AUTOSCROLL: Entry = ["Toggle autoscroll", "切换自动滚动"];
@@ -125,6 +128,21 @@ fn connect(app: &mut App) {
 
 fn disconnect(app: &mut App) {
     app.disconnect();
+}
+
+fn take_control(app: &mut App) {
+    let notice = app.take_control();
+    app.push_notice(notice);
+}
+
+fn release_control(app: &mut App) {
+    let notice = app.release_control();
+    app.push_notice(notice);
+}
+
+fn hand_over_control(app: &mut App) {
+    let notice = app.hand_over_control();
+    app.push_notice(notice);
 }
 
 fn toggle_transport(app: &mut App) {
@@ -382,6 +400,27 @@ pub const ACTIONS: &[Action] = &[
         category: CAT_CONNECTION,
         shortcut: "",
         run: disconnect,
+    },
+    Action {
+        id: "control.take",
+        title: T_TAKE_CONTROL,
+        category: CAT_CONNECTION,
+        shortcut: "",
+        run: take_control,
+    },
+    Action {
+        id: "control.release",
+        title: T_RELEASE_CONTROL,
+        category: CAT_CONNECTION,
+        shortcut: "",
+        run: release_control,
+    },
+    Action {
+        id: "control.hand_over",
+        title: T_HAND_OVER,
+        category: CAT_CONNECTION,
+        shortcut: "",
+        run: hand_over_control,
     },
     Action {
         id: "transport.toggle",
@@ -1077,6 +1116,9 @@ mod tests {
         "view.assistant",
         "connect",
         "disconnect",
+        "control.take",
+        "control.release",
+        "control.hand_over",
         "transport.toggle",
         "uart.settings",
         "term.autoscroll",

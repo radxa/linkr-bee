@@ -26,7 +26,7 @@ fn dot(theme: &Theme) -> &'static str {
 /// negotiated level — so the placeholder is the one reading waiting on a dial,
 /// and it fills as soon as there is one.
 pub fn top_left(app: &App, theme: &Theme) -> Line<'static> {
-    Line::from(vec![
+    let mut spans = vec![
         Span::styled(
             format!("{} ", app.state_glyph()),
             theme.state_dot(app.state),
@@ -44,7 +44,21 @@ pub fn top_left(app: &App, theme: &Theme) -> Line<'static> {
                 None => theme.muted(),
             },
         ),
-    ])
+    ];
+    // Which side of the shared console this session is on. It sits beside the
+    // link's own state because it is the other thing a person needs before
+    // typing: "connected" and "my keystrokes will go through" are different
+    // facts, and only the first is visible without it.
+    if let Some((text, mode)) = app.control_badge() {
+        spans.push(Span::styled(dot(theme).to_string(), theme.muted()));
+        let style = match mode {
+            crate::device::ControlMode::Control => theme.accent(),
+            crate::device::ControlMode::Readonly => theme.warn(),
+            crate::device::ControlMode::Available => theme.muted(),
+        };
+        spans.push(Span::styled(text, style));
+    }
+    Line::from(spans)
 }
 
 pub fn baud_label(app: &App) -> String {
