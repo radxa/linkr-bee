@@ -61,6 +61,22 @@ Linkr Bee 让这条控制台随时可连，不用常驻一根 USB 串口线、�
 RISC-V 64 位和 LoongArch64 Linux 的 CLI/TUI 移植具备基础条件，尚未提供 v0.1 安装包。
 依赖、构建缺口与待验证项见[架构支持评估](docs/CLI_ARCHITECTURES.zh-CN.md)。
 
+### Agent 插件
+
+[opencode-linkr-bee](linkr-bee-opencode/README.md)（英文）为
+[OpenCode](https://opencode.ai) 2.x 的 Agent 提供五个板卡工具，共用一条实时串口控制台：
+`linkr_bee_exec` 与 `linkr_bee_send` 驱动目标控制台，`linkr_bee_query` 与
+`linkr_bee_set` 读取和修改桥接设置，`linkr_bee_console` 驱动控制台面板。控制台有三种
+界面：TUI（命令面板 **Linkr Bee: open console**、Ctrl+Shift+L 或 `/linkr-bee`）、
+OpenCode 桌面应用窗口中的面板（**Linkr Bee: toggle console**、Ctrl+\`），以及插件给出
+地址的本机浏览器页面（仅限回环、带令牌，地址来自 `webUrl`）。桌面面板不会加载在
+`opencode serve` 地址的浏览器标签页里，这种情况请用浏览器页面。
+
+需要 OpenCode 2.x（已在 2.2.7 验证）、Node.js 22 或以上，以及 `bee-cli` 1.2.0 或
+以上；执行 `opencode plugin add opencode-linkr-bee` 会把它安装到全局配置。也可以在
+项目的 `opencode.json` 的 `"plugins"` 数组中列出。DeepSeek Harness 的对应插件是
+[dsh-linkr-bee](linkr-bee-dsh/README.md)（英文）。
+
 下方手机截图展示共享 Web 界面的响应式布局，不代表已完成对应平台的真机验证；各端
 验证范围见平台文档。
 
@@ -132,8 +148,11 @@ UART 一侧是 3.3 V 逻辑电平，不是 RS-232。自行设计硬件前先看
 *中文界面预览，终端内容为示例 UART 输出，未连接真实设备。*
 
 - 顶部栏：连接状态、连接 / 断开、面板开关、主题、语言。
-- 终端：点进去直接输入，工具栏提供助手入口、字号、全屏、滚动到底部与复制；清屏和
-  日志导出在设置中。
+- 终端：点进去直接输入，工具栏提供助手入口、字号、全屏、**日志**、滚动到底部与复制。
+  串口终端只显示 UART 字节；App 自身的消息（连接状态、自动重连、GATT 与管理通道错误、
+  调试跟踪）收进这个「日志」抽屉，打开它不会写进终端。拖动抽屉顶部分隔条即可调整
+  高度（聚焦后用方向键 / Home / End，双击恢复默认），高度会被记住。清屏和日志导出在
+  设置中。
 - 设置面板：左侧导航分别打开连接、串口、网络、助手与关于页面；关闭面板可把空间
   留给终端。
 

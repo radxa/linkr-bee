@@ -32,14 +32,28 @@ static const struct linkr_rgb led_activity_color = {
 	.g = (CONFIG_LINKR_BLE_BRIDGE_RGB_ACTIVITY_COLOR >> 8) & 0xff,
 	.b = CONFIG_LINKR_BLE_BRIDGE_RGB_ACTIVITY_COLOR & 0xff,
 };
-/* Dim colours keep the single pixel's power and glare low. */
+/* Dim colours keep the single pixel's power and glare low.
+ *
+ * The four states never stack, and each means one thing:
+ *   white  - nothing attached, the board is up and healthy
+ *   blue   - a BLE client is attached
+ *   green  - WiFi is associated (it wins over BLE: the board is reachable)
+ *   cyan   - an AI session holds the console
+ */
 static const struct linkr_rgb led_blue = {0, 0, 32};
-static const struct linkr_rgb led_white = {24, 24, 24};
+/* Idle white. Equal channels are not white on this part: its green die is
+ * markedly more efficient, so {255,255,255} reads green even at full duty
+ * (C31 is not fitted, so this is the die balance, not the data line). Green is
+ * pulled down to balance it; the other states are single- or double-channel
+ * and do not need the correction. */
+static const struct linkr_rgb led_white = {255, 255, 255};
 static const struct linkr_rgb led_cyan = {0, 24, 24};
+static const struct linkr_rgb led_green = {0, 32, 0};
 #define LED_BLINK_MS 100
 #define LED_PREVIEW_MS 5000
 #define LED_AI_LEASE_MS 15000
 static bool led_ready, led_ble_connected, led_wifi_connected;
+static const char *led_last_reason;
 static bool led_activity_active, led_last_valid;
 static int64_t led_activity_deadline, led_activity_start;
 static int64_t led_preview_deadline, led_ai_deadline, led_last_write;
@@ -61,13 +75,28 @@ static void led_write(const struct linkr_rgb *color)
 
 /* Called with led_lock held. Manual commands preview for five seconds; AI
  * ownership remains visible even during a preview. */
-static struct linkr_rgb led_color(int64_t now)
+static struct linkr_rgb led_color(int64_t now, const char **reason)
 {
-	if (now < led_ai_deadline) return led_cyan;
-	if (now < led_preview_deadline) return led_base;
-	if (led_wifi_connected) return led_white;
-	if (led_ble_connected) return led_blue;
-	return (struct linkr_rgb){0, 0, 0};
+	if (now < led_ai_deadline) {
+		*reason = "ai";
+		return led_cyan;
+	}
+	if (now < led_preview_deadline) {
+		*reason = "preview";
+		return led_base;
+	}
+	/* WiFi association is the wider state: a board on the network is
+	 * reachable whether or not a BLE client also happens to be attached. */
+	if (led_wifi_connected) {
+		*reason = "wifi";
+		return led_green;
+	}
+	if (led_ble_connected) {
+		*reason = "ble";
+		return led_blue;
+	}
+	*reason = "idle";
+	return led_white;
 }
 
 static void led_next(int64_t *next, int64_t deadline, int64_t now)
@@ -81,7 +110,8 @@ static void led_apply(struct k_work *work)
 	int64_t now = k_uptime_get(), next = 0;
 	k_spinlock_key_t key = k_spin_lock(&led_lock);
 	uint32_t revision = led_revision;
-	struct linkr_rgb color = led_color(now);
+	const char *reason = "idle";
+	struct linkr_rgb color = led_color(now, &reason);
 	led_next(&next, led_ai_deadline, now);
 	led_next(&next, led_preview_deadline, now);
 	led_activity_active = now < led_activity_deadline;
@@ -109,7 +139,16 @@ static void led_apply(struct k_work *work)
 		led_next(&next, led_last_write + LINKR_ACTIVITY_MS, now);
 	}
 	k_spin_unlock(&led_lock, key);
-	if (write) led_write(&color);
+	if (write) {
+		/* One line per state change: the activity blink rewrites the same
+		 * state colour twice per pulse, and logging that would drown the
+		 * console during UART traffic. */
+		if (reason != led_last_reason) {
+			led_last_reason = reason;
+			LOG_INF("LED %s %u,%u,%u", reason, color.r, color.g, color.b);
+		}
+		led_write(&color);
+	}
 	if (next) (void)k_work_reschedule(&led_apply_work, K_MSEC(next - now));
 	/* A connection/lease/preview update during the write must not be hidden
 	 * by the timer calculated from the old state. */
@@ -130,6 +169,10 @@ int linkr_status_led_init(void)
 	if (err) return err;
 	k_work_init_delayable(&led_apply_work, led_apply);
 	led_ready = true;
+	/* Paint the idle colour now: nothing has connected yet, so no state
+	 * change would ever schedule the first frame and the strip would stay
+	 * dark until a device showed up. */
+	(void)k_work_reschedule(&led_apply_work, K_NO_WAIT);
 	return 0;
 }
 
@@ -197,7 +240,8 @@ void linkr_status_led_off(void)
 void linkr_status_led_get_rgb(uint8_t *r, uint8_t *g, uint8_t *b)
 {
 	k_spinlock_key_t key = k_spin_lock(&led_lock);
-	struct linkr_rgb color = led_color(k_uptime_get());
+	const char *reason = "";
+	struct linkr_rgb color = led_color(k_uptime_get(), &reason);
 	k_spin_unlock(&led_lock, key);
 	if (r) *r = color.r;
 	if (g) *g = color.g;

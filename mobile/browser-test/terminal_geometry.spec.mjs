@@ -15,7 +15,9 @@ test.beforeEach(async ({ page, nativeShell }) => {
       "\nwindow.__geometry = { state, setConnected, handleIncomingBytes, onTerminalData, applySerialControl, onTerminalResize, syncSoftKeyboardLayout, setSettingsPage, agentPanel, setAgentLedActive, setLogView };" });
   });
   await page.goto("/");
-  await page.waitForFunction(() => window.__geometry?.state.term?.buffer.active.cursorY > 0);
+  // The terminal starts empty now: the app's welcome line belongs to the
+  // Event log drawer, so wait for xterm itself instead of its first row.
+  await page.waitForFunction(() => window.__geometry?.state?.termReady && window.__geometry?.state?.term);
   await page.evaluate(async () => {
     const { state, setConnected } = window.__geometry;
     window.sent = [];

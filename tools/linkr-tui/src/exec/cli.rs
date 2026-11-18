@@ -132,6 +132,8 @@ pub enum Outcome {
     Lost,
     /// Nothing was sent: there was no link, or the write was refused.
     Refused(String),
+    /// The console could not grant this write before dispatch.
+    ControlRefused(String),
 }
 
 /// What one attempt saw.
@@ -152,6 +154,7 @@ pub fn code(outcome: &Outcome) -> Option<&'static str> {
         Outcome::Timeout => Some("timeout"),
         Outcome::Lost => Some("link_lost"),
         Outcome::Refused(_) => Some("not_connected"),
+        Outcome::ControlRefused(_) => Some("control_refused"),
     }
 }
 
@@ -181,7 +184,7 @@ pub fn exit_code(outcome: &Outcome) -> i32 {
         Outcome::Rc(_) => 1,
         Outcome::Idle => 1,
         Outcome::NeedsInput(_) | Outcome::Timeout => 1,
-        Outcome::Lost | Outcome::Refused(_) => LINK_FAILED,
+        Outcome::Lost | Outcome::Refused(_) | Outcome::ControlRefused(_) => LINK_FAILED,
     }
 }
 
@@ -260,6 +263,17 @@ fn attempt_once(app: &mut App, run: &Run, format: Format, quiet: bool) -> Attemp
     // the app is told to hand them over — set here rather than by the caller,
     // because the mode is this function's own requirement.
     app.collect_output = true;
+    if let Err(why) = cli::prepare_serial_input(app) {
+        return Attempt {
+            outcome: if app.connected() {
+                Outcome::ControlRefused(why)
+            } else {
+                Outcome::Refused(why)
+            },
+            elapsed: Duration::ZERO,
+            bytes: 0,
+        };
+    }
     // Anything already buffered belongs to whoever spoke before this run; it
     // must not be counted as this command's output.
     app.take_output();
@@ -487,7 +501,7 @@ fn report(
                     "exec: the link went away mid-command ({} bytes)",
                     last.bytes
                 ),
-                Outcome::Refused(why) => format!("exec: {why}"),
+                Outcome::Refused(why) | Outcome::ControlRefused(why) => format!("exec: {why}"),
             };
             println!("{line}");
         }
@@ -541,7 +555,7 @@ fn message(outcome: &Outcome) -> String {
         Outcome::NeedsInput(prompt) => format!("the target is waiting for input: {prompt}"),
         Outcome::Timeout => "the command did not end within the timeout".to_string(),
         Outcome::Lost => "the link went away mid-command".to_string(),
-        Outcome::Refused(why) => why.clone(),
+        Outcome::Refused(why) | Outcome::ControlRefused(why) => why.clone(),
     }
 }
 
@@ -756,6 +770,37 @@ mod tests {
             attempt_once(&mut app, &run, Format::Text, false).outcome,
             Outcome::Idle
         );
+    }
+
+    #[test]
+    fn a_busy_console_refuses_exec_before_dispatch() {
+        use std::thread;
+
+        let wire = crate::transport::testing::MemoryLink::lan();
+        let mut app = App::default();
+        app.connect(wire.link()).unwrap();
+        cli::wait_for_connected(&mut app, Duration::from_secs(1));
+        wire.feed_control("OK control self=2 owner=1 mode=readonly epoch=2 peers=2");
+        let peer = wire.clone();
+        let bridge = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < deadline {
+                if peer
+                    .take_control()
+                    .iter()
+                    .any(|cmd| cmd == "@control claim idle")
+                {
+                    peer.feed_control("ERR control=busy");
+                    return;
+                }
+                thread::sleep(Duration::from_millis(2));
+            }
+            panic!("idle claim never reached the bridge");
+        });
+        let attempt = attempt_once(&mut app, &shell("pwd"), Format::Text, false);
+        bridge.join().unwrap();
+        assert_eq!(code(&attempt.outcome), Some("control_refused"));
+        assert_eq!(wire.sent_len(), 0);
     }
 
     #[test]

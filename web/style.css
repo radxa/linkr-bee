@@ -1070,6 +1070,7 @@ button:focus-visible {
 }
 
 .terminal-card {
+  position: relative;
   flex: 1 1 auto;
   display: flex;
   flex-direction: column;
@@ -2039,6 +2040,152 @@ body,
   }
 }
 
+/* ---------- Event log (plugin/UI messages, out of the serial stream) ---------- */
+.event-log {
+  --event-log-height: auto;
+  --event-log-max-height: 100%;
+  position: absolute;
+  inset: auto 0 0 0;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  max-height: min(58%, 420px, var(--event-log-max-height));
+  border-top: 1px solid var(--line);
+  /* Opaque on purpose: this pane covers the terminal and the key bar, and the
+   * translucent glass surfaces would let both show through the log text. */
+  background: var(--sticky-surface);
+  box-shadow: 0 -12px 28px rgba(2, 6, 16, 0.38);
+}
+
+.event-log[hidden] {
+  display: none;
+}
+
+.event-log-resize {
+  flex: 0 0 10px;
+  position: relative;
+  margin-top: -5px;
+  cursor: ns-resize;
+  touch-action: none;
+  outline: none;
+}
+
+.event-log-resize::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 4px;
+  width: 44px;
+  height: 3px;
+  transform: translateX(-50%);
+  border-radius: 999px;
+  background: var(--line-strong);
+  opacity: 0.75;
+}
+
+.event-log-resize:hover::after,
+.event-log-resize:focus-visible::after {
+  background: var(--accent);
+  opacity: 1;
+}
+
+.event-log-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.event-log-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+
+.event-log-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.event-log-clear {
+  width: auto;
+  padding: 0 10px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.event-log-toggle {
+  white-space: nowrap;
+}
+
+.event-log-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px 12px 12px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text);
+  overscroll-behavior: contain;
+}
+
+.event-log-line {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  padding: 1px 0;
+  word-break: break-word;
+}
+
+.event-log-time {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.event-log-message {
+  min-width: 0;
+  white-space: pre-wrap;
+}
+
+.event-log-line[data-level="error"] .event-log-message {
+  color: var(--danger);
+}
+
+.event-log-line[data-level="warn"] .event-log-message {
+  color: #e6b45c;
+}
+
+[data-theme="light"] .event-log-line[data-level="warn"] .event-log-message {
+  color: #8a5a00;
+}
+
+.event-log-empty {
+  margin: 4px 0;
+  color: var(--muted);
+  font-style: italic;
+}
+
+/* Unread is a quiet dot, not a numeric counter. */
+.event-log-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 4px;
+  border-radius: 999px;
+  background: var(--accent);
+  vertical-align: middle;
+}
+
 /* ---------- Mobile drawer header visible ---------- */
 @media (max-width: 900px) {
   .drawer-head {
@@ -2157,6 +2304,17 @@ body,
     height: 34px;
     padding: 0 5px;
     font-size: 11px;
+  }
+
+  /* The two-character label and its badge need their intrinsic width. */
+  .event-log-toggle {
+    width: auto;
+    min-width: 42px;
+    padding: 0 7px;
+  }
+
+  .event-log {
+    max-height: min(64%, var(--event-log-max-height));
   }
 
   .term-hint {

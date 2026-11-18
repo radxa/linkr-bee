@@ -35,12 +35,13 @@
 use std::collections::VecDeque;
 use std::io;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use futures::{SinkExt, StreamExt};
+use futures::{FutureExt, SinkExt, StreamExt};
 use tokio::time::Instant;
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{Bytes, Message};
 use tokio_tungstenite::MaybeTlsStream;
 use tokio_tungstenite::WebSocketStream;
 
@@ -111,21 +112,6 @@ const _: () = assert!(
     UPLINK_BURST_BYTES <= 8 * 244,
     "the burst has to fit the firmware's inbound queue"
 );
-
-/// How many buffered bytes are held back from the socket before the sender
-/// stops taking more. Bounded for the same reason the BLE write backlog is: an
-/// unbounded one lets the interface queue a megabyte towards a bridge that has
-/// stopped listening.
-///
-/// Bytes, not messages: one message from the interface can be a paste of any
-/// size, so the cap is enforced where bytes wait — `pending` in [`carry`] — and
-/// not on the channel between the writer thread and the reactor.
-const UPLINK_BACKLOG: usize = 64 * 1024;
-
-/// How many messages the hand-off channel between the writer thread and the
-/// reactor holds. Small on purpose: the hand-off is a thread boundary, while
-/// the backlog that matters is measured in bytes — see [`UPLINK_BACKLOG`].
-const UPLINK_MESSAGES: usize = 64;
 
 /// The waits between attempts at a dial that could succeed if tried again.
 ///
@@ -384,29 +370,15 @@ impl Link for LanLink {
         validate_dial(&host, self.token.as_deref())
             .map_err(|why| io::Error::new(io::ErrorKind::InvalidInput, why))?;
 
-        // Three channels meet here: the socket's bytes come back as `Inbound`
-        // (so a notice can be told apart from target output), bytes to send go
-        // out over the sync channel `spawn_writer` owns, and the dial reports
-        // success or its reason once.
         let (inbound_tx, inbound_rx) = mpsc::channel::<Inbound>();
-        let (outbound_tx, outbound_rx) = mpsc::channel::<Vec<u8>>();
         let (ready_tx, ready_rx) = mpsc::channel::<io::Result<()>>();
-        let (to_socket_tx, to_socket_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(UPLINK_MESSAGES);
-
+        let uplink = Arc::new(LanUplink::default());
+        let reactor = uplink.clone();
         let url = normalize_url(&host);
         let token = self.token.clone();
         thread::spawn(move || {
-            serve(&url, token, ready_tx, inbound_tx, to_socket_rx);
-        });
-        // The interface's writer is synchronous and sits outside every runtime,
-        // so the hand-off to the reactor gets a thread of its own: this is the
-        // one place `blocking_send` is legal.
-        thread::spawn(move || {
-            while let Ok(bytes) = outbound_rx.recv() {
-                if to_socket_tx.blocking_send(bytes).is_err() {
-                    break;
-                }
-            }
+            serve(&url, token, ready_tx, inbound_tx, &reactor);
+            reactor.close();
         });
 
         // `open` returning means "connected" everywhere else in the product,
@@ -425,9 +397,7 @@ impl Link for LanLink {
                     leftover: VecDeque::new(),
                     done: false,
                 }),
-                Box::new(LanWriter {
-                    outbound: outbound_tx,
-                }),
+                Box::new(LanWriter(uplink)),
             )),
         }
     }
@@ -464,12 +434,96 @@ fn dial_budget() -> Duration {
 /// The reader half has to be told which is which, because a notice is not
 /// target output: a frame the bridge sends out of band is meant for the user's
 /// eyes, and a frame it sends as binary is meant for the emulator.
+#[derive(Debug)]
 enum Inbound {
     Data(Vec<u8>),
     Notice(String),
+    /// One console-ownership frame from the bridge. Text, like a notice, but
+    /// state rather than prose: the interface folds it into the badge instead
+    /// of showing it as a sentence.
+    Control(String),
     /// The socket ended. The reader reports end-of-stream, as `LinkReader`
     /// promises, rather than an error: a bridge that walked away is a hang-up.
     End,
+}
+
+/// A single queue of unsent UART batches, from the session to the socket.
+/// Control frames have priority; releasing the console retires all batches in
+/// the same critical section. No writer or forwarding thread holds older input.
+#[derive(Debug, Default)]
+pub struct LanUplink {
+    queue: Mutex<UplinkQueue>,
+    wake: tokio::sync::Notify,
+}
+
+#[derive(Debug, Default)]
+struct UplinkQueue {
+    data: VecDeque<Bytes>,
+    control: VecDeque<String>,
+    closed: bool,
+    readonly: bool,
+    epoch: Option<u32>,
+    relinquished: Option<u32>,
+}
+
+impl LanUplink {
+    pub(super) fn send(&self, bytes: Vec<u8>) -> bool {
+        let mut q = self.queue.lock().unwrap();
+        if q.closed || q.readonly {
+            return false;
+        }
+        if !bytes.is_empty() {
+            q.data.push_back(bytes.into());
+            self.wake.notify_one();
+        }
+        true
+    }
+
+    pub(super) fn control(&self, command: String) -> bool {
+        let mut q = self.queue.lock().unwrap();
+        if q.closed {
+            return false;
+        }
+        if command == "@control release" || command.starts_with("@control yield ") {
+            q.data.clear();
+            q.readonly = true;
+            q.relinquished = q.epoch;
+        }
+        q.control.push_back(command);
+        self.wake.notify_one();
+        true
+    }
+
+    fn observe(&self, text: &str) {
+        let mut q = self.queue.lock().unwrap();
+        if let Some(status) = crate::device::parse_control_status(text) {
+            let changed = q.epoch.is_some_and(|epoch| epoch != status.epoch);
+            if changed {
+                q.relinquished = None;
+            }
+            q.readonly = status.mode != crate::device::ControlMode::Control
+                || q.relinquished == Some(status.epoch);
+            if changed || q.readonly {
+                q.data.clear();
+            }
+            q.epoch = Some(status.epoch);
+        } else if let Some(reason) = crate::device::control_refusal(text) {
+            if matches!(reason, "readonly" | "not_owner" | "stale_epoch" | "busy")
+                || q.relinquished.is_some()
+            {
+                q.readonly = true;
+                q.data.clear();
+                q.relinquished = None; // a later status settles a refused hand-over
+            }
+        }
+    }
+
+    fn close(&self) {
+        let mut q = self.queue.lock().unwrap();
+        q.closed = true;
+        q.data.clear();
+        self.wake.notify_one();
+    }
 }
 
 /// Why a dial failed, and whether trying again could help.
@@ -487,7 +541,7 @@ fn serve(
     token: Option<String>,
     ready: Sender<io::Result<()>>,
     inbound: Sender<Inbound>,
-    outbound: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    uplink: &LanUplink,
 ) {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -534,7 +588,7 @@ fn serve(
             // the connection, instead of carrying a link whose reader has gone.
             return;
         }
-        carry(socket, &inbound, outbound).await;
+        carry(socket, &inbound, uplink).await;
     });
     drop(runtime);
 }
@@ -646,69 +700,67 @@ fn classify(why: tokio_tungstenite::tungstenite::Error, url: &str) -> Failure {
 async fn carry(
     mut socket: WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
     inbound: &Sender<Inbound>,
-    mut outbound: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    uplink: &LanUplink,
 ) {
-    let mut pending: VecDeque<u8> = VecDeque::new();
     let mut pacer = Pacer::uplink();
-
     loop {
-        // Send first, and outside the wait below, so the socket is never
-        // borrowed by two futures at once.
-        let chunk_len = pending.len().min(FRAME_MAX_BYTES);
-        if chunk_len > 0 {
-            let now = Instant::now();
-            let wait = pacer.delay(chunk_len, now);
-            if wait.is_zero() {
-                let chunk: Vec<u8> = pending.drain(..chunk_len).collect();
-                if socket.send(Message::Binary(chunk.into())).await.is_err() {
-                    let _ = inbound.send(Inbound::End);
-                    return;
-                }
-                pacer.spend(chunk_len, Instant::now());
-                continue;
+        // Even with a continuously writable socket, observe a queued revocation
+        // before taking the next UART chunk.
+        if let Some(frame) = socket.next().now_or_never() {
+            if !absorb(frame, inbound, uplink) {
+                return;
             }
-            // Not yet: wait for whichever comes first — the pacer's time, more
-            // bytes, or a frame from the bridge. More bytes only while there is
-            // room under the cap; with the queue full they stay in their own
-            // channel, which is the backpressure the cap exists for.
-            tokio::select! {
-                frame = socket.next() => {
-                    if !absorb(frame, inbound) {
-                        return;
+        }
+        let mut delay = None;
+        let message = {
+            let mut q = uplink.queue.lock().unwrap();
+            if q.closed {
+                break;
+            }
+            if let Some(command) = q.control.pop_front() {
+                Some(Message::Text(command.into()))
+            } else if let Some(batch) = q.data.front_mut() {
+                let len = batch.len().min(FRAME_MAX_BYTES);
+                let wait = pacer.delay(len, Instant::now());
+                if wait.is_zero() {
+                    let chunk = batch.split_to(len);
+                    if batch.is_empty() {
+                        q.data.pop_front();
                     }
+                    pacer.spend(len, Instant::now());
+                    Some(Message::Binary(chunk))
+                } else {
+                    delay = Some(wait);
+                    None
                 }
-                bytes = outbound.recv(), if pending.len() < UPLINK_BACKLOG => {
-                    if !queue(bytes, &mut pending, inbound) {
-                        return;
-                    }
-                }
-                () = tokio::time::sleep(wait) => {}
+            } else {
+                None
+            }
+        };
+        if let Some(frame) = message {
+            if socket.send(frame).await.is_err() {
+                break;
             }
             continue;
         }
-
-        // Nothing is held back here — `chunk_len` was zero — so there is room
-        // by definition, and the paced branch above is the only place
-        // `pending` grows where the cap has to be consulted.
         tokio::select! {
             frame = socket.next() => {
-                if !absorb(frame, inbound) {
+                if !absorb(frame, inbound, uplink) {
                     return;
                 }
             }
-            bytes = outbound.recv() => {
-                if !queue(bytes, &mut pending, inbound) {
-                    return;
-                }
-            }
+            _ = uplink.wake.notified() => {}
+            _ = tokio::time::sleep(delay.unwrap_or_default()), if delay.is_some() => {}
         }
     }
+    let _ = inbound.send(Inbound::End);
 }
 
 /// Fold one frame from the bridge. `false` means the pump is over.
 fn absorb(
     frame: Option<Result<Message, tokio_tungstenite::tungstenite::Error>>,
     inbound: &Sender<Inbound>,
+    uplink: &LanUplink,
 ) -> bool {
     match frame {
         None => {
@@ -731,23 +783,19 @@ fn absorb(
             if text.is_empty() {
                 return true;
             }
-            inbound.send(Inbound::Notice(text.to_string())).is_ok()
+            // The bridge's ownership answers are the one text frame that is
+            // state rather than prose. Anything else is a notice, exactly as
+            // before.
+            let text = text.to_string();
+            let trimmed = text.trim_start();
+            if trimmed.starts_with("OK control ") || trimmed.starts_with("ERR control=") {
+                uplink.observe(trimmed);
+                inbound.send(Inbound::Control(text)).is_ok()
+            } else {
+                inbound.send(Inbound::Notice(text)).is_ok()
+            }
         }
         Some(Ok(_)) => true,
-    }
-}
-
-/// Buffer bytes to send. `false` means the interface closed the link.
-fn queue(bytes: Option<Vec<u8>>, pending: &mut VecDeque<u8>, inbound: &Sender<Inbound>) -> bool {
-    match bytes {
-        Some(bytes) => {
-            pending.extend(bytes);
-            true
-        }
-        None => {
-            let _ = inbound.send(Inbound::End);
-            false
-        }
     }
 }
 
@@ -778,6 +826,14 @@ impl LinkReader for LanReader {
                         }
                     }
                 }
+                Ok(Inbound::Control(text)) => {
+                    if let Some(notices) = &self.notices {
+                        if notices.send(LinkEvent::Control(text)).is_err() {
+                            self.done = true;
+                            return Ok(0);
+                        }
+                    }
+                }
                 Ok(Inbound::End) | Err(_) => {
                     self.done = true;
                     return Ok(0);
@@ -797,21 +853,40 @@ impl LinkReader for LanReader {
 }
 
 /// Bytes towards the bridge.
-struct LanWriter {
-    outbound: Sender<Vec<u8>>,
+struct LanWriter(Arc<LanUplink>);
+
+impl Drop for LanWriter {
+    fn drop(&mut self) {
+        self.0.close();
+    }
 }
 
 impl LinkWriter for LanWriter {
+    fn lan_uplink(&self) -> Option<Arc<LanUplink>> {
+        Some(self.0.clone())
+    }
+
     fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
-        self.outbound
-            .send(buf.to_vec())
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "the LAN link is no longer up"))
+        if self.0.send(buf.to_vec()) {
+            Ok(())
+        } else {
+            Err(io::Error::other("LAN output is closed or read-only"))
+        }
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        // Nothing is buffered here: the pacer holds bytes on the reactor side,
-        // and claiming otherwise would let a caller believe it had pushed them.
         Ok(())
+    }
+
+    fn write_control(&mut self, command: &str) -> io::Result<()> {
+        if self.0.control(command.to_owned()) {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "the LAN link is no longer up",
+            ))
+        }
     }
 }
 
@@ -852,6 +927,113 @@ mod tests {
         assert!(validate_token("0123456789abcdef0123456789abcdeff").is_err());
         assert!(validate_token("").is_err());
         assert!(validate_token("0123456789abcdef0123456789abcdeg").is_err());
+    }
+
+    /// Ownership frames are state; every other text frame is still a notice.
+    /// Folding `OK control …` into prose would leave the badge blind on LAN,
+    /// and treating a notice as state would dress a WiFi event up as a claim.
+    #[test]
+    fn ownership_text_is_state_and_other_text_is_a_notice() {
+        let (inbound, received) = mpsc::channel();
+        let uplink = LanUplink::default();
+        let frame = |text: &str| Some(Ok(Message::Text(text.into())));
+
+        assert!(absorb(
+            frame("OK control self=1 owner=0 mode=available epoch=1 peers=1\r\n"),
+            &inbound,
+            &uplink
+        ));
+        assert!(absorb(
+            frame("@event wifi operation=0 phase=off result=0\r\n"),
+            &inbound,
+            &uplink
+        ));
+        assert!(absorb(frame("ERR control=busy\r\n"), &inbound, &uplink));
+
+        match received.try_recv() {
+            Ok(Inbound::Control(text)) => assert!(text.starts_with("OK control ")),
+            other => panic!("a status was not routed as control: {other:?}"),
+        }
+        match received.try_recv() {
+            Ok(Inbound::Notice(text)) => assert!(text.starts_with("@event wifi")),
+            other => panic!("prose was not routed as a notice: {other:?}"),
+        }
+        match received.try_recv() {
+            Ok(Inbound::Control(text)) => assert_eq!(text.trim(), "ERR control=busy"),
+            other => panic!("a refusal was not routed as control: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handover_discards_the_entire_paced_paste_before_the_next_grant() {
+        use crate::transport::LinkHandle;
+        use tokio::net::TcpListener;
+        use tokio::time::timeout;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let host = listener.local_addr().unwrap().to_string();
+        let dial = tokio::task::spawn_blocking(move || {
+            LinkHandle::start(Box::new(LanLink::new(host, None)))
+        });
+        timeout(Duration::from_secs(4), async {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut peer = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            peer.send(Message::Text(AUTH_NONE.into())).await.unwrap();
+            let link = dial.await.unwrap().unwrap();
+            peer.send(Message::Text(
+                "OK control self=1 owner=1 mode=control epoch=1 peers=2".into(),
+            ))
+            .await
+            .unwrap();
+            while !link
+                .drain()
+                .iter()
+                .any(|e| matches!(e, LinkEvent::Control(_)))
+            {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+            // Exceed both the old 64 KiB byte backlog and its 64-message channel.
+            for _ in 0..128 {
+                assert!(link.send(vec![0; 4096]));
+            }
+            assert!(matches!(peer.next().await, Some(Ok(Message::Binary(_)))));
+            assert!(link.send_control("@control yield 2".into()));
+            loop {
+                match peer.next().await.unwrap().unwrap() {
+                    Message::Binary(_) => continue, // already on the wire
+                    Message::Text(text) if text == "@control yield 2" => break,
+                    frame => panic!("unexpected frame {frame:?}"),
+                }
+            }
+            assert!(!link.send(b"stale".to_vec()));
+            peer.send(Message::Text(
+                "OK control self=1 owner=2 mode=readonly epoch=2 peers=2".into(),
+            ))
+            .await
+            .unwrap();
+            assert!(timeout(Duration::from_millis(175), peer.next())
+                .await
+                .is_err());
+            peer.send(Message::Text(
+                "OK control self=1 owner=1 mode=control epoch=3 peers=2".into(),
+            ))
+            .await
+            .unwrap();
+            while !link
+                .drain()
+                .iter()
+                .any(|e| matches!(e, LinkEvent::Control(text) if text.contains("epoch=3")))
+            {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+            assert!(link.send(b"fresh".to_vec()));
+            assert_eq!(
+                peer.next().await.unwrap().unwrap().into_data().as_ref(),
+                b"fresh"
+            );
+        })
+        .await
+        .expect("control and fresh input must not wait behind the paste");
     }
 
     /// The dialogue is the firmware's, frame for frame. Asserted against the

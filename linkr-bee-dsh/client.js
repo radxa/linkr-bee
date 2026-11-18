@@ -13385,7 +13385,10 @@ window.__ModuleLoader__.load({
       copyNone: '未选中内容',
       viewReading: '阅读',
       viewRaw: '原始',
-      viewHint: '阅读视图隐藏 Agent 内部探测与初始化脚本回显，保留设备输出；原始视图显示全部字节。切换不发送串口输入。',
+      viewLog: '日志',
+      viewHint: '阅读视图隐藏 Agent 内部探测与初始化脚本回显，保留设备输出；原始视图显示全部字节；日志视图显示连接、重连和错误等面板消息。切换不发送串口输入。',
+      logHint: '面板自身的消息（连接状态、重连、错误、输入失败）都在这里，不写入串口终端',
+      logEmpty: '暂无日志。连接、重连与错误信息显示在这里，不再写入串口终端。',
       statusLive: '实时',
       statusOffline: '离线',
       ttySize: '终端尺寸',
@@ -13459,7 +13462,10 @@ window.__ModuleLoader__.load({
       copyNone: 'Nothing selected',
       viewReading: 'Reading',
       viewRaw: 'Raw',
-      viewHint: 'Reading hides agent probe and setup echoes, keeping device output; Raw shows every byte. Switching never sends serial input.',
+      viewLog: 'Log',
+      viewHint: 'Reading hides agent probe and setup echoes, keeping device output; Raw shows every byte; Log holds panel messages such as link, reconnect and input errors. Switching never sends serial input.',
+      logHint: 'Panel messages (link state, reconnect, errors, input failures) live here instead of the serial terminal',
+      logEmpty: 'No log entries yet. Link, reconnect and error messages appear here instead of in the serial terminal.',
       statusLive: 'Live',
       statusOffline: 'Offline',
       ttySize: 'Terminal size',
@@ -14237,16 +14243,31 @@ window.__ModuleLoader__.load({
       const copiedTimer = useRef(null);
       const [settled, setSettled] = useState(false);
       const [known, setKnown] = useState(false);
-      // Two views of one console, like the Web terminal: reading (default)
-      // hides the agent's internal probe echoes, raw keeps every byte.
+      // Three views of one console, like the Web terminal: reading (default)
+      // hides the agent's internal probe echoes, raw keeps every byte, and log
+      // holds the panel's own messages so they never enter the serial stream.
       const [logView, setLogView] = useState(() => {
-        try { return localStorage.getItem('linkr-log-view') === 'raw' ? 'raw' : 'reading'; }
-        catch { return 'reading'; }
+        try {
+          const stored = localStorage.getItem('linkr-log-view');
+          return stored === 'raw' || stored === 'log' ? stored : 'reading';
+        } catch { return 'reading'; }
       });
       const logViewRef = useRef(logView);
       logViewRef.current = logView;
       screen.view = logView;
       screen.text = screen.views[logView];
+      const [logEntries, setLogEntries] = useState([]);
+      const logEntriesRef = useRef([]);
+
+      /** Append one panel message; the serial terminal never sees it. */
+      const pushLog = useCallback((text, level = 'info') => {
+        const message = String(text ?? '').trim();
+        if (message === '') return;
+        const entry = { at: new Date().toLocaleTimeString(), text: message, level };
+        const next = [...logEntriesRef.current, entry].slice(-500);
+        logEntriesRef.current = next;
+        setLogEntries(next);
+      }, []);
       const lastSize = useRef('');
       const resizeTimer = useRef(null);
       const replaying = useRef(false);
@@ -14287,14 +14308,18 @@ window.__ModuleLoader__.load({
         }
       }, [selectionText]);
 
-      /** Switch between the two console views without sending serial input. */
+      /** Switch console views without sending serial input. */
       const switchView = useCallback((nextView) => {
-        const view = nextView === 'raw' ? 'raw' : 'reading';
+        const view = nextView === 'raw' ? 'raw' : nextView === 'log' ? 'log' : 'reading';
         if (view === logViewRef.current) return;
         logViewRef.current = view;
         screen.view = view;
         setLogView(view);
         try { localStorage.setItem('linkr-log-view', view); } catch { /* private mode */ }
+        // The log view is client-side chrome: the terminal stays mounted and
+        // keeps receiving bytes, so switching back needs no repaint from the
+        // Host; only its history is replayed from the screen memory.
+        if (view === 'log') return;
         // Both histories advance on the same SSE cursor. A local repaint has
         // no HTTP response that can overwrite later output or revive a clear.
         const text = screen.views[view];
@@ -14340,6 +14365,11 @@ window.__ModuleLoader__.load({
        * because the ring is what a fresh panel starts from.
        */
       const clearAll = useCallback(() => {
+        if (logViewRef.current === 'log') {
+          logEntriesRef.current = [];
+          setLogEntries([]);
+          return;
+        }
         clearScreen();
         try {
           fetch(PANEL_ACTION_URL, {
@@ -14653,12 +14683,9 @@ window.__ModuleLoader__.load({
       const inputFailure = useRef({ text: '', at: 0, count: 0 });
       const rearmStream = useRef(0);
 
-      /** Write one notice: through the terminal, or as a line when it is absent. */
+      /** One panel notice: the Log view holds it, the terminal stays clean. */
       const writeNotice = (text, warn) => {
-        if (feedTerminal(`\u001b[${warn ? '33' : '31'}m${text}\u001b[0m\r\n`)) return;
-        const next = linesRef.current;
-        next.push({ kind: 'meta', segs: [{ t: text, k: warn ? 'c-warn' : 'c-err' }] });
-        commit(next);
+        pushLog(text, warn ? 'warn' : 'error');
       };
 
       const reportInputFailure = (text) => {
@@ -14717,8 +14744,18 @@ window.__ModuleLoader__.load({
             if (notice) {
               screen.conn = notice;
               setConn(notice);
-              return;
             }
+            // Every panel message goes to the Log view, never the terminal.
+            pushLog(event.text, 'warn');
+            lastTs.current = Number(event.ts) || Date.now();
+            return;
+          }
+          // Typed/agent lines are panel records too: the serial terminal keeps
+          // device bytes only, which full-screen programs require.
+          if (event.type === 'user' || event.type === 'cmd') {
+            pushLog(`$ ${event.text}`, 'cmd');
+            lastTs.current = Number(event.ts) || Date.now();
+            return;
           }
           const text = consoleText(event, logViewRef.current);
           const at = Number(event.ts) || Date.now();
@@ -14766,8 +14803,15 @@ window.__ModuleLoader__.load({
           lastTs.current = at;
           commit(next);
         },
-        [commit],
+        [commit, pushLog],
       );
+
+      // New log lines scroll into view while the Log view is on screen.
+      useEffect(() => {
+        if (logView !== 'log') return;
+        const el = scrollRef.current;
+        if (el !== null) el.scrollTop = el.scrollHeight;
+      }, [logEntries, logView]);
 
       // The console stream, and with it the panel's memory of the screen. A
       // remount seeds from that memory; a page that never drew anything seeds
@@ -14969,6 +15013,16 @@ window.__ModuleLoader__.load({
                 },
                 t('viewRaw'),
               ),
+              h(
+                'button',
+                {
+                  className: 'lb-view-btn' + (logView === 'log' ? ' on' : ''),
+                  'aria-pressed': logView === 'log' ? 'true' : 'false',
+                  title: t('logHint'),
+                  onClick: () => switchView('log'),
+                },
+                t('viewLog'),
+              ),
             ),
             h(
               'button',
@@ -15014,37 +15068,52 @@ window.__ModuleLoader__.load({
               refreshLink();
             },
           }),
-        h(
-          'div',
-          {
-            className: 'lb-console' + (termState === 'ready' ? ' lb-console-xterm' : ''),
-            ref: scrollRef,
-            role: 'log',
-            'aria-live': 'off',
-            onScroll: (e) => {
-              const el = e.target;
-              atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
-            },
-          },
-          h('div', { className: 'lb-term', ref: termHost }),
-          // Before the first byte: one dim line, no invented prompt and no
-          // fake output — an empty terminal is allowed to look empty.
-          termState === 'ready' && !drew && h('div', { className: 'lb-empty' }, t('empty')),
-          termState === 'failed' &&
-            h('div', { className: 'lb-line lb-term-error' }, `${t('terminalFailed')}: ${termError || 'unknown error'}`),
-          termState !== 'ready' &&
-            (lines.length
-              ? lines.map((line, index) =>
-                  h(
-                    'div',
-                    { className: 'lb-line' + (line.kind === 'meta' ? ' lb-line-meta' : ''), key: index },
-                    line.segs.length
-                      ? line.segs.map((seg, segIndex) => h('span', { key: segIndex, className: seg.k }, seg.t))
-                      : '\u00a0',
-                  ),
-                )
-              : !drew && h('div', { className: 'lb-line lb-placeholder' }, t('empty'))),
-        ),
+        logView === 'log'
+          ? h(
+              'div',
+              { className: 'lb-log', ref: scrollRef, role: 'log', 'aria-live': 'polite' },
+              logEntries.length > 0
+                ? logEntries.map((entry, index) =>
+                    h(
+                      'div',
+                      { className: 'lb-log-row', 'data-level': entry.level, key: index },
+                      h('span', { className: 'lb-log-time' }, entry.at),
+                      h('span', { className: 'lb-log-text' }, entry.text),
+                    ),
+                  )
+                : h('div', { className: 'lb-log-empty' }, t('logEmpty')),
+            )
+          : h(
+              'div',
+              {
+                className: 'lb-console' + (termState === 'ready' ? ' lb-console-xterm' : ''),
+                ref: scrollRef,
+                role: 'log',
+                'aria-live': 'off',
+                onScroll: (e) => {
+                  const el = e.target;
+                  atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+                },
+              },
+              h('div', { className: 'lb-term', ref: termHost }),
+              // Before the first byte: one dim line, no invented prompt and no
+              // fake output — an empty terminal is allowed to look empty.
+              termState === 'ready' && !drew && h('div', { className: 'lb-empty' }, t('empty')),
+              termState === 'failed' &&
+                h('div', { className: 'lb-line lb-term-error' }, `${t('terminalFailed')}: ${termError || 'unknown error'}`),
+              termState !== 'ready' &&
+                (lines.length
+                  ? lines.map((line, index) =>
+                      h(
+                        'div',
+                        { className: 'lb-line' + (line.kind === 'meta' ? ' lb-line-meta' : ''), key: index },
+                        line.segs.length
+                          ? line.segs.map((seg, segIndex) => h('span', { key: segIndex, className: seg.k }, seg.t))
+                          : '\u00a0',
+                      ),
+                    )
+                  : !drew && h('div', { className: 'lb-line lb-placeholder' }, t('empty'))),
+            ),
       );
     }
 
@@ -15095,6 +15164,15 @@ window.__ModuleLoader__.load({
 .lb-reconnect::after { inset: -4px; }
 .lb-console { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 10px 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; line-height: 1.55; background: var(--dsw-alias-bg-base); }
 .lb-console-xterm { position: relative; overflow: hidden; padding: 0; }
+/* Panel messages live in their own view: the serial terminal keeps bytes only. */
+.lb-log { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 8px 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; line-height: 1.55; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); }
+.lb-log-row { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; padding: 1px 0; word-break: break-word; }
+.lb-log-time { color: var(--dsw-alias-label-tertiary); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.lb-log-text { min-width: 0; white-space: pre-wrap; }
+.lb-log-row[data-level="warn"] .lb-log-text { color: var(--dsw-alias-state-warn-primary); }
+.lb-log-row[data-level="error"] .lb-log-text { color: var(--dsw-alias-state-error-primary); }
+.lb-log-row[data-level="cmd"] .lb-log-text { color: var(--dsw-alias-brand-primary); font-weight: 600; }
+.lb-log-empty { color: var(--dsw-alias-label-secondary); font-style: italic; }
 .lb-term { position: absolute; inset: 0; padding: 6px 4px 4px; }
 .lb-console-xterm .lb-term { display: block; }
 /* The selection layer is a canvas-parented overlay: keep a visible edge and a

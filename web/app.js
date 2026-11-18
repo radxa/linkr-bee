@@ -393,6 +393,13 @@ const elements = {
   clearButton: $("clearButton"),
   saveButton: $("saveButton"),
   logViewSelect: $("logViewSelect"),
+  eventLogBtn: $("eventLogBtn"),
+  eventLogPanel: $("eventLogPanel"),
+  eventLogResize: $("eventLogResize"),
+  eventLogList: $("eventLogList"),
+  eventLogDot: $("eventLogDot"),
+  eventLogClear: $("eventLogClear"),
+  eventLogClose: $("eventLogClose"),
   saveReadingLog: $("saveReadingLog"),
   saveRawLog: $("saveRawLog"),
   shellIntegrationEnable: $("shellIntegrationEnable"),
@@ -687,6 +694,10 @@ const I18N = {
     clear: "Clear",
     saveLog: "Save current view",
     logViewTitle: "Log view", logViewReading: "Reading", logViewRaw: "Raw",
+    eventLog: "Event log", eventLogShort: "Log", eventLogClear: "Clear", eventLogClose: "Close",
+    eventLogHint: "Connection, reconnect and error messages — kept out of the serial terminal",
+    eventLogEmpty: "No events yet. Connection, reconnect and error messages appear here instead of in the serial terminal.",
+    eventLogResize: "Drag to resize the event log; double-click to reset",
     logViewHint: "Reading hides internal Agent probe/setup echoes and simplifies tracked commands. Device output stays visible. Switching sends no input; Raw and board WebDAV retain original UART bytes.",
     saveReadingLog: "Export reading log", saveRawLog: "Export raw log",
     shellIntegrationTitle: "Session Shell integration",
@@ -752,7 +763,7 @@ const I18N = {
     boardLed: "Status LED",
     boardLedAria: "Status LED",
     boardLedColors: "Status LED colours",
-    boardLedHint: "With automatic-status firmware: blue for Bluetooth, white for WiFi, cyan for AI. UART traffic blinks. Manual colours preview for 5 seconds; AI takes priority.",
+    boardLedHint: "With automatic-status firmware: white when idle, blue for Bluetooth, green for WiFi, cyan for AI; WiFi wins while both are up. UART traffic blinks. Manual colours preview for 5 seconds; AI takes priority.",
     boardLedCustom: "Custom colour",
     boardApply: "Apply",
     refresh: "Refresh",
@@ -1010,6 +1021,10 @@ const I18N = {
     clear: "清屏",
     saveLog: "保存当前视图",
     logViewTitle: "日志视图", logViewReading: "阅读", logViewRaw: "原始",
+    eventLog: "事件日志", eventLogShort: "日志", eventLogClear: "清空", eventLogClose: "关闭",
+    eventLogHint: "连接、重连与错误信息都在这里，不写入串口终端",
+    eventLogEmpty: "暂无事件。连接、重连与错误信息显示在这里，不再写入串口终端。",
+    eventLogResize: "拖动调整事件日志高度，双击恢复默认",
     logViewHint: "阅读视图隐藏 Agent 内部探测与初始化脚本回显，简化任务命令，保留设备输出。切换不发送串口输入；原始视图和板端 WebDAV 保留 UART 原始字节。",
     saveReadingLog: "导出阅读日志", saveRawLog: "导出原始日志",
     shellIntegrationTitle: "本次 Shell 集成",
@@ -1075,7 +1090,7 @@ const I18N = {
     boardLed: "状态灯",
     boardLedAria: "状态灯",
     boardLedColors: "状态灯颜色",
-    boardLedHint: "支持自动状态的新固件：蓝牙为蓝色，WiFi 为白色，AI 为蓝绿色。串口有数据时闪烁。手动颜色预览 5 秒，AI 状态优先。",
+    boardLedHint: "支持自动状态的新固件：空闲（无人连接）为白色，蓝牙为蓝色，WiFi 为绿色，AI 为青色；WiFi 与蓝牙同时在线时显示 WiFi。串口有数据时闪烁。手动颜色预览 5 秒，AI 状态优先。",
     boardLedCustom: "自定义颜色",
     boardApply: "应用",
     refresh: "刷新",
@@ -1566,6 +1581,11 @@ function renderRefLists() {
 
 function applyLang() {
   document.documentElement.lang = lang === "zh" ? "zh-CN" : "en";
+  // The drawer renders its own rows, so re-render them (and the empty state)
+  // in the new language after the static labels are updated below.
+  if (typeof uiLog !== "undefined" && uiLog.open) {
+    queueMicrotask(() => renderUiLog());
+  }
   document.querySelectorAll("[data-i18n]").forEach((el) => {
     el.textContent = t(el.getAttribute("data-i18n"));
   });
@@ -2156,16 +2176,164 @@ function queueTerminalOutput(data) {
   }
 }
 
-function appendLine(text) {
-  let color = "\x1b[90m";
-  if (text.startsWith("[error]")) {
-    color = "\x1b[91m";
-  } else if (text.startsWith("[warn]") || text.startsWith("[disconnected]")) {
-    color = "\x1b[93m";
-  } else if (text === "[ready]") {
-    color = "\x1b[92m";
+/* ---------------------------------------------------------------- event log
+ *
+ * `appendLine` messages are the app's own log: connection state, reconnect
+ * attempts, management frames, GATT errors, debug traces. They used to be
+ * written into the serial terminal, which distorted full-screen programs on
+ * the target. They now go to a separate Event log drawer; the terminal only
+ * ever receives UART bytes.
+ */
+const UI_LOG_LIMIT = 500;
+const EVENT_LOG_HEIGHT_KEY = "linkr-event-log-height";
+const EVENT_LOG_MIN_HEIGHT = 120;
+const uiLog = { entries: [], hasUnread: false, open: false };
+
+/** The drawer's height can be dragged/keyboarded and is remembered per browser. */
+let eventLogHeight = (() => {
+  const stored = Number(localStorage.getItem(EVENT_LOG_HEIGHT_KEY));
+  return Number.isFinite(stored) && stored >= EVENT_LOG_MIN_HEIGHT ? stored : null;
+})();
+
+function eventLogHeightBounds() {
+  const card = elements.terminalCard;
+  const available = card ? card.clientHeight : window.innerHeight;
+  const head = card?.querySelector(".terminal-head")?.clientHeight || 0;
+  // Keep the header and a couple of rows visible when space permits. On a
+  // short keyboard/Agent layout, reduce the drawer minimum before hiding tools.
+  const reserved = Math.min(140, Math.max(head, available - EVENT_LOG_MIN_HEIGHT));
+  const max = Math.max(0, available - reserved);
+  return { min: Math.min(EVENT_LOG_MIN_HEIGHT, max), max, reserved };
+}
+
+function clampEventLogHeight(height) {
+  const { min, max } = eventLogHeightBounds();
+  return Math.round(Math.min(max, Math.max(min, height)));
+}
+
+function refreshEventLogHeight() {
+  const panel = elements.eventLogPanel;
+  if (!panel || !uiLog.open) return;
+  const { min, max, reserved } = eventLogHeightBounds();
+  // A relative CSS cap also protects the header between layout callbacks.
+  panel.style.setProperty("--event-log-max-height", `calc(100% - ${reserved}px)`);
+  if (eventLogHeight !== null) {
+    panel.style.height = `${clampEventLogHeight(eventLogHeight)}px`;
+    panel.style.maxHeight = "var(--event-log-max-height)";
   }
-  appendOutput(`${color}${text}\x1b[0m\r\n`);
+  const handle = elements.eventLogResize;
+  if (handle) {
+    handle.setAttribute("aria-valuemin", String(min));
+    handle.setAttribute("aria-valuemax", String(max));
+    handle.setAttribute("aria-valuenow", String(Math.round(panel.getBoundingClientRect().height)));
+  }
+}
+
+function applyEventLogHeight(height) {
+  const panel = elements.eventLogPanel;
+  if (!panel || !Number.isFinite(height)) return;
+  eventLogHeight = clampEventLogHeight(height);
+  refreshEventLogHeight();
+}
+
+function resetEventLogHeight() {
+  const panel = elements.eventLogPanel;
+  eventLogHeight = null;
+  localStorage.removeItem(EVENT_LOG_HEIGHT_KEY);
+  if (!panel) return;
+  panel.style.height = "";
+  panel.style.maxHeight = "";
+  refreshEventLogHeight();
+}
+
+function rememberEventLogHeight() {
+  if (eventLogHeight !== null) {
+    localStorage.setItem(EVENT_LOG_HEIGHT_KEY, String(eventLogHeight));
+  }
+}
+
+function uiLogLevel(text) {
+  if (text.startsWith("[error]")) return "error";
+  if (text.startsWith("[warn]") || text.startsWith("[disconnected]")) return "warn";
+  if (text === "[ready]") return "info";
+  return "info";
+}
+
+function renderUiLog() {
+  const list = elements.eventLogList;
+  if (!list) return;
+  if (!uiLog.open) return;
+  list.replaceChildren();
+  if (uiLog.entries.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "event-log-empty";
+    empty.textContent = t("eventLogEmpty");
+    list.append(empty);
+    return;
+  }
+  for (const entry of uiLog.entries) {
+    const line = document.createElement("div");
+    line.className = "event-log-line";
+    line.dataset.level = entry.level;
+    const time = document.createElement("span");
+    time.className = "event-log-time";
+    time.textContent = entry.at;
+    const message = document.createElement("span");
+    message.className = "event-log-message";
+    message.textContent = entry.text;
+    line.append(time, message);
+    list.append(line);
+  }
+  list.scrollTop = list.scrollHeight;
+}
+
+function refreshEventLogDot() {
+  const dot = elements.eventLogDot;
+  const button = elements.eventLogBtn;
+  if (!dot || !button) return;
+  // A plain dot, never a count: this is an activity log, not an inbox.
+  dot.hidden = !uiLog.hasUnread;
+  button.dataset.unread = uiLog.hasUnread ? "true" : "false";
+}
+
+function pushUiLog(text) {
+  const message = String(text ?? "").trim();
+  if (!message) return;
+  const at = new Date().toLocaleTimeString();
+  uiLog.entries.push({ at, text: message, level: uiLogLevel(message) });
+  if (uiLog.entries.length > UI_LOG_LIMIT) {
+    uiLog.entries.splice(0, uiLog.entries.length - UI_LOG_LIMIT);
+  }
+  if (uiLog.open) {
+    renderUiLog();
+  } else {
+    uiLog.hasUnread = true;
+    refreshEventLogDot();
+  }
+}
+
+function setEventLogOpen(open) {
+  uiLog.open = Boolean(open);
+  if (elements.eventLogPanel) elements.eventLogPanel.hidden = !uiLog.open;
+  if (elements.eventLogBtn) elements.eventLogBtn.setAttribute("aria-expanded", uiLog.open ? "true" : "false");
+  if (uiLog.open) {
+    uiLog.hasUnread = false;
+    refreshEventLogDot();
+    renderUiLog();
+    refreshEventLogHeight();
+    elements.eventLogList?.focus({ preventScroll: true });
+  }
+}
+
+function clearEventLog() {
+  uiLog.entries = [];
+  uiLog.hasUnread = false;
+  refreshEventLogDot();
+  renderUiLog();
+}
+
+function appendLine(text) {
+  pushUiLog(text);
 }
 
 function debugLine(text) {
@@ -6990,6 +7158,68 @@ function bind() {
 
   elements.saveButton.addEventListener("click", () => saveLog());
   elements.logViewSelect.addEventListener("change", () => setLogView(elements.logViewSelect.value));
+  // The event log is chrome over the terminal: opening it must not resize the
+  // xterm, and Clear here never touches the board's UART stream.
+  elements.eventLogBtn.addEventListener("click", () => setEventLogOpen(!uiLog.open));
+  elements.eventLogClose.addEventListener("click", () => {
+    setEventLogOpen(false);
+    elements.eventLogBtn.focus({ preventScroll: true });
+  });
+  elements.eventLogClear.addEventListener("click", () => clearEventLog());
+
+  // Resize the event log drawer: drag the grabber, or use the arrow keys when
+  // it is focused. Double-click restores the default height.
+  let eventLogResizing = null;
+  elements.eventLogResize.addEventListener("pointerdown", (event) => {
+    if (!uiLog.open || event.button !== 0) return;
+    event.preventDefault();
+    const panel = elements.eventLogPanel;
+    const startHeight = panel.getBoundingClientRect().height;
+    eventLogResizing = { startY: event.clientY, startHeight, pointerId: event.pointerId };
+    elements.eventLogResize.setPointerCapture?.(event.pointerId);
+  });
+  elements.eventLogResize.addEventListener("pointermove", (event) => {
+    if (!eventLogResizing) return;
+    event.preventDefault();
+    // Dragging up makes the drawer taller.
+    applyEventLogHeight(eventLogResizing.startHeight + (eventLogResizing.startY - event.clientY));
+  });
+  const endEventLogResize = (event) => {
+    if (!eventLogResizing) return;
+    eventLogResizing = null;
+    elements.eventLogResize.releasePointerCapture?.(event.pointerId);
+    rememberEventLogHeight();
+  };
+  elements.eventLogResize.addEventListener("pointerup", endEventLogResize);
+  elements.eventLogResize.addEventListener("pointercancel", endEventLogResize);
+  elements.eventLogResize.addEventListener("dblclick", () => resetEventLogHeight());
+  elements.eventLogResize.addEventListener("keydown", (event) => {
+    if (!uiLog.open) return;
+    const current = elements.eventLogPanel.getBoundingClientRect().height;
+    let next = null;
+    if (event.key === "ArrowUp") next = current + 24;
+    else if (event.key === "ArrowDown") next = current - 24;
+    else if (event.key === "Home") next = EVENT_LOG_MIN_HEIGHT;
+    else if (event.key === "End") next = clampEventLogHeight(Number.MAX_SAFE_INTEGER);
+    if (next === null) return;
+    event.preventDefault();
+    applyEventLogHeight(next);
+    rememberEventLogHeight();
+  });
+  window.addEventListener("resize", refreshEventLogHeight);
+  window.visualViewport?.addEventListener("resize", refreshEventLogHeight);
+  // Keyboard and Agent layouts may resize this card without a window event.
+  if (typeof ResizeObserver !== "undefined") {
+    const observer = new ResizeObserver(refreshEventLogHeight);
+    observer.observe(elements.terminalCard);
+    observer.observe(elements.eventLogPanel);
+  }
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || !uiLog.open) return;
+    event.preventDefault();
+    setEventLogOpen(false);
+    elements.eventLogBtn.focus({ preventScroll: true });
+  });
   elements.saveReadingLog.addEventListener("click", () => saveLog("reading"));
   elements.saveRawLog.addEventListener("click", () => saveLog("raw"));
   elements.shellIntegrationEnable.addEventListener("click", () => enableShellIntegration());

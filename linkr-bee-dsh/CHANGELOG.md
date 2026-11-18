@@ -20,6 +20,10 @@ continue to follow the Linkr Bee main line.
 - Settings say what saves what: the UART card is "Write to board", the footer is
   the only "Save settings", and the card is disabled while connection fields are
   dirty.
+- Panel messages no longer enter the serial terminal: a third **Log** view
+  holds link notices, reconnect/input errors and `user`/`cmd` records, so the
+  Reading view and the raw VT100 terminal carry device bytes only. Clear in the
+  Log view empties the log alone; the view choice is persisted.
 - A `bee-cli` built in the checkout this plugin is linked from is found again,
   so a profile whose package manager pruned `linkr-bee-cli` no longer fails
   every link with "bee-cli was not found".

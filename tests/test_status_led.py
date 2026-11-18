@@ -65,3 +65,6 @@ class StatusLedTests(unittest.TestCase):
 
     def test_disconnected_uart_activity_is_visible(self):
         self.check_scenario(11)
+
+    def test_idle_led_is_solid_white(self):
+        self.check_scenario(12)

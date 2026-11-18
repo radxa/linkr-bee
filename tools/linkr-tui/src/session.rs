@@ -127,6 +127,11 @@ pub struct Session {
     /// question only one of the three can answer, and the caller that asks has
     /// no other way to know which.
     kind: LinkKind,
+    /// The capability word the board's Management service advertised when the
+    /// link was wired, if it was read. `None` is old firmware — the caller then
+    /// keeps the historical assumptions rather than reading an absence as a
+    /// board that cannot do anything.
+    capabilities: Option<u32>,
 }
 
 impl Session {
@@ -174,6 +179,11 @@ impl Session {
         self.kind == LinkKind::Ble
     }
 
+    /// The board's Management capability word, when the link read one.
+    pub fn capabilities(&self) -> Option<u32> {
+        self.capabilities
+    }
+
     /// The LAN address of the open link, empty for any other kind.
     pub fn lan_host(&self) -> &str {
         &self.lan_host
@@ -204,6 +214,7 @@ impl Session {
     /// itself.
     pub fn adopt(&mut self, opened: OpenedLink) {
         self.kind = opened.kind;
+        self.capabilities = opened.board_capabilities;
         self.lan_host = opened.lan_host.clone();
         self.lan_secured = opened.lan_secured;
         self.describe = opened.description.clone();
@@ -274,6 +285,9 @@ impl Session {
                 // answers about itself into it would make the top bar drift
                 // every time somebody asked for the firmware version.
                 LinkEvent::Management(_) => {}
+                // The LAN bridge's ownership answer is about the bridge, like
+                // a management reply, so it is not target traffic either.
+                LinkEvent::Control(_) => {}
                 LinkEvent::Closed(reason) => {
                     ended = true;
                     // A clean end is a hang-up; anything else is a failure.
@@ -328,6 +342,15 @@ impl Session {
             return false;
         };
         handle.send_management(frame)
+    }
+
+    /// Send one ownership command in the bearer's own spelling. `false` means
+    /// there is no link to ask over.
+    pub fn send_control(&mut self, command: String) -> bool {
+        let Some(handle) = &self.handle else {
+            return false;
+        };
+        handle.send_control(command)
     }
 }
 

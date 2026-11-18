@@ -78,6 +78,7 @@ class SyntheticVersionConsistencyTests(unittest.TestCase):
             "tools/linkr-tui/Cargo.toml": '[package]\nversion = "2.3.4"\n',
             "tools/linkr-tui/npm/package.json": '{"version":"2.3.4"}',
             "linkr-bee-dsh/package.json": '{"version":"2.3.4"}',
+            "linkr-bee-opencode/package.json": '{"version":"2.3.4"}',
             "docs/releases/v2.3.4.md": 'Release notes',
         }
         for name, content in files.items():
