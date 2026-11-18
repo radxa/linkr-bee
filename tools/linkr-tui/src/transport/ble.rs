@@ -729,19 +729,25 @@ fn radio(
                 return;
             }
         };
-        let target = match peripheral
+        let properties = match peripheral
             .properties()
             .await
             .map_err(|why| format!("the device would not say what it is: {why}"))
         {
-            Ok(properties) => properties
-                .and_then(|p| p.local_name)
-                .unwrap_or_else(|| "the device".to_string()),
+            Ok(properties) => properties,
             Err(why) => {
                 refuse(why);
                 return;
             }
         };
+
+        let address = properties
+            .as_ref()
+            .map(|p| p.address.to_string())
+            .unwrap_or_default();
+        let target = properties
+            .and_then(|p| p.local_name)
+            .unwrap_or_else(|| "the device".to_string());
 
         // Joining a link that is already up is an optimization, and it has one
         // failure shape: BlueZ reports a device as connected for a second or
@@ -799,13 +805,6 @@ fn radio(
         // Reported only once the subscription is live. A read that succeeds
         // and a notify that never arrives looks exactly like a dead target,
         // so "connected" means bytes can already flow both ways.
-        let address = peripheral
-            .properties()
-            .await
-            .ok()
-            .flatten()
-            .map(|properties| properties.address.to_string())
-            .unwrap_or_default();
         let device_id = connection_identifier(&peripheral.id().to_string(), &address);
         if ready.send(Ok((device_id, wiring.capabilities))).is_err() {
             // The caller gave up (or went away) while this dial was still
@@ -830,7 +829,7 @@ fn radio(
             outbound,
             &management,
             &notices,
-            wiring.uart,
+            wiring,
         )
         .await;
         // The one signal that means "stop reading" to whoever is waiting on
@@ -1382,6 +1381,7 @@ struct ReliableState {
 
 /// What [`wire`] had to say about the link beyond "it is up".
 struct Wiring {
+    notifications: futures::stream::BoxStream<'static, btleplug::api::ValueNotification>,
     uart: Uart,
     /// The Management capability word, when the board advertised one.
     capabilities: Option<u32>,
@@ -1434,6 +1434,25 @@ async fn wire(peripheral: &Peripheral) -> Result<Wiring, String> {
         check_identity(false, &characteristic_uuids, None, name)?;
     }
 
+    // btleplug does not replay indications received before the host stream exists.
+    let notifications = peripheral
+        .notifications()
+        .await
+        .map_err(|why| format!("the notification stream could not be opened: {why}"))?;
+    // The management service is optional and *must stay* optional: a bridge
+    // without it is a bridge that can still carry a terminal, and refusing to
+    // connect to one because it cannot answer `@i?` would turn a firmware
+    // that predates the service into "the board is broken".
+    if characteristics.iter().any(|c| c.uuid == MGMT_RESPONSE) {
+        let responses = characteristics
+            .iter()
+            .find(|c| c.uuid == MGMT_RESPONSE)
+            .ok_or_else(|| "the management notify characteristic vanished".to_string())?;
+        retry_busy(|| async { peripheral.subscribe(responses).await })
+            .await
+            .map_err(|why| format!("the management channel could not be subscribed to: {why}"))?;
+    }
+
     let mut uart = Uart::Nus;
     // The capability word, read once: the transport and the session features
     // both come from it, and a second read could disagree with the first.
@@ -1470,20 +1489,8 @@ async fn wire(peripheral: &Peripheral) -> Result<Wiring, String> {
             .map_err(|why| format!("notify could not be subscribed to: {why}"))?;
     }
 
-    // The management service is optional and *must stay* optional: a bridge
-    // without it is a bridge that can still carry a terminal, and refusing to
-    // connect to one because it cannot answer `@i?` would turn a firmware
-    // that predates the service into "the board is broken".
-    if characteristics.iter().any(|c| c.uuid == MGMT_RESPONSE) {
-        let responses = characteristics
-            .iter()
-            .find(|c| c.uuid == MGMT_RESPONSE)
-            .ok_or_else(|| "the management notify characteristic vanished".to_string())?;
-        retry_busy(|| async { peripheral.subscribe(responses).await })
-            .await
-            .map_err(|why| format!("the management channel could not be subscribed to: {why}"))?;
-    }
     Ok(Wiring {
+        notifications,
         uart,
         capabilities: protocol.map(|info| info.capabilities),
     })
@@ -1716,8 +1723,13 @@ async fn carry(
     mut outbound: tokio::sync::mpsc::Receiver<Frame>,
     management: &Sender<Vec<u8>>,
     notices: &Sender<String>,
-    uart: Uart,
+    wiring: Wiring,
 ) {
+    let Wiring {
+        uart,
+        mut notifications,
+        ..
+    } = wiring;
     let characteristics = peripheral.characteristics();
     let nus_sink = characteristics.iter().find(|c| c.uuid == NUS_RX).cloned();
     let reliable_sink = characteristics
@@ -1728,9 +1740,6 @@ async fn carry(
         .iter()
         .find(|c| c.uuid == MGMT_COMMAND)
         .cloned();
-    let Ok(mut notifications) = peripheral.notifications().await else {
-        return;
-    };
     // The management channel, cut into whole messages so a re-delivered one
     // can be told apart from a fragment that merely matches its neighbour.
     // See `ManagementMessages`.

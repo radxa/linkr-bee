@@ -120,6 +120,12 @@ pub trait LinkReader: Send {
 
 /// The sending half of a link.
 pub trait LinkWriter: Send {
+    /// The LAN pacer accepts data and control directly. A second writer queue
+    /// would keep old keystrokes alive across hand-over.
+    fn lan_uplink(&self) -> Option<std::sync::Arc<lan::LanUplink>> {
+        None
+    }
+
     /// Write every byte; a short write is the implementation's problem.
     fn write_all(&mut self, buf: &[u8]) -> io::Result<()>;
     /// Push what was buffered to the far end.
@@ -313,6 +319,7 @@ impl OpenedLink {
 pub struct LinkHandle {
     events: Receiver<LinkEvent>,
     outgoing: Sender<Outgoing>,
+    lan_uplink: Option<std::sync::Arc<lan::LanUplink>>,
     /// Kept so the threads are known to be alive for the life of the handle;
     /// they are detached rather than joined, because a reader blocked on a
     /// socket must not hold up a quit.
@@ -338,10 +345,12 @@ impl LinkHandle {
         let (outgoing, command_rx) = mpsc::channel();
 
         let reader = spawn_reader(opened.reader, event_tx.clone());
+        let lan_uplink = opened.writer.lan_uplink();
         let writer = spawn_writer(opened.writer, command_rx, event_tx);
         LinkHandle {
             events,
             outgoing,
+            lan_uplink,
             _reader: reader,
             _writer: writer,
             kind: opened.kind,
@@ -362,6 +371,9 @@ impl LinkHandle {
     /// Queue bytes to the device. `false` means the writer thread is gone, so
     /// the caller can stop counting them as sent.
     pub fn send(&self, bytes: Vec<u8>) -> bool {
+        if let Some(uplink) = &self.lan_uplink {
+            return uplink.send(bytes);
+        }
         self.outgoing.send(Outgoing::Bytes(bytes)).is_ok()
     }
 
@@ -377,6 +389,9 @@ impl LinkHandle {
     /// Queue one ownership command in the bearer's own spelling. `false` means
     /// the writer thread is gone.
     pub fn send_control(&self, command: String) -> bool {
+        if let Some(uplink) = &self.lan_uplink {
+            return uplink.control(command);
+        }
         self.outgoing.send(Outgoing::Control(command)).is_ok()
     }
 

@@ -1757,7 +1757,7 @@ pub fn send_stdin(app: &mut App, how: Framing, format: Format) -> i32 {
     app.collect_output = true;
     // A script types as the user would: it needs the console before its first
     // byte, not a silent delivery of half of them into another session's shell.
-    if let Err(why) = wait_for_input_control(app, control_window()) {
+    if let Err(why) = prepare_serial_input(app) {
         return report(format, "send", false, &why);
     }
     let stdin = std::io::stdin();
@@ -1816,6 +1816,7 @@ pub fn send_stdin(app: &mut App, how: Framing, format: Format) -> i32 {
                 line
             }
         };
+        app.pump();
         if app.control_readonly() {
             return report(
                 format,
@@ -1842,6 +1843,14 @@ pub fn send_stdin(app: &mut App, how: Framing, format: Format) -> i32 {
         app.pump();
         drain(app, format);
         thread::sleep(Duration::from_millis(5));
+    }
+    if let Some(reason) = app.control_refusal() {
+        return report(
+            format,
+            "send",
+            false,
+            &format!("the bridge refused control={reason}; delivery is unconfirmed"),
+        );
     }
     match send_detail(sent, missing, unreadable.as_ref()) {
         Ok(detail) => report(format, "send", true, &detail),
@@ -1925,6 +1934,8 @@ pub fn loopback_round_trip(
     if payload.is_empty() {
         return Err("the payload is empty".to_string());
     }
+    prepare_serial_input(app)?;
+    app.take_output(); // bytes observed during arbitration predate the probe
     if !app.send_bytes(payload) {
         return Err(app.strings().not_connected.to_string());
     }
@@ -2058,28 +2069,22 @@ fn report_control_status(app: &mut App, format: Format, window: Duration) -> i32
 fn wait_for_control_ready(app: &mut App, window: Duration) -> Result<bool, String> {
     let deadline = Instant::now() + window;
     loop {
-        // Bluetooth has a capability word; the LAN socket announces ownership
-        // with its first `OK control …` frame. Each is the feature flag.
-        let decided = if app.transport == crate::app::Transport::Lan {
-            app.control_announced
-        } else {
-            app.session.capabilities().is_some()
-        };
-        if decided {
-            if !app.supports_control() {
-                return Ok(false);
-            }
-            if app.control.is_some() {
-                return Ok(true);
-            }
-        }
         if !app.session.is_live() {
             return Err("the link ended before the bridge said who owns the console".to_string());
         }
-        if Instant::now() >= deadline {
-            // An absent answer is old firmware or an old LAN bridge: neither
-            // arbitrates, and neither is probed. Blocking a script on that
-            // silence would invent an ownership rule the board does not have.
+        if app.supports_control() {
+            if app.control.is_some() {
+                return Ok(true);
+            }
+            if Instant::now() >= deadline {
+                return Err("the bridge did not report console ownership".to_string());
+            }
+        } else if app.transport != crate::app::Transport::Lan || app.control_announcement_waited {
+            return Ok(false);
+        } else if Instant::now() >= deadline {
+            // Pay the compatibility wait only once per LAN connection. A late
+            // announcement still takes precedence via supports_control above.
+            app.control_announcement_waited = true;
             return Ok(false);
         }
         app.pump();
@@ -2121,6 +2126,18 @@ fn wait_for_control_answer(
     }
 }
 
+/// A CLI action shares the BLE management slot with connect-time reads.
+fn wait_for_control_slot(app: &mut App, deadline: Instant) -> Result<(), String> {
+    while app.talk.waiting().is_some() {
+        if !app.connected() || Instant::now() >= deadline {
+            return Err("the management channel did not become available".to_string());
+        }
+        app.pump();
+        thread::sleep(Duration::from_millis(5));
+    }
+    Ok(())
+}
+
 /// Run one `--control` action and print the mode it left behind.
 fn run_control_action(
     app: &mut App,
@@ -2128,6 +2145,7 @@ fn run_control_action(
     format: Format,
     window: Duration,
 ) -> i32 {
+    let deadline = Instant::now() + window;
     let arbitrated = match wait_for_control_ready(app, window) {
         Ok(arbitrated) => arbitrated,
         Err(why) => return report(format, "control", false, &why),
@@ -2140,6 +2158,9 @@ fn run_control_action(
             "this board does not arbitrate console ownership",
         );
     }
+    if let Err(why) = wait_for_control_slot(app, deadline) {
+        return report(format, "control", false, &why);
+    }
     let notice = match action {
         ControlAction::Claim => app.take_control(),
         ControlAction::Idle => app.take_control_when_idle(),
@@ -2149,36 +2170,62 @@ fn run_control_action(
     if notice.level == crate::event::NoticeLevel::Warn {
         return report(format, "control", false, &notice.text);
     }
-    match wait_for_control_answer(app, action, window) {
+    match wait_for_control_answer(
+        app,
+        action,
+        deadline.saturating_duration_since(Instant::now()),
+    ) {
         Err(why) => report(format, "control", false, &why),
         Ok(()) => report_query(app, crate::device::Query::Control, format),
     }
+}
+
+/// Bring a script's cached ownership up to date before its first UART write.
+pub(crate) fn prepare_serial_input(app: &mut App) -> Result<(), String> {
+    app.pump();
+    if !app.connected() {
+        return Err(app.strings().not_connected.to_string());
+    }
+    wait_for_input_control(app, control_window())
 }
 
 /// Make the console writable for a script before it sends stdin.
 ///
 /// The rule is the TUI's: a free console is taken on connect, a console whose
 /// owner has stopped typing is taken by an idle claim, and one that is in use
-/// fails the send instead of typing into somebody else's shell. Firmware does
-/// not filter raw UART bytes by owner, so this check is the client's job.
+/// fails the send before queuing any UART bytes.
 fn wait_for_input_control(app: &mut App, window: Duration) -> Result<(), String> {
+    let deadline = Instant::now() + window;
     if !wait_for_control_ready(app, window)? {
         return Ok(());
     }
     if !app.control_readonly() {
+        app.control_error = None;
         return Ok(());
     }
     // The connect-time claim is sent on the same edge the status is read; it
     // may already be on its way and needs no second command.
-    if wait_for_control_answer(app, ControlAction::Claim, Duration::from_millis(500)).is_ok() {
+    if app.control_mode() == Some(crate::device::ControlMode::Available)
+        && wait_for_control_answer(
+            app,
+            ControlAction::Claim,
+            Duration::from_millis(500).min(deadline.saturating_duration_since(Instant::now())),
+        )
+        .is_ok()
+    {
         return Ok(());
     }
+    wait_for_control_slot(app, deadline)?;
     let notice = app.take_control_when_idle();
     if notice.level == crate::event::NoticeLevel::Warn {
         return Err(format!("{}; nothing was sent", notice.text));
     }
-    wait_for_control_answer(app, ControlAction::Idle, window)
-        .map_err(|why| format!("{why}; nothing was sent"))
+    wait_for_control_answer(
+        app,
+        ControlAction::Idle,
+        deadline.saturating_duration_since(Instant::now()),
+    )
+    .map_err(|why| format!("{why}; nothing was sent"))
 }
 
 fn wait_and_report(app: &mut App, query: crate::device::Query, format: Format) -> i32 {
@@ -2367,7 +2414,7 @@ fn query_name(query: crate::device::Query) -> &'static str {
 
 /// Print one request's outcome. Returns 1 when it failed, so the exit code
 /// counts failures rather than merely mentioning them.
-fn report(format: Format, what: &str, ok: bool, detail: &str) -> i32 {
+pub(crate) fn report(format: Format, what: &str, ok: bool, detail: &str) -> i32 {
     match format {
         Format::Text => {
             if detail.is_empty() {
@@ -2631,6 +2678,86 @@ pub fn lossy(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_advertised_ownership_blocks_send_but_legacy_ble_remains_writable() {
+        use crate::transport::testing::MemoryLink;
+        for (caps, arbitrated) in [(0, false), (crate::protocol::MGMT_CAP_MULTI_SESSION, true)] {
+            let wire = MemoryLink::ble().with_capabilities(caps);
+            let mut app = App::default();
+            app.connect(wire.link()).unwrap();
+            wait_for_connected(&mut app, Duration::from_secs(1));
+            assert_eq!(
+                wait_for_input_control(&mut app, Duration::ZERO).is_err(),
+                arbitrated
+            );
+            assert_eq!(app.send_bytes(b"test"), !arbitrated);
+        }
+    }
+
+    #[test]
+    fn late_lan_announcement_supersedes_legacy_fallback() {
+        let wire = crate::transport::testing::MemoryLink::lan();
+        let mut app = App::default();
+        app.connect(wire.link()).unwrap();
+        wait_for_connected(&mut app, Duration::from_secs(1));
+        assert_eq!(wait_for_control_ready(&mut app, Duration::ZERO), Ok(false));
+        wire.feed_control("OK control self=2 owner=1 mode=readonly epoch=3 peers=2");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !app.control_announced && Instant::now() < deadline {
+            app.pump();
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(wait_for_control_ready(&mut app, Duration::ZERO), Ok(true));
+        assert!(!app.send_bytes(b"old"));
+    }
+
+    #[test]
+    fn cli_claim_waits_for_connect_time_management_reads() {
+        use crate::device::Query;
+        use crate::protocol::{MGMT_CAP_MULTI_SESSION, MGMT_HEADER_SIZE};
+        use crate::transport::testing::{answer, MemoryLink};
+        let wire = MemoryLink::ble().with_capabilities(MGMT_CAP_MULTI_SESSION);
+        let mut app = App::default();
+        app.connect(wire.link()).unwrap();
+        let bridge = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < deadline {
+                for frame in wire.take_management() {
+                    let id = u32::from_le_bytes(frame[4..8].try_into().unwrap());
+                    let command = std::str::from_utf8(&frame[MGMT_HEADER_SIZE..]).unwrap();
+                    let reply = match command {
+                        "@c?" => "OK control self=2 owner=1 mode=readonly epoch=1 peers=2",
+                        "@c claim" => "OK control self=2 owner=2 mode=control epoch=2 peers=2",
+                        cmd if cmd == Query::BleName.command() => "OK name=Bench custom=yes",
+                        cmd if cmd == Query::Lan.command() => "OK ws=off token=none",
+                        _ => panic!("unexpected management request {command}"),
+                    };
+                    wire.feed_management(answer(id, reply));
+                    if command == "@c claim" {
+                        return;
+                    }
+                }
+                thread::sleep(Duration::from_millis(2));
+            }
+            panic!("no explicit claim reached the bridge");
+        });
+        let result = run_requests(
+            &mut app,
+            &Requests {
+                control: Some(ControlAction::Claim),
+                ..Default::default()
+            },
+            Format::Text,
+            Duration::from_secs(2),
+        );
+        bridge.join().unwrap();
+        assert_eq!(result, 0);
+        assert_eq!(
+            app.control_mode(),
+            Some(crate::device::ControlMode::Control)
+        );
+    }
 
     #[test]
     fn uart_query_returns_the_full_confirmed_format() {

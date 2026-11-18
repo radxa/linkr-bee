@@ -498,6 +498,9 @@ fn handle(
         }
         Action::Exec(run) => crate::exec::cli::run(app, &run, format),
         Action::Send { data } => {
+            if let Err(why) = cli::prepare_serial_input(app) {
+                return cli::report(format, "send", false, &why);
+            }
             let sent = app.send_bytes(data.as_bytes());
             match format {
                 Format::Text => println!(
@@ -584,6 +587,9 @@ fn handle(
 fn resize(app: &mut App, cols: u16, rows: u16) -> Geometry {
     app.geometry.set_size(cols, rows);
     let geometry = app.geometry.geometry();
+    if app.control_readonly() {
+        return geometry;
+    }
     let Some(command) = app.geometry.take_pending_command() else {
         return geometry;
     };

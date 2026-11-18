@@ -796,8 +796,7 @@ pub struct App {
     /// list has not been read yet. It waits for a free question slot.
     pub bonds_read_pending: bool,
     /// Which session owns the shared console, when the board arbitrates it.
-    /// `None` until `@c?` answers, or for a board without the capability —
-    /// both mean "keep the historical behaviour and let typing through".
+    /// A board advertising arbitration must report a grant before input is writable.
     pub control: Option<crate::device::ControlStatus>,
     /// A link came up and ownership has not been asked about yet. It goes
     /// first, before the name and the token: whether this session may type is
@@ -829,6 +828,8 @@ pub struct App {
     /// flag: an old bridge never sends it and the TUI never probes with a
     /// command it would not understand.
     pub control_announced: bool,
+    /// A CLI caller already waited for this LAN connection's optional announcement.
+    pub control_announcement_waited: bool,
     /// Why the last ownership command was refused (`busy`, `not_owner`, …).
     /// Kept for callers without a toast stack — a script must be able to say
     /// what the bridge said instead of printing a mode that did not move.
@@ -1083,6 +1084,7 @@ impl Default for App {
             control_handover: None,
             control_yield: false,
             control_announced: false,
+            control_announcement_waited: false,
             control_error: None,
             bond_refresh_due: None,
             bond_self_write: false,
@@ -1880,6 +1882,7 @@ impl App {
             crate::serial::journal::SerialJournal::new(crate::serial::journal::DEFAULT_CAPACITY);
         self.agent_decoder = crate::views::terminal::Utf8Stream::default();
         let kind = opened.kind;
+        self.reset_control();
         self.session.adopt(opened);
         self.transport = kind;
         self.state = ConnectionState::Connecting;
@@ -3175,17 +3178,6 @@ impl App {
             // A LAN link is the exception: its first ownership frame may have
             // arrived on this same pump, before this edge was noticed, so the
             // state it carried is already this link's answer.
-            if self.transport != Transport::Lan {
-                self.control = None;
-                self.control_announced = false;
-                self.control_handover = None;
-                self.control_yield = false;
-                self.control_claim_in_flight = false;
-                self.held_input.clear();
-                self.control_poll_due = None;
-                self.control_auto_claim = false;
-                self.control_error = None;
-            }
             self.control_read_pending = self.ble_connected() && self.supports_control();
             // A LAN bridge announces ownership as a text frame, which may have
             // arrived on this pump before the state moved to connected. The
@@ -3197,7 +3189,7 @@ impl App {
                     .control
                     .is_some_and(|status| status.mode == crate::device::ControlMode::Available)
             {
-                let _ = self.request_control("claim");
+                let _ = self.request_control("claim idle");
             }
             self.ble_name_read_pending = self.ble_connected();
             self.lan_token_read_pending = self.ble_connected();
@@ -3240,16 +3232,7 @@ impl App {
             }
             self.talk.reset();
             self.management.reset();
-            self.control = None;
-            self.control_read_pending = false;
-            self.control_auto_claim = false;
-            self.control_claim_in_flight = false;
-            self.held_input.clear();
-            self.control_poll_due = None;
-            self.control_handover = None;
-            self.control_yield = false;
-            self.control_announced = false;
-            self.control_error = None;
+            self.reset_control();
             self.ble_name_write_pending = false;
             self.ble_name_read_pending = false;
             self.lan_token_read_pending = false;
@@ -3634,6 +3617,20 @@ impl App {
         self.ble_scan.reset();
     }
 
+    fn reset_control(&mut self) {
+        self.control = None;
+        self.control_read_pending = false;
+        self.control_auto_claim = false;
+        self.control_claim_in_flight = false;
+        self.held_input.clear();
+        self.control_poll_due = None;
+        self.control_handover = None;
+        self.control_yield = false;
+        self.control_announced = false;
+        self.control_error = None;
+        self.control_announcement_waited = false;
+    }
+
     /// Whether the open board arbitrates console ownership.
     ///
     /// Bluetooth answers with capability bit 7; the LAN socket has no
@@ -3653,9 +3650,8 @@ impl App {
     /// Whether typing right now would be refused for want of control.
     pub fn control_readonly(&self) -> bool {
         self.supports_control()
-            && self
-                .control
-                .is_some_and(|status| status.mode != crate::device::ControlMode::Control)
+            && (self.control_yield
+                || self.control_mode() != Some(crate::device::ControlMode::Control))
     }
 
     /// The console's mode, when the board or bridge has said what it is.
@@ -3688,9 +3684,7 @@ impl App {
     ///
     /// Ownership is asked of the bridge, not the target. Bluetooth spells it
     /// `@c …` inside a management frame; the LAN socket spells it `@control …`
-    /// in a text frame. Both reach the same arbiter, and the frame in flight is
-    /// replaced on purpose — a hand-over that waited behind a slow `@i?` would
-    /// land long after the keystroke that asked for it.
+    /// in a text frame. BLE commands wait for the current management request.
     fn send_control(&mut self, action: &str) -> Result<(), String> {
         if !self.connected() {
             return Err(self.strings().not_connected.to_string());
@@ -3706,7 +3700,9 @@ impl App {
             return Err(self.strings().control_wait.to_string());
         }
         // A refusal answers the command being sent now, not the one before it.
-        self.control_error = None;
+        if action != "?" {
+            self.control_error = None;
+        }
         if self.transport == Transport::Lan {
             let command = format!("@control {action}");
             if !self.session.send_control(command.clone()) {
@@ -3940,8 +3936,14 @@ impl App {
                     });
                 }
             }
+            // An older poll may answer while release/yield is on the wire.
+            if self.control_yield
+                && previous.is_some_and(|before| before.epoch == status.epoch)
+                && status.mode == crate::device::ControlMode::Control
+            {
+                return;
+            }
             self.control = Some(status);
-            self.control_error = None;
             self.control_poll_due = Some(Instant::now() + CONTROL_POLL);
             match status.mode {
                 crate::device::ControlMode::Control => {
@@ -3963,7 +3965,9 @@ impl App {
                         // The claim that was out did not stick: ask again on
                         // the strength of the keystroke that is still held.
                         self.control_claim_in_flight = false;
-                        if self.request_control("claim idle").is_err() {
+                        if self.request_control("claim idle").is_ok() {
+                            self.control_claim_in_flight = true;
+                        } else {
                             self.held_input.clear();
                         }
                     } else if std::mem::take(&mut self.control_auto_claim) {
@@ -3971,7 +3975,7 @@ impl App {
                         // the way the web client does. If the link is not up
                         // yet the claim is not lost: it is put back, and the
                         // connect edge or the next status sends it.
-                        if self.request_control("claim").is_err() {
+                        if self.request_control("claim idle").is_err() {
                             self.control_auto_claim = true;
                         }
                     }
@@ -3988,11 +3992,12 @@ impl App {
             return;
         }
         if let Some(reason) = crate::device::control_refusal(text) {
-            if let Some(mut status) = self.control {
-                if status.owner != status.self_id {
-                    status.mode = crate::device::ControlMode::Readonly;
-                }
-                self.control = Some(status);
+            if self.control_yield
+                || matches!(reason, "readonly" | "not_owner" | "stale_epoch" | "busy")
+            {
+                // The bridge rejected this session; only a fresh status can name the owner.
+                self.control = None;
+                self.control_poll_due = Some(Instant::now());
             }
             let was_holding_keystrokes = std::mem::take(&mut self.control_claim_in_flight);
             self.control_yield = false;
@@ -4047,6 +4052,8 @@ impl App {
     /// again once the bridge has replied.
     fn claim_idle_if_held(&mut self) {
         if !self.control_readonly()
+            || self.control.is_none()
+            || self.control_yield
             || self.held_input.is_empty()
             || self.control_claim_in_flight
             || self.talk.waiting().is_some()
@@ -5188,7 +5195,12 @@ impl App {
             // known state. A claim, though, was holding keystrokes, and a
             // claim nobody answered must not leave them held for ever.
             Query::Control => {
-                if self.control_claim_in_flight {
+                if self.control_yield {
+                    self.control = None;
+                    self.control_yield = false;
+                    self.control_poll_due = Some(now);
+                }
+                if self.control_claim_in_flight || !self.held_input.is_empty() {
                     self.control_claim_in_flight = false;
                     self.held_input.clear();
                     self.push_notice(Notice {
@@ -5324,7 +5336,7 @@ impl App {
     /// Send raw bytes. Silent when there is no link, because this is the path a
     /// *keystroke* takes and a toast per character would bury the screen.
     pub fn send_bytes(&mut self, bytes: &[u8]) -> bool {
-        if !self.connected() {
+        if !self.connected() || self.control_readonly() {
             return false;
         }
         if !self.session.send(bytes) {
@@ -9843,7 +9855,7 @@ mod tests {
         ));
         // The answer says "available", so the first session takes it.
         assert!(pump_until(&mut app, |app| app.control.is_some()));
-        let claim = next_control_frame(&mut app, &wire, b"@c claim");
+        let claim = next_control_frame(&mut app, &wire, b"@c claim idle");
         wire.feed_management(answer(
             claim,
             "OK control self=1 owner=1 mode=control epoch=2 peers=1\r\n",
@@ -9971,7 +9983,7 @@ mod tests {
             "OK control self=1 owner=0 mode=available epoch=1 peers=1\r\n",
         ));
         assert!(pump_until(&mut app, |app| app.control.is_some()));
-        let claim = next_control_frame(&mut app, &wire, b"@c claim");
+        let claim = next_control_frame(&mut app, &wire, b"@c claim idle");
         wire.feed_management(answer(
             claim,
             "OK control self=1 owner=1 mode=control epoch=2 peers=1\r\n",
@@ -10053,7 +10065,7 @@ mod tests {
         assert!(pump_until(&mut app, |app| app.control.is_some()));
         assert!(app.supports_control());
         assert!(pump_until(&mut app, |_| {
-            take_control_contains(&wire, "@control claim")
+            take_control_contains(&wire, "@control claim idle")
         }));
         wire.feed_control("OK control self=1 owner=1 mode=control epoch=2 peers=1\r\n");
         assert!(pump_until(&mut app, |app| {
@@ -10064,6 +10076,25 @@ mod tests {
             app.control_badge().map(|(text, _)| text),
             Some("In control".to_string())
         );
+    }
+
+    #[test]
+    fn a_lan_write_refusal_immediately_blocks_input_until_status_is_refreshed() {
+        let (mut app, wire) = connected_over_lan(Lang::En);
+        wire.feed_control("OK control self=1 owner=1 mode=control epoch=1 peers=2");
+        assert!(pump_until(&mut app, |app| app.control.is_some()));
+        wire.feed_control("ERR control=readonly");
+        assert!(pump_until(&mut app, |app| app.control_refusal() == Some("readonly")));
+        assert!(app.control_readonly());
+        assert!(!app.send_bytes(b"stale"));
+        assert!(pump_until(&mut app, |_| take_control_contains(
+            &wire,
+            "@control ?"
+        )));
+        wire.feed_control("OK control self=1 owner=2 mode=readonly epoch=2 peers=2");
+        assert!(pump_until(&mut app, |app| app.control_mode()
+            == Some(crate::device::ControlMode::Readonly)));
+        assert_eq!(wire.sent_len(), 0);
     }
 
     /// A read-only LAN session holds the first keystroke, asks with the
@@ -10204,7 +10235,7 @@ mod tests {
             app.pump();
         }
         assert!(
-            !crate::transport::testing::asked_includes(&wire, b"@c claim"),
+            !crate::transport::testing::asked_includes(&wire, b"@c claim idle"),
             "the console became free; the user never asked for it"
         );
     }

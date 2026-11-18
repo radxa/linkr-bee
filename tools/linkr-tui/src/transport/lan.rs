@@ -35,12 +35,13 @@
 use std::collections::VecDeque;
 use std::io;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use futures::{SinkExt, StreamExt};
+use futures::{FutureExt, SinkExt, StreamExt};
 use tokio::time::Instant;
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{Bytes, Message};
 use tokio_tungstenite::MaybeTlsStream;
 use tokio_tungstenite::WebSocketStream;
 
@@ -111,21 +112,6 @@ const _: () = assert!(
     UPLINK_BURST_BYTES <= 8 * 244,
     "the burst has to fit the firmware's inbound queue"
 );
-
-/// How many buffered bytes are held back from the socket before the sender
-/// stops taking more. Bounded for the same reason the BLE write backlog is: an
-/// unbounded one lets the interface queue a megabyte towards a bridge that has
-/// stopped listening.
-///
-/// Bytes, not messages: one message from the interface can be a paste of any
-/// size, so the cap is enforced where bytes wait — `pending` in [`carry`] — and
-/// not on the channel between the writer thread and the reactor.
-const UPLINK_BACKLOG: usize = 64 * 1024;
-
-/// How many messages the hand-off channel between the writer thread and the
-/// reactor holds. Small on purpose: the hand-off is a thread boundary, while
-/// the backlog that matters is measured in bytes — see [`UPLINK_BACKLOG`].
-const UPLINK_MESSAGES: usize = 64;
 
 /// The waits between attempts at a dial that could succeed if tried again.
 ///
@@ -384,40 +370,15 @@ impl Link for LanLink {
         validate_dial(&host, self.token.as_deref())
             .map_err(|why| io::Error::new(io::ErrorKind::InvalidInput, why))?;
 
-        // Three channels meet here: the socket's bytes come back as `Inbound`
-        // (so a notice can be told apart from target output), bytes to send go
-        // out over the sync channel `spawn_writer` owns, and the dial reports
-        // success or its reason once.
         let (inbound_tx, inbound_rx) = mpsc::channel::<Inbound>();
-        let (outbound_tx, outbound_rx) = mpsc::channel::<Outbound>();
         let (ready_tx, ready_rx) = mpsc::channel::<io::Result<()>>();
-        let (to_socket_tx, to_socket_rx) = tokio::sync::mpsc::channel::<Outbound>(UPLINK_MESSAGES);
-        // Ownership commands get their own reactor queue. Sharing the target
-        // queue would put a Release behind up to eight seconds of paced paste,
-        // and a hand-over that late is a hand-over the user has already given
-        // up on.
-        let (control_tx, control_rx) = tokio::sync::mpsc::channel::<String>(UPLINK_MESSAGES);
-
+        let uplink = Arc::new(LanUplink::default());
+        let reactor = uplink.clone();
         let url = normalize_url(&host);
         let token = self.token.clone();
         thread::spawn(move || {
-            serve(&url, token, ready_tx, inbound_tx, to_socket_rx, control_rx);
-        });
-        // The interface's writer is synchronous and sits outside every runtime,
-        // so the hand-off to the reactor gets a thread of its own: this is the
-        // one place `blocking_send` is legal.
-        thread::spawn(move || {
-            while let Ok(message) = outbound_rx.recv() {
-                let sent = match message {
-                    Outbound::Bytes(bytes) => {
-                        to_socket_tx.blocking_send(Outbound::Bytes(bytes)).is_ok()
-                    }
-                    Outbound::Control(command) => control_tx.blocking_send(command).is_ok(),
-                };
-                if !sent {
-                    break;
-                }
-            }
+            serve(&url, token, ready_tx, inbound_tx, &reactor);
+            reactor.close();
         });
 
         // `open` returning means "connected" everywhere else in the product,
@@ -436,9 +397,7 @@ impl Link for LanLink {
                     leftover: VecDeque::new(),
                     done: false,
                 }),
-                Box::new(LanWriter {
-                    outbound: outbound_tx,
-                }),
+                Box::new(LanWriter(uplink)),
             )),
         }
     }
@@ -488,17 +447,83 @@ enum Inbound {
     End,
 }
 
-/// One thing on its way to the socket.
-///
-/// The bridge takes target bytes as binary frames and ownership commands as
-/// text frames, so the two cannot share one queue of `Vec<u8>`: only the type
-/// says which opcode to use, and guessing from the contents would one day send
-/// a line beginning with `@control ` to the target's shell.
-enum Outbound {
-    /// Target traffic, paced into the binary stream.
-    Bytes(Vec<u8>),
-    /// One whole ownership command, sent as its own text frame.
-    Control(String),
+/// A single queue of unsent UART batches, from the session to the socket.
+/// Control frames have priority; releasing the console retires all batches in
+/// the same critical section. No writer or forwarding thread holds older input.
+#[derive(Debug, Default)]
+pub struct LanUplink {
+    queue: Mutex<UplinkQueue>,
+    wake: tokio::sync::Notify,
+}
+
+#[derive(Debug, Default)]
+struct UplinkQueue {
+    data: VecDeque<Bytes>,
+    control: VecDeque<String>,
+    closed: bool,
+    readonly: bool,
+    epoch: Option<u32>,
+    relinquished: Option<u32>,
+}
+
+impl LanUplink {
+    pub(super) fn send(&self, bytes: Vec<u8>) -> bool {
+        let mut q = self.queue.lock().unwrap();
+        if q.closed || q.readonly {
+            return false;
+        }
+        if !bytes.is_empty() {
+            q.data.push_back(bytes.into());
+            self.wake.notify_one();
+        }
+        true
+    }
+
+    pub(super) fn control(&self, command: String) -> bool {
+        let mut q = self.queue.lock().unwrap();
+        if q.closed {
+            return false;
+        }
+        if command == "@control release" || command.starts_with("@control yield ") {
+            q.data.clear();
+            q.readonly = true;
+            q.relinquished = q.epoch;
+        }
+        q.control.push_back(command);
+        self.wake.notify_one();
+        true
+    }
+
+    fn observe(&self, text: &str) {
+        let mut q = self.queue.lock().unwrap();
+        if let Some(status) = crate::device::parse_control_status(text) {
+            let changed = q.epoch.is_some_and(|epoch| epoch != status.epoch);
+            if changed {
+                q.relinquished = None;
+            }
+            q.readonly = status.mode != crate::device::ControlMode::Control
+                || q.relinquished == Some(status.epoch);
+            if changed || q.readonly {
+                q.data.clear();
+            }
+            q.epoch = Some(status.epoch);
+        } else if let Some(reason) = crate::device::control_refusal(text) {
+            if matches!(reason, "readonly" | "not_owner" | "stale_epoch" | "busy")
+                || q.relinquished.is_some()
+            {
+                q.readonly = true;
+                q.data.clear();
+                q.relinquished = None; // a later status settles a refused hand-over
+            }
+        }
+    }
+
+    fn close(&self) {
+        let mut q = self.queue.lock().unwrap();
+        q.closed = true;
+        q.data.clear();
+        self.wake.notify_one();
+    }
 }
 
 /// Why a dial failed, and whether trying again could help.
@@ -516,8 +541,7 @@ fn serve(
     token: Option<String>,
     ready: Sender<io::Result<()>>,
     inbound: Sender<Inbound>,
-    outbound: tokio::sync::mpsc::Receiver<Outbound>,
-    control: tokio::sync::mpsc::Receiver<String>,
+    uplink: &LanUplink,
 ) {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -564,7 +588,7 @@ fn serve(
             // the connection, instead of carrying a link whose reader has gone.
             return;
         }
-        carry(socket, &inbound, outbound, control).await;
+        carry(socket, &inbound, uplink).await;
     });
     drop(runtime);
 }
@@ -676,140 +700,67 @@ fn classify(why: tokio_tungstenite::tungstenite::Error, url: &str) -> Failure {
 async fn carry(
     mut socket: WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
     inbound: &Sender<Inbound>,
-    mut outbound: tokio::sync::mpsc::Receiver<Outbound>,
-    mut control: tokio::sync::mpsc::Receiver<String>,
+    uplink: &LanUplink,
 ) {
-    let mut pending: VecDeque<u8> = VecDeque::new();
     let mut pacer = Pacer::uplink();
-
     loop {
-        // Ownership first, whenever one is waiting: it is one small frame and
-        // the user is watching for its effect, while the pacer below may be
-        // holding seconds of paste. `try_recv` keeps this from blocking the
-        // paced send.
-        match control.try_recv() {
-            Ok(command) => {
-                if !send_control_frame(&mut socket, Some(command), inbound).await {
-                    return;
-                }
-                continue;
-            }
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
-            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                let _ = inbound.send(Inbound::End);
+        // Even with a continuously writable socket, observe a queued revocation
+        // before taking the next UART chunk.
+        if let Some(frame) = socket.next().now_or_never() {
+            if !absorb(frame, inbound, uplink) {
                 return;
             }
         }
-        // Send first, and outside the wait below, so the socket is never
-        // borrowed by two futures at once.
-        let chunk_len = pending.len().min(FRAME_MAX_BYTES);
-        if chunk_len > 0 {
-            let now = Instant::now();
-            let wait = pacer.delay(chunk_len, now);
-            if wait.is_zero() {
-                let chunk: Vec<u8> = pending.drain(..chunk_len).collect();
-                if socket.send(Message::Binary(chunk.into())).await.is_err() {
-                    let _ = inbound.send(Inbound::End);
-                    return;
-                }
-                pacer.spend(chunk_len, Instant::now());
-                continue;
+        let mut delay = None;
+        let message = {
+            let mut q = uplink.queue.lock().unwrap();
+            if q.closed {
+                break;
             }
-            // Not yet: wait for whichever comes first — the pacer's time, more
-            // bytes, or a frame from the bridge. More bytes only while there is
-            // room under the cap; with the queue full they stay in their own
-            // channel, which is the backpressure the cap exists for.
-            tokio::select! {
-                frame = socket.next() => {
-                    if !absorb(frame, inbound) {
-                        return;
+            if let Some(command) = q.control.pop_front() {
+                Some(Message::Text(command.into()))
+            } else if let Some(batch) = q.data.front_mut() {
+                let len = batch.len().min(FRAME_MAX_BYTES);
+                let wait = pacer.delay(len, Instant::now());
+                if wait.is_zero() {
+                    let chunk = batch.split_to(len);
+                    if batch.is_empty() {
+                        q.data.pop_front();
                     }
+                    pacer.spend(len, Instant::now());
+                    Some(Message::Binary(chunk))
+                } else {
+                    delay = Some(wait);
+                    None
                 }
-                message = outbound.recv(), if pending.len() < UPLINK_BACKLOG => {
-                    if !send_outbound(message, &mut pending, inbound) {
-                        return;
-                    }
-                }
-                command = control.recv() => {
-                    if !send_control_frame(&mut socket, command, inbound).await {
-                        return;
-                    }
-                }
-                () = tokio::time::sleep(wait) => {}
+            } else {
+                None
+            }
+        };
+        if let Some(frame) = message {
+            if socket.send(frame).await.is_err() {
+                break;
             }
             continue;
         }
-
-        // Nothing is held back here — `chunk_len` was zero — so there is room
-        // by definition, and the paced branch above is the only place
-        // `pending` grows where the cap has to be consulted.
         tokio::select! {
             frame = socket.next() => {
-                if !absorb(frame, inbound) {
+                if !absorb(frame, inbound, uplink) {
                     return;
                 }
             }
-            message = outbound.recv() => {
-                if !send_outbound(message, &mut pending, inbound) {
-                    return;
-                }
-            }
-            command = control.recv() => {
-                if !send_control_frame(&mut socket, command, inbound).await {
-                    return;
-                }
-            }
+            _ = uplink.wake.notified() => {}
+            _ = tokio::time::sleep(delay.unwrap_or_default()), if delay.is_some() => {}
         }
     }
-}
-
-/// Put one outgoing target message on the socket, or hold its bytes for the
-/// pacer.
-fn send_outbound(
-    message: Option<Outbound>,
-    pending: &mut VecDeque<u8>,
-    inbound: &Sender<Inbound>,
-) -> bool {
-    match message {
-        Some(Outbound::Bytes(bytes)) => {
-            pending.extend(bytes);
-            true
-        }
-        // Ownership never travels on this channel; if it ever did, refusing it
-        // is better than typing `@control …` into somebody's shell prompt.
-        Some(Outbound::Control(_)) => true,
-        None => {
-            let _ = inbound.send(Inbound::End);
-            false
-        }
-    }
-}
-
-/// Send one ownership frame as a text message. `false` means the pump is over.
-async fn send_control_frame(
-    socket: &mut WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
-    command: Option<String>,
-    inbound: &Sender<Inbound>,
-) -> bool {
-    match command {
-        Some(command) => {
-            if socket.send(Message::Text(command.into())).await.is_err() {
-                let _ = inbound.send(Inbound::End);
-                return false;
-            }
-            true
-        }
-        None => {
-            let _ = inbound.send(Inbound::End);
-            false
-        }
-    }
+    let _ = inbound.send(Inbound::End);
 }
 
 /// Fold one frame from the bridge. `false` means the pump is over.
 fn absorb(
     frame: Option<Result<Message, tokio_tungstenite::tungstenite::Error>>,
     inbound: &Sender<Inbound>,
+    uplink: &LanUplink,
 ) -> bool {
     match frame {
         None => {
@@ -838,6 +789,7 @@ fn absorb(
             let text = text.to_string();
             let trimmed = text.trim_start();
             if trimmed.starts_with("OK control ") || trimmed.starts_with("ERR control=") {
+                uplink.observe(trimmed);
                 inbound.send(Inbound::Control(text)).is_ok()
             } else {
                 inbound.send(Inbound::Notice(text)).is_ok()
@@ -901,27 +853,40 @@ impl LinkReader for LanReader {
 }
 
 /// Bytes towards the bridge.
-struct LanWriter {
-    outbound: Sender<Outbound>,
+struct LanWriter(Arc<LanUplink>);
+
+impl Drop for LanWriter {
+    fn drop(&mut self) {
+        self.0.close();
+    }
 }
 
 impl LinkWriter for LanWriter {
+    fn lan_uplink(&self) -> Option<Arc<LanUplink>> {
+        Some(self.0.clone())
+    }
+
     fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
-        self.outbound
-            .send(Outbound::Bytes(buf.to_vec()))
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "the LAN link is no longer up"))
+        if self.0.send(buf.to_vec()) {
+            Ok(())
+        } else {
+            Err(io::Error::other("LAN output is closed or read-only"))
+        }
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        // Nothing is buffered here: the pacer holds bytes on the reactor side,
-        // and claiming otherwise would let a caller believe it had pushed them.
         Ok(())
     }
 
     fn write_control(&mut self, command: &str) -> io::Result<()> {
-        self.outbound
-            .send(Outbound::Control(command.to_string()))
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "the LAN link is no longer up"))
+        if self.0.control(command.to_owned()) {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "the LAN link is no longer up",
+            ))
+        }
     }
 }
 
@@ -970,17 +935,20 @@ mod tests {
     #[test]
     fn ownership_text_is_state_and_other_text_is_a_notice() {
         let (inbound, received) = mpsc::channel();
+        let uplink = LanUplink::default();
         let frame = |text: &str| Some(Ok(Message::Text(text.into())));
 
         assert!(absorb(
             frame("OK control self=1 owner=0 mode=available epoch=1 peers=1\r\n"),
-            &inbound
+            &inbound,
+            &uplink
         ));
         assert!(absorb(
             frame("@event wifi operation=0 phase=off result=0\r\n"),
-            &inbound
+            &inbound,
+            &uplink
         ));
-        assert!(absorb(frame("ERR control=busy\r\n"), &inbound));
+        assert!(absorb(frame("ERR control=busy\r\n"), &inbound, &uplink));
 
         match received.try_recv() {
             Ok(Inbound::Control(text)) => assert!(text.starts_with("OK control ")),
@@ -994,6 +962,78 @@ mod tests {
             Ok(Inbound::Control(text)) => assert_eq!(text.trim(), "ERR control=busy"),
             other => panic!("a refusal was not routed as control: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn handover_discards_the_entire_paced_paste_before_the_next_grant() {
+        use crate::transport::LinkHandle;
+        use tokio::net::TcpListener;
+        use tokio::time::timeout;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let host = listener.local_addr().unwrap().to_string();
+        let dial = tokio::task::spawn_blocking(move || {
+            LinkHandle::start(Box::new(LanLink::new(host, None)))
+        });
+        timeout(Duration::from_secs(4), async {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut peer = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            peer.send(Message::Text(AUTH_NONE.into())).await.unwrap();
+            let link = dial.await.unwrap().unwrap();
+            peer.send(Message::Text(
+                "OK control self=1 owner=1 mode=control epoch=1 peers=2".into(),
+            ))
+            .await
+            .unwrap();
+            while !link
+                .drain()
+                .iter()
+                .any(|e| matches!(e, LinkEvent::Control(_)))
+            {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+            // Exceed both the old 64 KiB byte backlog and its 64-message channel.
+            for _ in 0..128 {
+                assert!(link.send(vec![0; 4096]));
+            }
+            assert!(matches!(peer.next().await, Some(Ok(Message::Binary(_)))));
+            assert!(link.send_control("@control yield 2".into()));
+            loop {
+                match peer.next().await.unwrap().unwrap() {
+                    Message::Binary(_) => continue, // already on the wire
+                    Message::Text(text) if text == "@control yield 2" => break,
+                    frame => panic!("unexpected frame {frame:?}"),
+                }
+            }
+            assert!(!link.send(b"stale".to_vec()));
+            peer.send(Message::Text(
+                "OK control self=1 owner=2 mode=readonly epoch=2 peers=2".into(),
+            ))
+            .await
+            .unwrap();
+            assert!(timeout(Duration::from_millis(175), peer.next())
+                .await
+                .is_err());
+            peer.send(Message::Text(
+                "OK control self=1 owner=1 mode=control epoch=3 peers=2".into(),
+            ))
+            .await
+            .unwrap();
+            while !link
+                .drain()
+                .iter()
+                .any(|e| matches!(e, LinkEvent::Control(text) if text.contains("epoch=3")))
+            {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+            assert!(link.send(b"fresh".to_vec()));
+            assert_eq!(
+                peer.next().await.unwrap().unwrap().into_data().as_ref(),
+                b"fresh"
+            );
+        })
+        .await
+        .expect("control and fresh input must not wait behind the paste");
     }
 
     /// The dialogue is the firmware's, frame for frame. Asserted against the

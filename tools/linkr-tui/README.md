@@ -273,11 +273,12 @@ cargo run -- --ble-name Linkr --serve
 The shared console is part of the shell surface, not only the terminal.
 `--query-control` reports who owns it, `--control claim` takes it, `--control
 idle` takes it only when the owner has stopped typing, and `--control release`
-or `--control yield` gives it up or hands it back. Before `--send` writes its
-first byte it waits for the console the same way a keystroke does; a console
-that is still being typed into fails the send instead of delivering half a
-command into somebody else's shell. Firmware does not filter raw UART bytes by
-owner, so this check belongs to the client.
+or `--control yield` gives it up or hands it back. On an arbitrated link,
+`--send` and `--exec` wait for ownership before writing. If an active session holds the console, or a BLE
+board advertises arbitration but never reports its owner, the command fails
+before sending input. An ownership refusal before `--exec` dispatch is
+reported as `control_refused` in JSON. Releasing or handing over a LAN
+console discards the portion of a paste still waiting to be sent.
 
 The advertised BLE name has an entry in the terminal as well: the network view
 carries the current name, *Rename*, *Restore default* and *Read name*. A name
