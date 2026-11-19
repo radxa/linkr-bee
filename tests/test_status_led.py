@@ -21,11 +21,17 @@ class StatusLedTests(unittest.TestCase):
         end = source.index("#elif DT_HAS_ALIAS(led0)", start)
         (directory / "status_led_functions.inc").write_text(source[start:end])
         cls.binary = directory / "status-led-tests"
-        subprocess.run([
+        compile_command = [
             *shlex.split(os.environ.get("CC", "cc")), "-std=c11",
             "-Wall", "-Wextra", "-Werror", "-I", str(directory),
             str(ROOT / "tests/status_led_harness.c"), "-o", str(cls.binary),
-        ], check=True)
+        ]
+        subprocess.run(compile_command, check=True)
+        cls.manual_binary = directory / "status-led-manual-tests"
+        subprocess.run(
+            compile_command[:-1] + [str(cls.manual_binary),
+                                    "-DCONFIG_LINKR_BLE_BRIDGE_RGB_MANUAL_ONLY"],
+            check=True)
 
     def check_scenario(self, scenario):
         subprocess.run([str(self.binary), str(scenario)], check=True, timeout=5)
@@ -68,3 +74,6 @@ class StatusLedTests(unittest.TestCase):
 
     def test_idle_led_is_solid_white(self):
         self.check_scenario(12)
+
+    def test_manual_only_board_stays_dark_until_set(self):
+        subprocess.run([str(self.manual_binary), "13"], check=True, timeout=5)

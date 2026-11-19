@@ -3,7 +3,7 @@
 set -eu
 
 repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
-boards=${BOARD:-"esp32c3_supermini esp32c3_devkitm esp32c3_devkitc esp32c5_devkitc/esp32c5/hpcore linkr_bee_x1_0 esp32_devkitc/esp32/procpu"}
+boards=${BOARD:-"esp32c3_supermini esp32c3_devkitm esp32c3_devkitc esp32c5_devkitc/esp32c5/hpcore linkr_bee_x1_0 esp32_devkitc/esp32/procpu esp32s3_devkitc/esp32s3/procpu"}
 
 python3 -m unittest discover -s "$repo_dir/tests" -v
 
@@ -53,7 +53,7 @@ for board in $boards; do
   if grep -Eq '^CONFIG_SOC_SERIES_ESP32(C3|C5)=y$' "$config"; then
     grep -qx 'CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=y' "$config"
   fi
-  if grep -qx 'CONFIG_SOC_SERIES_ESP32C3=y' "$config"; then
+  if grep -Eq '^CONFIG_SOC_SERIES_ESP32(C3|S3)=y$' "$config"; then
     grep -qx 'CONFIG_ESP32_BT_CTLR_LE_SECURITY_ENABLE=y' "$config"
   fi
   if [ "$board" = "linkr_bee_x1_0" ]; then
@@ -108,6 +108,39 @@ for board in $boards; do
       0x42*) ;;
       *)
         echo "PSRAM buffers are not in external RAM (got '${ext_ram_start:-nothing}')" >&2
+        exit 1
+        ;;
+    esac
+  fi
+  # The bench S3 target runs from the N16R8 module's 8 MB octal PSRAM and must
+  # keep the same rules as C5: data buffers in external RAM, WiFi pools in
+  # internal SRAM. The RGB status LED is an alias in the board overlay, so a
+  # missing alias silently leaves the large LED dark.
+  if grep -qx 'CONFIG_SOC_SERIES_ESP32S3=y' "$config"; then
+    grep -qx 'CONFIG_LINKR_BLE_BRIDGE_RGB_STATUS_LED=y' "$config"
+    # The two UART0 LEDs carry the traffic indication, so the addressable
+    # pixel must stay a dark-by-default user light on this board.
+    grep -qx 'CONFIG_LINKR_BLE_BRIDGE_RGB_MANUAL_ONLY=y' "$config"
+    # The YD-ESP32-S3 pixel is RGBW: a 24-bit frame misaligns its shift
+    # register (red reads as yellow, the pixel cannot be turned off).
+    grep -q 'channel-count = < 0x4 >' "$build_dir/zephyr/zephyr.dts"
+    grep -qx 'CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y' "$config"
+    grep -qx 'CONFIG_ESP_SPIRAM=y' "$config"
+    grep -qx 'CONFIG_ESP_SPIRAM_SIZE=8388608' "$config"
+    grep -qx 'CONFIG_SPIRAM_TYPE_ESPPSRAM64=y' "$config"
+    grep -qx 'CONFIG_SPIRAM_MODE_OCT=y' "$config"
+    grep -qx 'CONFIG_SPIRAM_SPEED_80M=y' "$config"
+    grep -qx '# CONFIG_ESP_SPIRAM_MEMTEST is not set' "$config"
+    grep -qx 'CONFIG_ESP_WIFI_HEAP_SYSTEM=y' "$config"
+    grep -qx '# CONFIG_ESP_WIFI_HEAP_SPIRAM is not set' "$config"
+    grep -qx '# CONFIG_ESP32_WIFI_NET_ALLOC_SPIRAM is not set' "$config"
+    # .ext_ram.bss sits at 0x3Cxxxxxx on this SoC, not in internal SRAM.
+    ext_ram_start=$(awk '/_ext_ram_bss_start = ABSOLUTE/ {print $1; exit}' \
+      "$build_dir/zephyr/zephyr.map")
+    case "$ext_ram_start" in
+      0x3c*) ;;
+      *)
+        echo "S3 PSRAM buffers are not in external RAM (got '${ext_ram_start:-nothing}')" >&2
         exit 1
         ;;
     esac

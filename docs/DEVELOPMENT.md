@@ -124,6 +124,32 @@ existing services and client limits with smaller bounded queues:
 | C3 / Bee X1.0 | 8 dynamic WiFi RX/TX buffers, 40 KiB WiFi heap reservation, 8 chunks per BLE peer, 4 KiB deferred logs, 4 KiB HTTP/system/connect stacks |
 | C5 | 6 dynamic WiFi RX/TX buffers, 36 KiB WiFi and 44000 B Bluetooth heap reservations, 12 MSYS-2 blocks, 8 controller ACL buffers of 255 bytes, 20 network buffers and 10 packet descriptors per direction |
 | WROOM | Existing 52000 B system heap, 4 KiB UART capture, 4 chunks per BLE peer, 1 KiB LAN rings, 4 KiB HTTP and 3 KiB LAN client stacks |
+| YD-ESP32-S3 (bench) | 7 MiB PSRAM heap; log ring, WebDAV chunk, BLE peer/management queues and 2 × 16 KiB LAN rings in PSRAM; 16 KiB UART capture and the WiFi pools in DRAM; 5 KiB HTTP/connect/mgmt stacks |
+
+The bench target `esp32s3_devkitc/esp32s3/procpu` with
+`boards/esp32s3_devkitc_esp32s3_procpu.{conf,overlay}` describes the VCC-GND
+YD-ESP32-S3 (N16R8): 16 MB flash, 8 MB octal PSRAM, an addressable RGB LED on
+GPIO48 and two single-colour TX/RX LEDs that sit on the UART0 lines
+(GPIO43/44). The pixel is a four-channel RGBW part in the SK6812 family
+(32 bits per pixel), so the overlay
+sets `channel-count = <4>`; with the X1 board's 24-bit frame the shift register
+is one byte short, red leaks into green and the pixel cannot be turned off. The
+LED nets to GPIO48 only through a solder bridge that the factory leaves open,
+so close that bridge before the LED can light.
+UART0 is therefore the bridge UART, so those two LEDs show live
+bridge traffic in each direction. Because that is this board's data
+indication, the addressable RGB is not a second status light:
+`RGB_MANUAL_ONLY` keeps it dark until the management `@l` command sets a
+colour, holds that colour instead of previewing for five seconds, and never
+blinks on UART activity. The console moves to the native USB
+Serial/JTAG port. The CH343 port then carries bridge data instead of logs,
+and the ROM loader still flashes over either USB port. Connect the SBC to the
+UART0 header pins with the CH343 port unplugged and power the board from the
+native USB port: GPIO44 is shared with the CH343 TXD output, so two drivers on
+that net would fight. Build it with `xtensa-espressif_esp32s3_zephyr-elf`
+SDK 1.0.1 and
+`west build -p always -b esp32s3_devkitc/esp32s3/procpu linkr-bee`. This target
+is a bench configuration and is not part of the release matrix.
 
 Bee X1.0 additionally uses a 2 KiB main stack and a 1 KiB logging stack. Its
 Zephyr 4.5 diagnostic runs measured 1092 B and 732 B respectively during idle,

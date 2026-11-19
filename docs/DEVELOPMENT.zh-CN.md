@@ -118,6 +118,25 @@ Zephyr 4.5 的射频与网络代码占用更多 SRAM。默认配置保留原有�
 | C3 / Bee X1.0 | WiFi 动态 RX/TX 各 8 个、WiFi 堆预留 40 KiB、每个 BLE peer 8 块、延迟日志 4 KiB、HTTP/系统/连接线程栈各 4 KiB |
 | C5 | WiFi 动态 RX/TX 各 6 个、WiFi 堆预留 36 KiB、Bluetooth 堆预留 44000 B、12 个 MSYS-2 块、8 个 255 B 控制器 ACL 缓冲、网络缓冲各 20 个、包描述符各 10 个 |
 | WROOM | 保持 52000 B 系统堆，UART 接收 4 KiB、每个 BLE peer 4 块、LAN 环形缓冲 1 KiB、HTTP 栈 4 KiB、LAN 客户端栈 3 KiB |
+| YD-ESP32-S3（台架） | 7 MiB PSRAM 堆；日志环形缓冲、WebDAV 分块、BLE peer/管理队列以及 2 × 16 KiB LAN 环形缓冲放入 PSRAM；16 KiB UART 接收与 WiFi 缓冲池留在 DRAM；HTTP/连接/管理线程栈各 5 KiB |
+
+台架目标 `esp32s3_devkitc/esp32s3/procpu` 配合
+`boards/esp32s3_devkitc_esp32s3_procpu.{conf,overlay}` 描述 VCC-GND
+YD-ESP32-S3（N16R8）：16 MB flash、8 MB 八线 PSRAM、GPIO48 上的可寻址 RGB
+灯，以及接在 UART0 线路（GPIO43/44）上的两颗单色 TX/RX 灯。这颗灯是 SK6812 系列的四通道
+RGBW 灯（每像素 32 位），overlay 里必须写 `channel-count = <4>`：沿用 X1 的 24
+位帧会少一个字节，导致红色串到绿色（红变黄）且无法关灯。灯与 GPIO48 之间
+隔着一处出厂默认断开的焊桥，必须先短接这处焊桥，灯才能点亮。
+因此 UART0 作为桥接串口，这两颗灯会按方向显示实时桥接流量。数据指示已经由它们
+承担，所以可寻址 RGB 不再充当第二个状态灯：`RGB_MANUAL_ONLY` 让它默认熄灭，
+只有管理命令 `@l` 设置颜色后才亮，并一直保持该颜色（不再 5 秒后回到状态色），
+也不随串口活动闪烁。控制台改到原生 USB
+Serial/JTAG 口。CH343 口此后传输桥接数据而不再输出日志，ROM 下载模式仍可通过
+任一 USB 口烧录。连接 SBC 时请拔掉 CH343 口，只用原生 USB 口供电，因为
+GPIO44 与 CH343 的 TXD 输出共用，两路同时驱动会相互冲突。使用 SDK 1.0.1 的
+`xtensa-espressif_esp32s3_zephyr-elf`
+工具链，以 `west build -p always -b esp32s3_devkitc/esp32s3/procpu linkr-bee`
+构建。该目标是台架配置，不进入发布矩阵。
 
 Bee X1.0 另外将主线程栈设为 2 KiB、日志线程栈设为 1 KiB。Zephyr 4.5 诊断镜像在
 空闲、BLE 管理与数据收发、WiFi 扫描及 1500000 波特率 UART 回环中，分别测得

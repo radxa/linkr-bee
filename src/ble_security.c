@@ -15,9 +15,10 @@ LOG_MODULE_REGISTER(linkr_ble_security, LOG_LEVEL_INF);
  * C2/C5/C6/H2 use the newer ESP32_BT_LE_* menu (see the matching overrides in
  * Kconfig). Both paths default off because BT_CTLR_LE_ENC is unset when the
  * Espressif controller is used instead of Zephyr's own BT_CTLR. */
-#if (defined(CONFIG_SOC_SERIES_ESP32C3) || defined(CONFIG_SOC_SERIES_ESP32)) && \
+#if (defined(CONFIG_SOC_SERIES_ESP32C3) || defined(CONFIG_SOC_SERIES_ESP32S3) || \
+     defined(CONFIG_SOC_SERIES_ESP32)) &&                                      \
 	!defined(CONFIG_ESP32_BT_CTLR_LE_SECURITY_ENABLE)
-#error "ESP32/ESP32-C3 pairing requires controller link encryption support"
+#error "ESP32/ESP32-C3/S3 pairing requires controller link encryption support"
 #endif
 
 #if (defined(CONFIG_SOC_SERIES_ESP32C2) || defined(CONFIG_SOC_SERIES_ESP32C5) || \

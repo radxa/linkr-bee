@@ -34,3 +34,14 @@ properties:
     description: |
       Byte order expected by the LED controller. WS2812-compatible parts
       (including the EY-PB1615RGBIC) take GRB.
+
+  channel-count:
+    type: int
+    default: 3
+    enum: [3, 4]
+    description: |
+      Bytes per pixel. Three-channel WS2812 parts take 24 bits per pixel;
+      four-channel RGBW parts take 32 bits and need the fourth byte, otherwise
+      the shift register stays misaligned and a channel keeps whatever the
+      previous frame left in it. A 32-bit frame is harmless on a 24-bit part
+      with a single pixel: the extra byte is forwarded and discarded.

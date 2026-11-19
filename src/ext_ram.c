@@ -28,7 +28,8 @@
 
 LOG_MODULE_REGISTER(linkr_ext_ram, LOG_LEVEL_INF);
 
-#if defined(CONFIG_ESP_SPIRAM) && defined(CONFIG_SOC_SERIES_ESP32C5)
+#if defined(CONFIG_ESP_SPIRAM) && \
+	(defined(CONFIG_SOC_SERIES_ESP32C5) || defined(CONFIG_SOC_SERIES_ESP32S3))
 
 #include <esp_psram.h>
 
@@ -67,8 +68,9 @@ int linkr_ext_ram_verify_heap(void)
 #else
 
 /*
- * Other targets have no PSRAM, so .ext_ram.bss expands to nothing and there is
- * no pool to check. Keep the symbol so main() has one call site.
+ * Other targets have no PSRAM (or do not move data there), so .ext_ram.bss
+ * expands to nothing and there is no pool to check. Keep the symbol so main()
+ * has one call site.
  */
 int linkr_ext_ram_verify_heap(void)
 {
