@@ -118,7 +118,7 @@ Zephyr 4.5 的射频与网络代码占用更多 SRAM。默认配置保留原有�
 | C3 / Bee X1.0 | WiFi 动态 RX/TX 各 8 个、WiFi 堆预留 40 KiB、每个 BLE peer 8 块、延迟日志 4 KiB、HTTP/系统/连接线程栈各 4 KiB |
 | C5 | WiFi 动态 RX/TX 各 6 个、WiFi 堆预留 36 KiB、Bluetooth 堆预留 44000 B、12 个 MSYS-2 块、8 个 255 B 控制器 ACL 缓冲、网络缓冲各 20 个、包描述符各 10 个 |
 | WROOM | 保持 52000 B 系统堆，UART 接收 4 KiB、每个 BLE peer 4 块、LAN 环形缓冲 1 KiB、HTTP 栈 4 KiB、LAN 客户端栈 3 KiB |
-| YD-ESP32-S3（台架） | 7 MiB PSRAM 堆；日志环形缓冲、WebDAV 分块、BLE peer/管理队列以及 2 × 16 KiB LAN 环形缓冲放入 PSRAM；16 KiB UART 接收与 WiFi 缓冲池留在 DRAM；HTTP/连接/管理线程栈各 5 KiB |
+| YD-ESP32-S3（台架） | 7.68 MiB PSRAM 堆；128 KiB 日志环形缓冲、64 KiB WebDAV 分块、深度 64 的 BLE peer 队列以及 2 × 32 KiB LAN 环形缓冲放入 PSRAM；24 KiB UART 接收与 WiFi 缓冲池留在 DRAM；HTTP/连接/管理线程栈各 5 KiB |
 
 台架目标 `esp32s3_devkitc/esp32s3/procpu` 配合
 `boards/esp32s3_devkitc_esp32s3_procpu.{conf,overlay}` 描述 VCC-GND

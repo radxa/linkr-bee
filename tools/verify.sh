@@ -144,6 +144,17 @@ for board in $boards; do
         exit 1
         ;;
     esac
+    # The point of this bench target is to spend the extra PSRAM on buffers
+    # that make the bridge feel better, not to match the C3 defaults. Keep the
+    # enlarged settings from silently regressing to the shared defaults, and
+    # keep the external heap big enough to fill the part.
+    grep -qx 'CONFIG_RING_BUFFER_LARGE=y' "$config"
+    grep -qx 'CONFIG_LINKR_BLE_BRIDGE_LOG_RING_SIZE=131072' "$config"
+    grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WEBDAV_UPLOAD_CHUNK=65536' "$config"
+    grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_CLIENT_BUFFER_SIZE=32768' "$config"
+    grep -qx 'CONFIG_LINKR_BLE_BRIDGE_PEER_TX_QUEUE_DEPTH=64' "$config"
+    grep -qx 'CONFIG_LINKR_BLE_BRIDGE_UART_RX_BUFFER_SIZE=24576' "$config"
+    grep -qx 'CONFIG_ESP_SPIRAM_HEAP_SIZE=8049120' "$config"
   fi
   grep -qx 'CONFIG_BT_SMP_APP_PAIRING_ACCEPT=y' "$config"
   grep -qx 'CONFIG_BT_BONDING_REQUIRED=y' "$config"

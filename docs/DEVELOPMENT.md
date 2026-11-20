@@ -124,7 +124,7 @@ existing services and client limits with smaller bounded queues:
 | C3 / Bee X1.0 | 8 dynamic WiFi RX/TX buffers, 40 KiB WiFi heap reservation, 8 chunks per BLE peer, 4 KiB deferred logs, 4 KiB HTTP/system/connect stacks |
 | C5 | 6 dynamic WiFi RX/TX buffers, 36 KiB WiFi and 44000 B Bluetooth heap reservations, 12 MSYS-2 blocks, 8 controller ACL buffers of 255 bytes, 20 network buffers and 10 packet descriptors per direction |
 | WROOM | Existing 52000 B system heap, 4 KiB UART capture, 4 chunks per BLE peer, 1 KiB LAN rings, 4 KiB HTTP and 3 KiB LAN client stacks |
-| YD-ESP32-S3 (bench) | 7 MiB PSRAM heap; log ring, WebDAV chunk, BLE peer/management queues and 2 × 16 KiB LAN rings in PSRAM; 16 KiB UART capture and the WiFi pools in DRAM; 5 KiB HTTP/connect/mgmt stacks |
+| YD-ESP32-S3 (bench) | 7.68 MiB PSRAM heap; 128 KiB log ring, 64 KiB WebDAV chunk, 64-deep BLE peer queues and 2 × 32 KiB LAN rings in PSRAM; 24 KiB UART capture and the WiFi pools in DRAM; 5 KiB HTTP/connect/mgmt stacks |
 
 The bench target `esp32s3_devkitc/esp32s3/procpu` with
 `boards/esp32s3_devkitc_esp32s3_procpu.{conf,overlay}` describes the VCC-GND

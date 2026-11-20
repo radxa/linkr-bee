@@ -552,20 +552,25 @@ config LINKR_BLE_BRIDGE_WEBDAV_UPLOAD_INTERVAL_MS
 config LINKR_BLE_BRIDGE_WEBDAV_UPLOAD_CHUNK
 	int "WebDAV upload chunk size in bytes"
 	default 4096
-	range 256 32768
+	range 256 131072
 	depends on LINKR_BLE_BRIDGE_WEBDAV
+	help
+	  Bytes staged per HTTP PUT. Larger chunks mean fewer round trips and a
+	  faster drain of the log ring on boards with PSRAM; the buffer lives in
+	  external RAM there, so values above 32768 are only useful on those
+	  targets.
 
 config LINKR_BLE_BRIDGE_LOG_RING_SIZE
 	int "WebDAV log staging ring buffer size in bytes"
 	default 8192
-	range 512 32767
+	range 512 262144
 	depends on LINKR_BLE_BRIDGE_WEBDAV
 	help
 	  Bytes of UART RX data staged for periodic WebDAV upload. When the
-	  ring overflows, the oldest bytes are dropped and counted. The upper
-	  bound is Zephyr's RING_BUFFER_MAX_SIZE: this value sizes a
-	  RING_BUF_DECLARE(), which asserts size <= RING_BUFFER_MAX_SIZE
-	  (32767) unless CONFIG_RING_BUFFER_LARGE raises the limit.
+	  ring overflows, the oldest bytes are dropped and counted. The staging
+	  storage is placed in external RAM on PSRAM-capable targets, so a large
+	  ring is nearly free there. Values above Zephyr's default
+	  RING_BUFFER_MAX_SIZE (32767) need CONFIG_RING_BUFFER_LARGE.
 
 config LINKR_BLE_BRIDGE_WIFI_SSID_MAX
 	int "Maximum WiFi SSID length"
@@ -620,14 +625,15 @@ config LINKR_BLE_BRIDGE_WS_BRIDGE_MAX_CLIENTS
 config LINKR_BLE_BRIDGE_WS_BRIDGE_CLIENT_BUFFER_SIZE
 	int "Per-client TX ring buffer size in bytes"
 	default 2048
-	range 512 16384
+	range 512 65536
 	depends on LINKR_BLE_BRIDGE_WS_BRIDGE
 	help
 	  Bytes of UART RX buffered per WebSocket client. A client slower than
 	  the UART drops oldest data instead of blocking the bridge. Any value
 	  in this range builds: the buffer is a byte-oriented Zephyr ring
 	  buffer, which accepts arbitrary sizes and is never indexed with a
-	  power-of-two mask.
+	  power-of-two mask. Values above 32767 also need
+	  CONFIG_RING_BUFFER_LARGE.
 
 config LINKR_BLE_BRIDGE_WS_BRIDGE_AUTH_TOKEN
 	string "Optional build-time WebSocket auth token override"
