@@ -1,0 +1,27 @@
+/*
+ * Linkr Bee - ESP32-S3-WROOM-1 N16R8 module sizes.
+ *
+ * Applied in addition to esp32s3_devkitc_esp32s3_procpu.overlay for the
+ * N16R8 build:
+ *
+ *   west build -b esp32s3_devkitc/esp32s3/procpu linkr-bee -- \
+ *       -DEXTRA_CONF_FILE=boards/esp32s3_devkitc_esp32s3_procpu_n16r8.conf \
+ *       -DEXTRA_DTC_OVERLAY_FILE=boards/esp32s3_devkitc_esp32s3_procpu_n16r8.overlay
+ *
+ * The module carries 16 MB of flash (the devkit DTS declares 8 MB) and 8 MB
+ * of octal PSRAM. Both are compile-time values: CONFIG_ESP_SPIRAM_SIZE is
+ * derived from the psram0 size below and the shared heap window is laid out
+ * by the linker, so a 2 MB part or a PSRAM-less module needs the default
+ * board build instead.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+&flash0 {
+	reg = <0x0 DT_SIZE_M(16)>;
+	ranges = <0x0 0x0 DT_SIZE_M(16)>;
+};
+
+&psram0 {
+	size = <DT_SIZE_M(8)>;
+};

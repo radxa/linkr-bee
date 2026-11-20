@@ -1,9 +1,12 @@
 /*
- * Linkr Bee - YD-ESP32-S3 (ESP32-S3-WROOM-1 N16R8) bench wiring.
+ * Linkr Bee - YD-ESP32-S3 bench wiring (N16R8 and 8 MB module variants).
  *
- * The board is the VCC-GND Studio YD-ESP32-S3: ESP32-S3, 16 MB flash, 8 MB
- * octal PSRAM, two USB-C ports (native USB on GPIO19/20 and a CH343P
- * USB-UART bridge) and four LEDs.
+ * The board is the VCC-GND Studio YD-ESP32-S3: ESP32-S3, two USB-C ports
+ * (native USB on GPIO19/20 and a CH343P USB-UART bridge) and four LEDs. The
+ * module fitted to it can be an N16R8 (16 MB flash, 8 MB octal PSRAM) or an
+ * 8 MB-flash part without PSRAM; the sizes for the N16R8 are declared by the
+ * extra overlay esp32s3_devkitc_esp32s3_procpu_n16r8.overlay so this default
+ * wiring also builds for the PSRAM-less module.
  *
  *   Console:      USB Serial/JTAG - the "USB" port, GPIO19/20
  *   Bridge UART:  UART0 - GPIO43 (TX), GPIO44 (RX), on the header
@@ -90,16 +93,9 @@
 	};
 };
 
-/* The N16R8 module carries 16 MB of flash, not the 8 MB the devkit DTS
- * declares. */
-&flash0 {
-	reg = <0x0 DT_SIZE_M(16)>;
-	ranges = <0x0 0x0 DT_SIZE_M(16)>;
-};
-
-&psram0 {
-	size = <DT_SIZE_M(8)>;
-};
+/* The N16R8 module's flash and PSRAM sizes are declared by the extra overlay
+ * esp32s3_devkitc_esp32s3_procpu_n16r8.overlay, so the default build works on
+ * a module with 8 MB flash and no external RAM. */
 
 /* UART0 is the bridge serial (GPIO43/44, the header pins and the CH343
  * lines that carry the TX/RX LEDs). The console is the native USB port. */

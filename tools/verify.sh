@@ -112,31 +112,49 @@ for board in $boards; do
         ;;
     esac
   fi
-  # The bench S3 target runs from the N16R8 module's 8 MB octal PSRAM and must
-  # keep the same rules as C5: data buffers in external RAM, WiFi pools in
-  # internal SRAM. The RGB status LED is an alias in the board overlay, so a
-  # missing alias silently leaves the large LED dark.
+  # The S3 target has two variants: the default build makes no PSRAM
+  # assumption (so it runs on 8 MB-flash modules with or without a 2 MB part),
+  # and an N16R8 build adds the 16 MB flash / 8 MB octal PSRAM sizes plus the
+  # enlarged buffers. Check both so neither silently drifts.
+  #
+  # The RGB status LED is an alias in the board overlay, so a missing alias
+  # silently leaves the large LED dark; the YD-ESP32-S3 pixel is also RGBW, and
+  # a 24-bit frame misaligns its shift register (red reads as yellow and the
+  # pixel cannot be turned off).
   if grep -qx 'CONFIG_SOC_SERIES_ESP32S3=y' "$config"; then
     grep -qx 'CONFIG_LINKR_BLE_BRIDGE_RGB_STATUS_LED=y' "$config"
     # The two UART0 LEDs carry the traffic indication, so the addressable
     # pixel must stay a dark-by-default user light on this board.
     grep -qx 'CONFIG_LINKR_BLE_BRIDGE_RGB_MANUAL_ONLY=y' "$config"
-    # The YD-ESP32-S3 pixel is RGBW: a 24-bit frame misaligns its shift
-    # register (red reads as yellow, the pixel cannot be turned off).
     grep -q 'channel-count = < 0x4 >' "$build_dir/zephyr/zephyr.dts"
-    grep -qx 'CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y' "$config"
-    grep -qx 'CONFIG_ESP_SPIRAM=y' "$config"
-    grep -qx 'CONFIG_ESP_SPIRAM_SIZE=8388608' "$config"
-    grep -qx 'CONFIG_SPIRAM_TYPE_ESPPSRAM64=y' "$config"
-    grep -qx 'CONFIG_SPIRAM_MODE_OCT=y' "$config"
-    grep -qx 'CONFIG_SPIRAM_SPEED_80M=y' "$config"
-    grep -qx '# CONFIG_ESP_SPIRAM_MEMTEST is not set' "$config"
-    grep -qx 'CONFIG_ESP_WIFI_HEAP_SYSTEM=y' "$config"
-    grep -qx '# CONFIG_ESP_WIFI_HEAP_SPIRAM is not set' "$config"
-    grep -qx '# CONFIG_ESP32_WIFI_NET_ALLOC_SPIRAM is not set' "$config"
+    # Default variant: no external RAM, data buffers back in internal SRAM.
+    grep -qx '# CONFIG_ESP_SPIRAM is not set' "$config"
+    grep -qx '# CONFIG_RING_BUFFER_LARGE is not set' "$config"
+    grep -qx 'CONFIG_LINKR_BLE_BRIDGE_UART_RX_BUFFER_SIZE=8192' "$config"
+    grep -qx 'CONFIG_LINKR_BLE_BRIDGE_LOG_RING_SIZE=8192' "$config"
+
+    # N16R8 variant: the extra fragments must produce the 8 MB octal part and
+    # the enlarged PSRAM-resident buffers.
+    n16r8_dir="$repo_dir/build-verify-$build_name-n16r8"
+    west build -p always -d "$n16r8_dir" -b "$board" "$repo_dir" -- \
+      -DEXTRA_CONF_FILE="$repo_dir/boards/esp32s3_devkitc_esp32s3_procpu_n16r8.conf" \
+      -DEXTRA_DTC_OVERLAY_FILE="$repo_dir/boards/esp32s3_devkitc_esp32s3_procpu_n16r8.overlay"
+    n16r8_config="$n16r8_dir/zephyr/.config"
+    python3 "$repo_dir/tools/esp_simpleboot_image.py" --check "$n16r8_dir/zephyr/zephyr.bin"
+    grep -q 'channel-count = < 0x4 >' "$n16r8_dir/zephyr/zephyr.dts"
+    grep -qx 'CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y' "$n16r8_config"
+    grep -qx 'CONFIG_ESP_SPIRAM=y' "$n16r8_config"
+    grep -qx 'CONFIG_ESP_SPIRAM_SIZE=8388608' "$n16r8_config"
+    grep -qx 'CONFIG_SPIRAM_TYPE_ESPPSRAM64=y' "$n16r8_config"
+    grep -qx 'CONFIG_SPIRAM_MODE_OCT=y' "$n16r8_config"
+    grep -qx 'CONFIG_SPIRAM_SPEED_80M=y' "$n16r8_config"
+    grep -qx '# CONFIG_ESP_SPIRAM_MEMTEST is not set' "$n16r8_config"
+    grep -qx 'CONFIG_ESP_WIFI_HEAP_SYSTEM=y' "$n16r8_config"
+    grep -qx '# CONFIG_ESP_WIFI_HEAP_SPIRAM is not set' "$n16r8_config"
+    grep -qx '# CONFIG_ESP32_WIFI_NET_ALLOC_SPIRAM is not set' "$n16r8_config"
     # .ext_ram.bss sits at 0x3Cxxxxxx on this SoC, not in internal SRAM.
     ext_ram_start=$(awk '/_ext_ram_bss_start = ABSOLUTE/ {print $1; exit}' \
-      "$build_dir/zephyr/zephyr.map")
+      "$n16r8_dir/zephyr/zephyr.map")
     case "$ext_ram_start" in
       0x3c*) ;;
       *)
@@ -144,17 +162,17 @@ for board in $boards; do
         exit 1
         ;;
     esac
-    # The point of this bench target is to spend the extra PSRAM on buffers
-    # that make the bridge feel better, not to match the C3 defaults. Keep the
-    # enlarged settings from silently regressing to the shared defaults, and
-    # keep the external heap big enough to fill the part.
-    grep -qx 'CONFIG_RING_BUFFER_LARGE=y' "$config"
-    grep -qx 'CONFIG_LINKR_BLE_BRIDGE_LOG_RING_SIZE=131072' "$config"
-    grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WEBDAV_UPLOAD_CHUNK=65536' "$config"
-    grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_CLIENT_BUFFER_SIZE=32768' "$config"
-    grep -qx 'CONFIG_LINKR_BLE_BRIDGE_PEER_TX_QUEUE_DEPTH=64' "$config"
-    grep -qx 'CONFIG_LINKR_BLE_BRIDGE_UART_RX_BUFFER_SIZE=24576' "$config"
-    grep -qx 'CONFIG_ESP_SPIRAM_HEAP_SIZE=8049120' "$config"
+    # The point of this variant is to spend the extra PSRAM on buffers that
+    # make the bridge feel better, not to match the C3 defaults. Keep the
+    # enlarged settings from silently regressing, and keep the external heap
+    # big enough to fill the part.
+    grep -qx 'CONFIG_RING_BUFFER_LARGE=y' "$n16r8_config"
+    grep -qx 'CONFIG_LINKR_BLE_BRIDGE_LOG_RING_SIZE=131072' "$n16r8_config"
+    grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WEBDAV_UPLOAD_CHUNK=65536' "$n16r8_config"
+    grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_CLIENT_BUFFER_SIZE=32768' "$n16r8_config"
+    grep -qx 'CONFIG_LINKR_BLE_BRIDGE_PEER_TX_QUEUE_DEPTH=64' "$n16r8_config"
+    grep -qx 'CONFIG_LINKR_BLE_BRIDGE_UART_RX_BUFFER_SIZE=24576' "$n16r8_config"
+    grep -qx 'CONFIG_ESP_SPIRAM_HEAP_SIZE=8049120' "$n16r8_config"
   fi
   grep -qx 'CONFIG_BT_SMP_APP_PAIRING_ACCEPT=y' "$config"
   grep -qx 'CONFIG_BT_BONDING_REQUIRED=y' "$config"
