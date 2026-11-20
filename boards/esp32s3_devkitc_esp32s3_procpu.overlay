@@ -57,8 +57,8 @@
 	};
 
 	/* YD-ESP32-S3 on-board addressable RGB LED. The part is an RGBW
-	 * controller in the SK6812 family: 32 bits per pixel, GRBW order,
-	 * driven from GPIO48. It is
+	 * controller in the SK6812 family: 32 bits per pixel, GRB order plus
+	 * a trailing white byte, driven from GPIO48. It is
 	 * the large LED on the board; the three small ones are the fixed power
 	 * LED and the two UART0 activity LEDs described above.
 	 *

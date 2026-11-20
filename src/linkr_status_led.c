@@ -72,14 +72,13 @@ static void led_write(const struct linkr_rgb *color)
 		.g = (color->g * CONFIG_LINKR_BLE_BRIDGE_RGB_BRIGHTNESS + 50U) / 100U,
 		.b = (color->b * CONFIG_LINKR_BLE_BRIDGE_RGB_BRIGHTNESS + 50U) / 100U,
 	};
-	/* Two identical frames, every time. On this hardware the first frame
-	 * after an idle data line loses its leading edge: the bit cells shift
-	 * and the pixel latches the wrong channels (red arrives as yellow) or
-	 * keeps the previous colour when the frame is all zeros. The line is
-	 * already switching by the time the second frame starts, so it latches
-	 * exactly the intended value. The extra 300 us reset is irrelevant for
-	 * a status light, and boards with a clean data line simply latch the
-	 * same colour twice. */
+	/* Two identical frames. The bit loop used to run from flash, so the
+	 * first frame after the code had been evicted from the instruction
+	 * cache stretched its first high cells: red latched as yellow, and an
+	 * all-zero frame left the previous colour on. The loop is resident in
+	 * IRAM now (see WS_IRAM in src/linkr_ws2812.c), but the repeat is kept
+	 * as cheap insurance: it is the sequence the hardware was validated
+	 * with, and one extra 300 us latch is irrelevant for a status light. */
 	(void)linkr_ws2812_write(&output, 1);
 	(void)linkr_ws2812_write(&output, 1);
 }

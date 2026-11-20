@@ -57,7 +57,9 @@ static const size_t ws_chain_length = (size_t)DT_PROP(LINKR_RGB_NODE, chain_leng
 #else
 #error "unexpected GPIO controller for the RGB LED"
 #endif
-#define WS_PAD ((uint32_t)(WS_PAD_OFFSET + DT_GPIO_PIN(LINKR_RGB_NODE, data_gpios)))
+/* Plain integer for preprocessor comparisons; the casted form is for code. */
+#define WS_PAD_NUM (WS_PAD_OFFSET + DT_GPIO_PIN(LINKR_RGB_NODE, data_gpios))
+#define WS_PAD ((uint32_t)WS_PAD_NUM)
 
 /*
  * The core clock is fixed by CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ (160 MHz on the
@@ -74,6 +76,8 @@ static const size_t ws_chain_length = (size_t)DT_PROP(LINKR_RGB_NODE, chain_leng
 #define WS_RESET_US 300
 
 static uint8_t ws_byte_order[3] = {1, 0, 2}; /* GRB, the WS2812 default */
+BUILD_ASSERT(sizeof(DT_PROP(LINKR_RGB_NODE, color_order)) == 4,
+	     "color-order names three channels only; channel-count = 4 appends W last");
 
 static inline uint32_t ws_cycles(void)
 {
@@ -97,11 +101,13 @@ static inline void ws_pin_high(void)
 #if defined(CONFIG_SOC_SERIES_ESP32C3)
 	ws_regs->out_w1ts.val = BIT(WS_PAD);
 #elif defined(CONFIG_SOC_SERIES_ESP32S3)
-	if (WS_PAD < 32) {
-		ws_regs->out_w1ts = BIT(WS_PAD);
-	} else {
-		ws_regs->out1_w1ts.val = BIT(WS_PAD - 32);
-	}
+	/* Compile-time branch: the unused arm must not be emitted, because
+	 * BIT(48) on a 32-bit value is undefined and GCC warns about it. */
+#if WS_PAD_NUM < 32
+	ws_regs->out_w1ts = BIT(WS_PAD);
+#else
+	ws_regs->out1_w1ts.val = BIT(WS_PAD - 32);
+#endif
 #else
 	ws_regs->out_w1ts = BIT(WS_PAD);
 #endif
@@ -112,18 +118,29 @@ static inline void ws_pin_low(void)
 #if defined(CONFIG_SOC_SERIES_ESP32C3)
 	ws_regs->out_w1tc.val = BIT(WS_PAD);
 #elif defined(CONFIG_SOC_SERIES_ESP32S3)
-	if (WS_PAD < 32) {
-		ws_regs->out_w1tc = BIT(WS_PAD);
-	} else {
-		ws_regs->out1_w1tc.val = BIT(WS_PAD - 32);
-	}
+#if WS_PAD_NUM < 32
+	ws_regs->out_w1tc = BIT(WS_PAD);
+#else
+	ws_regs->out1_w1tc.val = BIT(WS_PAD - 32);
+#endif
 #else
 	ws_regs->out_w1tc = BIT(WS_PAD);
 #endif
 }
 
+/*
+ * The bit loop runs with interrupts locked and must not fetch instructions
+ * from flash: a cache miss on the first iterations stretches the high cells
+ * of the first bytes, so zeros arrive as ones. That is exactly the observed
+ * "red shows as yellow, off leaves green" failure, and it only happens on
+ * the first frame after the code has been evicted from the instruction
+ * cache. Keep the frame loop resident in IRAM (the Espressif linker collects
+ * .iram1 into .iram0.text on every supported SoC).
+ */
+#define WS_IRAM __attribute__((section(".iram1")))
+
 /* One byte, MSB first, as 8 cells of 1.25 us. Caller holds the irq lock. */
-static void ws_send_byte(uint8_t byte)
+static WS_IRAM void ws_send_byte(uint8_t byte)
 {
 	for (int bit = 7; bit >= 0; bit--) {
 		uint32_t start = ws_cycles();
@@ -191,7 +208,7 @@ int linkr_ws2812_init(void)
 	return 0;
 }
 
-int linkr_ws2812_write(const struct linkr_rgb *pixels, size_t count)
+WS_IRAM int linkr_ws2812_write(const struct linkr_rgb *pixels, size_t count)
 {
 	unsigned int key;
 
@@ -207,10 +224,13 @@ int linkr_ws2812_write(const struct linkr_rgb *pixels, size_t count)
 			ws_send_byte(channels[ws_byte_order[byte]]);
 		}
 #if WS_CHANNELS >= 4
-		/* RGBW parts clock 32 bits per pixel. Without this byte the
-		 * shift register stays misaligned and one channel keeps the
-		 * value the previous frame left there. The extra byte is
-		 * harmless on a 24-bit part: it is forwarded and discarded. */
+		/* RGBW parts clock 32 bits per pixel, W last: the color-order
+		 * string still names the three RGB channels and this driver
+		 * appends the white byte after them. Without it the shift
+		 * register stays one byte short, one channel keeps the value
+		 * the previous frame left there, and the pixel cannot be turned
+		 * off. The byte is only emitted when the devicetree declares
+		 * four channels, so 24-bit parts keep their exact frame. */
 		ws_send_byte(0);
 #endif
 	}
