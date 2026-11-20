@@ -126,6 +126,8 @@ existing services and client limits with smaller bounded queues:
 | WROOM | Existing 52000 B system heap, 4 KiB UART capture, 4 chunks per BLE peer, 1 KiB LAN rings, 4 KiB HTTP and 3 KiB LAN client stacks |
 | YD-ESP32-S3 (bench) | 7.68 MiB PSRAM heap; 128 KiB log ring, 64 KiB WebDAV chunk, 64-deep BLE peer queues and 2 × 32 KiB LAN rings in PSRAM; 24 KiB UART capture and the WiFi pools in DRAM; 5 KiB HTTP/connect/mgmt stacks |
 
+![VCC-GND YD-ESP32-S3 (N16R8)](../boards/esp32s3_devkitc_esp32s3_procpu.png)
+
 The bench target `esp32s3_devkitc/esp32s3/procpu` with
 `boards/esp32s3_devkitc_esp32s3_procpu.{conf,overlay}` describes the VCC-GND
 YD-ESP32-S3 (N16R8): 16 MB flash, 8 MB octal PSRAM, an addressable RGB LED on
@@ -141,8 +143,7 @@ so red latched as yellow and an all-zero frame left the previous colour on.
 The cause was instruction fetch rather than the data line -- the bit loop ran
 from flash and missed the instruction cache, stretching its first high cells.
 The loop now lives in IRAM (`.iram1`), which is the only way the 350 ns cells
-are predictable; `led_write()` still sends each frame twice as insurance, at
-the cost of one extra 300 us latch.
+are predictable, so one frame per update is enough.
 UART0 is therefore the bridge UART, so those two LEDs show live
 bridge traffic in each direction. Because that is this board's data
 indication, the addressable RGB is not a second status light:

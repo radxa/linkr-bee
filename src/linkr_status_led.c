@@ -72,14 +72,10 @@ static void led_write(const struct linkr_rgb *color)
 		.g = (color->g * CONFIG_LINKR_BLE_BRIDGE_RGB_BRIGHTNESS + 50U) / 100U,
 		.b = (color->b * CONFIG_LINKR_BLE_BRIDGE_RGB_BRIGHTNESS + 50U) / 100U,
 	};
-	/* Two identical frames. The bit loop used to run from flash, so the
-	 * first frame after the code had been evicted from the instruction
-	 * cache stretched its first high cells: red latched as yellow, and an
-	 * all-zero frame left the previous colour on. The loop is resident in
-	 * IRAM now (see WS_IRAM in src/linkr_ws2812.c), but the repeat is kept
-	 * as cheap insurance: it is the sequence the hardware was validated
-	 * with, and one extra 300 us latch is irrelevant for a status light. */
-	(void)linkr_ws2812_write(&output, 1);
+	/* One frame. The bit loop lives in IRAM (see WS_IRAM in
+	 * src/linkr_ws2812.c), so an instruction fetch cannot stretch the first
+	 * high cells; this used to turn red into yellow until the loop was
+	 * moved out of flash. Sending it twice is no longer needed. */
 	(void)linkr_ws2812_write(&output, 1);
 }
 

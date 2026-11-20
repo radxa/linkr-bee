@@ -120,6 +120,8 @@ Zephyr 4.5 的射频与网络代码占用更多 SRAM。默认配置保留原有�
 | WROOM | 保持 52000 B 系统堆，UART 接收 4 KiB、每个 BLE peer 4 块、LAN 环形缓冲 1 KiB、HTTP 栈 4 KiB、LAN 客户端栈 3 KiB |
 | YD-ESP32-S3（台架） | 7.68 MiB PSRAM 堆；128 KiB 日志环形缓冲、64 KiB WebDAV 分块、深度 64 的 BLE peer 队列以及 2 × 32 KiB LAN 环形缓冲放入 PSRAM；24 KiB UART 接收与 WiFi 缓冲池留在 DRAM；HTTP/连接/管理线程栈各 5 KiB |
 
+![VCC-GND YD-ESP32-S3（N16R8）](../boards/esp32s3_devkitc_esp32s3_procpu.png)
+
 台架目标 `esp32s3_devkitc/esp32s3/procpu` 配合
 `boards/esp32s3_devkitc_esp32s3_procpu.{conf,overlay}` 描述 VCC-GND
 YD-ESP32-S3（N16R8）：16 MB flash、8 MB 八线 PSRAM、GPIO48 上的可寻址 RGB
@@ -130,7 +132,7 @@ RGBW 灯（每像素 32 位），overlay 里必须写 `channel-count = <4>`：�
 驱动空闲一段时间后的第一帧曾经必然出错：一串 0 位被当成 1 位，于是红色锁成黄色，
 全零帧保留上一帧颜色。原因不在数据线，而在取指——位循环放在 flash 里，指令缓存
 未命中把开头几个高电平拉长。现在位循环放在 IRAM（`.iram1`），350 纳秒的码元才
-可预测；`led_write()` 仍然每帧连发两遍作为保险，代价是多一次 300 微秒锁存。
+可预测，因此每次更新只发一帧。
 因此 UART0 作为桥接串口，这两颗灯会按方向显示实时桥接流量。数据指示已经由它们
 承担，所以可寻址 RGB 不再充当第二个状态灯：`RGB_MANUAL_ONLY` 让它默认熄灭，
 只有管理命令 `@l` 设置颜色后才亮，并一直保持该颜色（不再 5 秒后回到状态色），

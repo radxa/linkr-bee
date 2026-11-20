@@ -56,9 +56,6 @@ static int k_work_reschedule(struct k_work_delayable *work, int64_t delay)
 static void k_sleep(int64_t delay) { now_ms += delay; }
 static bool linkr_ws2812_available(void) { return true; }
 static int linkr_ws2812_init(void) { return 0; }
-/* Every frame is transmitted twice (the first frame after an idle data line
- * loses its leading edge on this hardware), so a "write" here counts one
- * driver call; a visible frame is two calls. */
 static int linkr_ws2812_write(const struct linkr_rgb *color, size_t count)
 {
     assert(!locks && count == 1);
@@ -159,7 +156,7 @@ int main(int argc, char **argv)
             }
             advance(1240);
             expect(0, 0, 10);
-            assert(writes >= 20 && writes <= 26 && writes % 2 == 0 && schedules < 100);
+            assert(writes >= 10 && writes <= 13 && schedules < 100);
         } else if (scenario == 2) {
             advance(239);
             linkr_status_led_activity();
@@ -216,7 +213,7 @@ int main(int argc, char **argv)
             linkr_status_led_set_rgb(i & 255, 1, 2);
         }
         advance(1240);
-        assert(writes <= 54); /* All sources, including manual, stay bounded. */
+        assert(writes <= 27); /* All sources, including manual, stay bounded. */
     } else if (scenario == 11) {
         /* Disconnected the base colour is white, so UART traffic shows as that
          * white blinking off rather than an activity colour on a black base. */
