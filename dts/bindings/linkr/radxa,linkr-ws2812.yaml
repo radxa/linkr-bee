@@ -2,7 +2,7 @@ description: |
   Radxa Linkr Bee X1.0 addressable RGB status LED.
 
   The LED is an Everlight EY-PB1615RGBIC-010F, a WS2812-compatible single-wire
-  part. The application drives the protocol itself (see src/linkr_rgb_led.c)
+  part. The application drives the protocol itself (see src/linkr_ws2812.c)
   because no in-tree LED strip driver targets the ESP32-C3; this binding only
   describes the GPIO and the pixel layout.
 
@@ -34,3 +34,16 @@ properties:
     description: |
       Byte order expected by the LED controller. WS2812-compatible parts
       (including the EY-PB1615RGBIC) take GRB.
+
+  channel-count:
+    type: int
+    default: 3
+    enum: [3, 4]
+    description: |
+      Bytes per pixel. Three-channel WS2812 parts take 24 bits per pixel;
+      four-channel RGBW parts take 32 bits and need a fourth byte, otherwise
+      the shift register stays misaligned and a channel keeps whatever the
+      previous frame left in it. color-order still names three channels; the
+      driver appends the white byte after them (so GRB + channel-count = 4 is
+      GRBW). The extra byte is only emitted for four-channel parts, so a
+      24-bit part gets its exact 24-bit frame.

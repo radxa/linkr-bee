@@ -1,0 +1,121 @@
+/*
+ * Linkr Bee - YD-ESP32-S3 bench wiring (N16R8 and 8 MB module variants).
+ *
+ * The board is the VCC-GND Studio YD-ESP32-S3: ESP32-S3, two USB-C ports
+ * (native USB on GPIO19/20 and a CH343P USB-UART bridge) and four LEDs. The
+ * module fitted to it can be an N16R8 (16 MB flash, 8 MB octal PSRAM) or an
+ * 8 MB-flash part without PSRAM; the sizes for the N16R8 are declared by the
+ * extra overlay esp32s3_devkitc_esp32s3_procpu_n16r8.overlay so this default
+ * wiring also builds for the PSRAM-less module.
+ *
+ *   Console:      USB Serial/JTAG - the "USB" port, GPIO19/20
+ *   Bridge UART:  UART0 - GPIO43 (TX), GPIO44 (RX), on the header
+ *   Pairing key:  BOOT  - GPIO0, active low
+ *   User LED:     WS2812-compatible addressable RGB on GPIO48 (the large LED)
+ *                 via a solder bridge marked on the board; the factory leaves
+ *                 GPIO48 and the LED's DIN net open, so it stays dark until
+ *                 that bridge is closed. It is not a status light: the two
+ *                 UART0 LEDs show traffic, and RGB_MANUAL_ONLY keeps this
+ *                 pixel dark until the @l command sets a colour.
+ *   TX LED:       wired to the U0TXD line (GPIO43), lit by bridge TX traffic
+ *   RX LED:       wired to the U0RXD line (GPIO44), lit by bridge RX traffic
+ *   Power LED:    fixed to the 3.3 V rail, not controllable in software
+ *
+ * The two single-colour TX/RX LEDs are not separate GPIOs on this board:
+ * they sit on the UART0 lines, so making UART0 the bridge UART gives real
+ * per-direction activity indication with no extra driver. That costs the
+ * CH343 port as a console: runtime logs move to the native USB port, while
+ * the ROM loader still flashes over either port.
+ *
+ * Wiring caveat: GPIO44 is shared by the CH343's TXD output and the SBC's TX
+ * line. Power the board through the native USB port and leave the CH343 port
+ * unplugged while an SBC drives the UART0 header pins; otherwise the two
+ * outputs fight on that net.
+ *
+ * There is no factory-reset key: GPIO0 is the ROM download strap, so a key
+ * held through reset never reaches the application. Erase flash instead.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/ {
+	chosen {
+		zephyr,linkr-ble-uart = &uart0;
+		zephyr,console = &usb_serial;
+		zephyr,shell-uart = &usb_serial;
+	};
+
+	aliases {
+		linkr-pairing = &linkr_pairing;
+		linkr-rgb = &linkr_rgb;
+	};
+
+	linkr_pairing_keys {
+		compatible = "gpio-keys";
+
+		linkr_pairing: pairing {
+			label = "Linkr pairing authorization (BOOT)";
+			gpios = <&gpio0 0 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+		};
+	};
+
+	/* YD-ESP32-S3 on-board addressable RGB LED. The part is an RGBW
+	 * controller in the SK6812 family: 32 bits per pixel, GRB order plus
+	 * a trailing white byte, driven from GPIO48. It is
+	 * the large LED on the board; the three small ones are the fixed power
+	 * LED and the two UART0 activity LEDs described above.
+	 *
+	 * channel-count = 4 is required, not cosmetic. With the 24-bit WS2812
+	 * frame used by the X1 board the shift register is one byte short: the
+	 * red channel leaks into green (red reads as yellow) and the last byte
+	 * keeps the previous frame's value, so the pixel cannot be turned off.
+	 *
+	 * Zephyr models GPIO48 as gpio1 pin 16, not gpio0 pin 48: the GPIO API
+	 * rejects pin indexes >= 32.
+	 *
+	 * This board ships with GPIO48 and the LED's DIN net separated: a
+	 * solder bridge next to the LED has to be closed before the part can be
+	 * driven at all. An open bridge looks exactly like a software fault
+	 * (dark LED, no bus activity), so close it before debugging the data
+	 * line.
+	 *
+	 * The board conf sets RGB_MANUAL_ONLY: the UART0 TX/RX LEDs already show
+	 * bridge traffic, so this pixel is a user light, dark by default and
+	 * unchanged by BLE/WiFi/AI state. */
+	linkr_rgb: linkr-rgb {
+		compatible = "radxa,linkr-ws2812";
+		data-gpios = <&gpio1 16 GPIO_ACTIVE_HIGH>;
+		chain-length = <1>;
+		color-order = "GRB";
+		/* RGBW part: 32 bits per pixel. */
+		channel-count = <4>;
+		status = "okay";
+	};
+};
+
+/* The N16R8 module's flash and PSRAM sizes are declared by the extra overlay
+ * esp32s3_devkitc_esp32s3_procpu_n16r8.overlay, so the default build works on
+ * a module with 8 MB flash and no external RAM. */
+
+/* UART0 is the bridge serial (GPIO43/44, the header pins and the CH343
+ * lines that carry the TX/RX LEDs). The console is the native USB port. */
+&uart0 {
+	status = "okay";
+	current-speed = <115200>;
+	pinctrl-0 = <&uart0_default>;
+	pinctrl-names = "default";
+};
+
+/* UART1 is not wired to the bridge in this build. */
+&uart1 {
+	status = "disabled";
+};
+
+&usb_serial {
+	status = "okay";
+};
+
+/* Enable the WiFi node used by the single Linkr firmware. */
+&wifi {
+	status = "okay";
+};

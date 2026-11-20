@@ -10,11 +10,15 @@ list(APPEND EXTRA_ZEPHYR_MODULES "${CMAKE_CURRENT_SOURCE_DIR}/cmake/esp_simplebo
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(linkr_ble_bridge)
 
-# External BSS must be excluded from the runtime PSRAM heap on every C5 build,
-# including builds that select a custom HAL through ZEPHYR_MODULES.
-if(CONFIG_SOC_SERIES_ESP32C5 AND CONFIG_ESP_SPIRAM AND
+# External BSS must be excluded from the runtime PSRAM heap on every target
+# that migrates data into .ext_ram.bss (src/ext_ram.h), including builds that
+# select a custom HAL through ZEPHYR_MODULES. Without the subtraction the
+# shared heap is registered over the first migrated buffer and sys_heap_init()
+# overwrites it at boot.
+if(CONFIG_ESP_SPIRAM AND
+   (CONFIG_SOC_SERIES_ESP32C5 OR CONFIG_SOC_SERIES_ESP32S3) AND
    NOT CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY)
-  message(FATAL_ERROR "C5 PSRAM requires SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY")
+  message(FATAL_ERROR "PSRAM data buffers require SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY")
 endif()
 
 if(CONFIG_SOC_SERIES_ESP32C3)

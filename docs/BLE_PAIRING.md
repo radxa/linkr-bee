@@ -11,6 +11,7 @@
 | ESP32-C5 DevKitC | GPIO1 | `PAIRING_GPIO_AUTH=y` |
 | **Linkr Bee X1.0（MV013）** | **GPIO3**（USER_KEY） | `PAIRING_GPIO_AUTH=y` |
 | ESP32-WROOM-32 DevKitC | GPIO4（可选） | `PAIRING_GPIO_AUTH=n` |
+| YD-ESP32-S3（N16R8，台架） | GPIO0（BOOT，可选） | `PAIRING_GPIO_AUTH=n` |
 
 C5 DevKitC 正式固件仍需在 GPIO1 外接按钮或跳线。受控台架测试可显式加载
 `dev_c5_open_pairing.conf`，但该开发镜像允许附近任何主机配对，不适合正式使用；
@@ -20,7 +21,7 @@ C5 DevKitC 正式固件仍需在 GPIO1 外接按钮或跳线。受控台架测�
 autobaud 时作按键，GPIO2 为活动 LED）。Linkr Bee X1.0 上 GPIO3 同时是恢复出厂
 输入：上电时按住 ≥2 秒清设置，正常运行时按下则作为配对授权。用按钮或跳线将配对 GPIO 接到 Bee 的 GND。
 
-以下步骤适用于启用授权检查的板型（C3/C5；WROOM 需先设置
+以下步骤适用于启用授权检查的板型（C3/C5；WROOM 与 YD-ESP32-S3 需先设置
 `CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=y`）：
 
 1. 新主机/App 首次连接前，按下配对 GPIO 后松开（X1.0 上就是 USER_KEY，按一下即可）。
