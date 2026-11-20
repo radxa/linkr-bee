@@ -135,7 +135,13 @@ GPIO48 and two single-colour TX/RX LEDs that sit on the UART0 lines
 sets `channel-count = <4>`; with the X1 board's 24-bit frame the shift register
 is one byte short, red leaks into green and the pixel cannot be turned off. The
 LED nets to GPIO48 only through a solder bridge that the factory leaves open,
-so close that bridge before the LED can light.
+so close that bridge before the LED can light. The part also drops the leading
+edge of the first frame sent after the data line has been idle: the bit cells
+shift and the pixel latches the wrong channels (red arrives as yellow), or
+keeps its previous colour when the frame is all zeros. `led_write()` therefore
+transmits every frame twice; the line is already switching when the second
+frame starts, so the pixel latches the intended value, and the extra 300 us
+latch is irrelevant for a status light.
 UART0 is therefore the bridge UART, so those two LEDs show live
 bridge traffic in each direction. Because that is this board's data
 indication, the addressable RGB is not a second status light:
