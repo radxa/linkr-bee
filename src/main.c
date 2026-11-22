@@ -983,6 +983,16 @@ static void connected(struct bt_conn *conn, uint8_t err)
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
+	/* Release the reference the peer table took in
+	 * linkr_ble_peer_connected(), and close its console session. That
+	 * reference is what keeps the bt_conn object allocated: dropping only
+	 * the pointer in ble_links() (as this handler used to) leaked one
+	 * connection object per link, and after CONFIG_BT_MAX_CONN of them the
+	 * host could no longer allocate the connection object that connectable
+	 * advertising needs. bt_le_adv_start() then failed with -ENOMEM on
+	 * every retry, so the board stayed connected to its current peer but
+	 * was never discoverable again until it was restarted. */
+	(void)linkr_ble_peer_disconnected(conn);
 	ble_link_drop(conn);
 	linkr_status_led_ble(ble_link_count() > 0);
 	k_mutex_lock(&conn_lock, K_FOREVER);

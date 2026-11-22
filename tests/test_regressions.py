@@ -99,6 +99,21 @@ class FirmwareTests(unittest.TestCase):
         (summary,) = self.run_scenario("forward")
         self.assertEqual(summary, ["forward", "101", "101"])
 
+    def test_ble_disconnect_releases_the_peer_table_reference(self):
+        """A disconnect must give back the reference taken on connect.
+
+        linkr_ble_peer_connected() stores a bt_conn_ref() in the peer table.
+        Releasing only the ble_links[] pointer on disconnect leaked one
+        connection object per link; after CONFIG_BT_MAX_CONN links the host
+        could no longer allocate the object connectable advertising needs, so
+        bt_le_adv_start() returned -ENOMEM on every retry and the board stayed
+        connected but undiscoverable until it was restarted.
+        """
+        main = (ROOT / "src/main.c").read_text()
+        body = extract(main, "static void disconnected(struct bt_conn *conn, uint8_t reason)",
+                       "\nstatic void recycled(void)", ["disconnected"])
+        self.assertIn("linkr_ble_peer_disconnected(conn);", body)
+
     def test_webdav_setters_reject_before_mutating_and_publish_atomically(self):
         """The production setters, not a simulation of them."""
         (summary,) = self.run_scenario("setters")
