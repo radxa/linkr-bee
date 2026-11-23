@@ -15,6 +15,96 @@
     <link rel="stylesheet" href="./ble_guidance.css?v=20261029" />
     <link rel="stylesheet" href="./agent_choices.css?v=20261029" />
     <link rel="stylesheet" href="./agent_ui.css?v=20261029" />
+    <script>
+      /* Android WebView below Chrome 100 lacks AbortSignal.prototype.throwIfAborted
+       * (Chrome 100), AbortSignal.timeout (103) and AbortSignal.any (116). Every
+       * abort check in this app calls throwIfAborted(), so on such a WebView the
+       * automatic reconnect dies with "n?.throwIfAborted is not a function"
+       * before it can dial. Loaded here, ahead of every module, so nothing can
+       * capture the missing methods first. */
+      (function patchAbortSignal() {
+        if (typeof AbortSignal !== "function" || typeof AbortController !== "function") return;
+        const proto = AbortSignal.prototype;
+        if (!("reason" in proto)) {
+          const reasons = new WeakMap();
+          const nativeAbort = AbortController.prototype.abort;
+          const abortError = () => new DOMException("The operation was aborted.", "AbortError");
+          Object.defineProperty(proto, "reason", {
+            configurable: true,
+            get() {
+              if (!this.aborted) return undefined;
+              // Signals aborted by the browser may never pass through our controller.
+              if (!reasons.has(this)) reasons.set(this, abortError());
+              return reasons.get(this);
+            },
+          });
+          AbortController.prototype.abort = function abort(reason) {
+            const signal = this.signal;
+            if (!signal.aborted) reasons.set(signal, reason === undefined ? abortError() : reason);
+            // The reason must already be visible to synchronous abort listeners.
+            return nativeAbort.call(this, reason);
+          };
+          AbortSignal.abort = function abort(reason) {
+            const controller = new AbortController();
+            controller.abort(reason);
+            return controller.signal;
+          };
+        }
+        if (!proto.throwIfAborted) {
+          proto.throwIfAborted = function throwIfAborted() {
+            if (this.aborted) throw this.reason;
+          };
+        }
+        if (!AbortSignal.timeout) {
+          AbortSignal.timeout = function timeout(ms) {
+            const delay = Math.trunc(+ms);
+            if (!Number.isSafeInteger(delay) || delay < 0) {
+              throw new TypeError("AbortSignal.timeout() needs a non-negative safe integer");
+            }
+            const controller = new AbortController();
+            // Web timers accept only a signed 32-bit delay.
+            function schedule(remaining) {
+              const chunk = Math.min(remaining, 0x7fffffff);
+              setTimeout(() => {
+                if (remaining > chunk) schedule(remaining - chunk);
+                else controller.abort(new DOMException("The operation timed out.", "TimeoutError"));
+              }, chunk);
+            }
+            schedule(delay);
+            return controller.signal;
+          };
+        }
+        if (!AbortSignal.any) {
+          const getAborted = Object.getOwnPropertyDescriptor(proto, "aborted").get;
+          AbortSignal.any = function any(signals) {
+            const sources = new Set();
+            // Validate the whole sequence, including signals from other realms,
+            // before returning early or installing any listeners.
+            if (signals == null || typeof signals !== "object" && typeof signals !== "function") {
+              throw new TypeError("AbortSignal.any() needs an iterable of signals");
+            }
+            for (const signal of signals) {
+              getAborted.call(signal);
+              sources.add(signal);
+            }
+            const controller = new AbortController();
+            function onAbort() {
+              if (!this.aborted) return;
+              for (const source of sources) source.removeEventListener("abort", onAbort);
+              controller.abort(this.reason);
+            }
+            for (const source of sources) {
+              if (source.aborted) {
+                controller.abort(source.reason);
+                return controller.signal;
+              }
+            }
+            for (const source of sources) source.addEventListener("abort", onAbort);
+            return controller.signal;
+          };
+        }
+      })();
+    </script>
   </head>
   <body>
     <main class="app-shell">
