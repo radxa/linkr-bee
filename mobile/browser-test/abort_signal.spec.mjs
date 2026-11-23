@@ -91,3 +91,80 @@ test("an aborted signal from the backfill stops work that checks it", async ({ p
   expect(stopped.outcome).toBe("AbortError");
   expect(stopped.steps).toBeLessThan(5);
 });
+
+test("pre-98 controllers preserve the first reason during dispatch and through composition", async ({ page }) => {
+  await page.addInitScript(stripNative);
+  await page.addInitScript(() => {
+    delete AbortSignal.prototype.reason;
+    const nativeAbort = AbortController.prototype.abort;
+    AbortController.prototype.abort = function () { nativeAbort.call(this); };
+    // Chrome 93–97 exposed this factory but ignored the reason.
+    const nativeFactory = AbortSignal.abort;
+    AbortSignal.abort = () => nativeFactory();
+  });
+  await page.goto("/?demo=board");
+  const observed = await page.evaluate(async () => {
+    const timed = AbortSignal.timeout(1);
+    const combined = AbortSignal.any(new Set([timed]));
+    const during = await new Promise(resolve => {
+      combined.addEventListener("abort", () => resolve(combined.reason), { once: true });
+    });
+    const controller = new AbortController();
+    controller.abort(null);
+    controller.abort("second reason");
+    const explicit = new Error("disconnected");
+    let thrown;
+    try { combined.throwIfAborted(); } catch (error) { thrown = error; }
+    return {
+      name: during.name,
+      identity: during === timed.reason && thrown === during,
+      firstReason: controller.signal.reason,
+      factory: AbortSignal.abort(explicit).reason === explicit,
+      defaultName: AbortSignal.abort().reason.name,
+    };
+  });
+  expect(observed).toEqual({ name: "TimeoutError", identity: true, firstReason: null, factory: true, defaultName: "AbortError" });
+});
+
+test("any validates iterators and releases all listeners when a child aborts", async ({ page }) => {
+  await page.addInitScript(stripNative);
+  await page.goto("/?demo=board");
+  const result = await page.evaluate(() => {
+    const parent = new AbortController().signal;
+    const listeners = new Set();
+    const add = parent.addEventListener.bind(parent);
+    const remove = parent.removeEventListener.bind(parent);
+    parent.addEventListener = (type, fn, options) => { listeners.add(fn); add(type, fn, options); };
+    parent.removeEventListener = (type, fn, options) => { listeners.delete(fn); remove(type, fn, options); };
+    const child = new AbortController();
+    function* inputs() { yield parent; yield child.signal; yield parent; }
+    const combined = AbortSignal.any(inputs());
+    const attached = listeners.size;
+    child.abort("retired");
+    let invalid;
+    try { AbortSignal.any([parent, child.signal, {}]); } catch (error) { invalid = error.name; }
+    return { attached, remaining: listeners.size, reason: combined.reason, invalid };
+  });
+  expect(result).toEqual({ attached: 1, remaining: 0, reason: "retired", invalid: "TypeError" });
+});
+
+test("long timeouts use bounded timer chunks and expire after the last one", async ({ page }) => {
+  await page.addInitScript(stripNative);
+  await page.goto("/?demo=board");
+  const observed = await page.evaluate(() => {
+    const timers = [];
+    const delays = [];
+    const nativeTimer = window.setTimeout;
+    window.setTimeout = (cb, ms) => { timers.push(cb); delays.push(ms); return timers.length; };
+    try {
+      const signal = AbortSignal.timeout(2 ** 31);
+      timers.shift()();
+      const afterFirst = signal.aborted;
+      timers.shift()();
+      return { delays, afterFirst, reason: signal.reason.name };
+    } finally {
+      window.setTimeout = nativeTimer;
+    }
+  });
+  expect(observed).toEqual({ delays: [2147483647, 1], afterFirst: false, reason: "TimeoutError" });
+});
