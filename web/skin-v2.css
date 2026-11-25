@@ -1518,8 +1518,9 @@ html.settings-drawer-layout .settings-tabs,
     padding: 8px 10px;
   }
 
+  /* The brand and status share the width left by the action buttons. */
   .brand {
-    flex: 0 1 auto;
+    flex: 1 1 148px;
     min-width: 0;
   }
 
@@ -1527,43 +1528,43 @@ html.settings-drawer-layout .settings-tabs,
     min-width: 0;
   }
 
-  .brand h1 {
+  .brand h1,
+  .brand .support-text {
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
   }
 
   .top-right {
-    display: flex;
-    flex: 0 0 auto;
+    display: contents;
   }
 
-  /* v1 drops the pill on touch layouts. A serial terminal is exactly where you
-   * need the link state at a glance, so it stays — just tighter. */
+  .top-actions {
+    order: 2;
+    flex: none;
+    flex-wrap: nowrap;
+  }
+
   .status-pill {
     display: inline-flex;
-    flex: 0 0 auto;
-    order: -1;
+    order: 1;
+    flex: 0 2 auto;
+    min-width: 96px;
+    max-width: 42vw;
     padding: 5px 9px;
     font-size: 11px;
   }
 
-  @media (max-width: 600px) {
-    .status-pill .device-name {
-      display: none;
-    }
+  .status-pill .status-dot {
+    flex: none;
+  }
 
-    /* Keep the board identity visible on a phone: the support line is hidden
-     * there, so the brand block gets a dedicated one-line device name. */
-    .brand .compact-device:not([hidden]) {
-      display: block;
-      margin-top: 1px;
-      overflow: hidden;
-      font-size: 11px;
-      color: var(--placeholder);
-      white-space: nowrap;
-      text-overflow: ellipsis;
-    }
+  .status-pill #statusText,
+  .status-pill .device-name {
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
   }
 
   .terminal-card .terminal-key,
@@ -1593,16 +1594,59 @@ html.settings-drawer-layout .settings-tabs,
   }
 }
 
+/* On phones the device name moves from the status pill to the brand. */
+@media (max-width: 600px) {
+  .top-actions .mobile-connect {
+    max-width: 116px;
+    min-width: 84px;
+    padding: 0 8px;
+  }
+
+  .mobile-connect .connect-icon {
+    flex: none;
+  }
+
+  /* A two-word action such as "Cancel reconnect" fits on two lines. */
+  .top-actions .mobile-connect .btn-label {
+    white-space: normal;
+    line-height: 1.1;
+  }
+
+  .status-pill .device-name {
+    display: none;
+  }
+
+  .status-pill {
+    max-width: 52vw;
+  }
+
+  .status-pill #statusText {
+    flex: 1 1 auto;
+  }
+
+  /* The support line gives way to the compact device line; it is the one that
+   * could be squeezed into a vertical column. */
+  .brand .support-text {
+    display: none;
+  }
+
+  .brand .compact-device:not([hidden]) {
+    display: block;
+    margin-top: 1px;
+    overflow: hidden;
+    font-size: 11px;
+    color: var(--placeholder);
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+}
+
 /* Phones: theme and language already live in the drawer header, so the topbar
  * keeps only the two controls that matter while a device is in hand. */
 @media (max-width: 520px) {
   .top-actions #themeButton,
   .top-actions #langButton {
     display: none;
-  }
-
-  .top-actions .mobile-connect {
-    min-width: 92px;
   }
 
   .brand h1 {
@@ -1822,11 +1866,6 @@ button,
 
   #statusText {
     display: none;
-  }
-
-  .top-actions .mobile-connect {
-    min-width: 84px;
-    padding: 0 12px;
   }
 
   .brand h1 {
