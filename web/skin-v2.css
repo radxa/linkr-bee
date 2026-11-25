@@ -1518,12 +1518,10 @@ html.settings-drawer-layout .settings-tabs,
     padding: 8px 10px;
   }
 
+  /* The brand and status share the width left by the action buttons. */
   .brand {
-    /* Keep the product name readable. With `min-width: 0` the pill and the
-     * action buttons took everything and the title collapsed to zero width,
-     * leaving only the hexagon. */
-    flex: 1 1 auto;
-    min-width: 148px;
+    flex: 1 1 148px;
+    min-width: 0;
   }
 
   .brand > div {
@@ -1538,28 +1536,27 @@ html.settings-drawer-layout .settings-tabs,
   }
 
   .top-right {
-    display: flex;
-    flex: 0 0 auto;
+    display: contents;
   }
 
-  /* v1 drops the pill on touch layouts. A serial terminal is exactly where you
-   * need the link state at a glance, so it stays — just tighter. */
+  .top-actions {
+    order: 2;
+    flex: none;
+    flex-wrap: nowrap;
+  }
+
   .status-pill {
     display: inline-flex;
-    flex: 0 0 auto;
-    order: -1;
+    order: 1;
+    flex: 0 2 auto;
+    min-width: 96px;
+    max-width: 42vw;
     padding: 5px 9px;
     font-size: 11px;
   }
 
-  /* The reconnect line is much longer than "Disconnected" ("6 秒后重连（第
-   * 4/6 次）"). Left at its content width it pushed the brand down to a
-   * one-character column; let it shrink and ellipsize instead, but keep a floor
-   * so the countdown itself stays readable. */
-  .status-pill {
-    flex: 0 1 auto;
-    min-width: 96px;
-    max-width: 42vw;
+  .status-pill .status-dot {
+    flex: none;
   }
 
   .status-pill #statusText,
@@ -1596,21 +1593,30 @@ html.settings-drawer-layout .settings-tabs,
     padding: 4px 6px 0;
   }
 }
-/* Phones. This used to be nested inside the 900 px block above, which plain CSS
- * does not support: the whole phone layer was ignored, so the pill kept its
- * device name, the brand kept the long support line, and the header could
- * squeeze that line into a one-character-wide column. */
+
+/* On phones the device name moves from the status pill to the brand. */
 @media (max-width: 600px) {
+  .top-actions .mobile-connect {
+    max-width: 116px;
+    min-width: 84px;
+    padding: 0 8px;
+  }
+
+  .mobile-connect .connect-icon {
+    flex: none;
+  }
+
+  /* A two-word action such as "Cancel reconnect" fits on two lines. */
+  .top-actions .mobile-connect .btn-label {
+    white-space: normal;
+    line-height: 1.1;
+  }
+
   .status-pill .device-name {
     display: none;
   }
 
-  /* Reserve room for the countdown. Without a floor the pill collapsed to the
-   * dot alone once the brand and the action buttons had taken their share, so
-   * "6 秒后重连（第 4/6 次）" became invisible. */
   .status-pill {
-    flex: 0 1 auto;
-    min-width: 96px;
     max-width: 52vw;
   }
 
@@ -1635,17 +1641,12 @@ html.settings-drawer-layout .settings-tabs,
   }
 }
 
-
 /* Phones: theme and language already live in the drawer header, so the topbar
  * keeps only the two controls that matter while a device is in hand. */
 @media (max-width: 520px) {
   .top-actions #themeButton,
   .top-actions #langButton {
     display: none;
-  }
-
-  .top-actions .mobile-connect {
-    min-width: 92px;
   }
 
   .brand h1 {
@@ -1865,11 +1866,6 @@ button,
 
   #statusText {
     display: none;
-  }
-
-  .top-actions .mobile-connect {
-    min-width: 84px;
-    padding: 0 12px;
   }
 
   .brand h1 {

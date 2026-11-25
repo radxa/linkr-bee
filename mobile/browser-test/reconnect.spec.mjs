@@ -86,6 +86,33 @@ async function eventLogText(page) {
   return panel.innerText();
 }
 
+for (const [width, label] of [[338, "Disconnect"], [521, "Cancel reconnect"], [320, "Cancel reconnect"]]) {
+  test(`header actions stay reachable at ${width}px with ${label}`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 844 });
+    await connectLan(page);
+    if (label === "Cancel reconnect") {
+      await page.evaluate(() => { window.__linkrReconnectDelays = [60_000]; });
+      await dropLan(page);
+    }
+    const action = page.locator("#mobileConnectBtn");
+    const settings = page.locator("#panelToggle");
+    await expect(action.locator(".btn-label")).toHaveText(label);
+    if (await settings.getAttribute("aria-expanded") === "true") {
+      await page.locator("#drawerClose").click();
+    }
+
+    for (const button of [action, settings]) {
+      await expect(button).toBeInViewport({ ratio: 1 });
+      await button.click({ trial: true });
+    }
+    await settings.click();
+    await expect(settings).toHaveAttribute("aria-expanded", "true");
+    await page.locator("#drawerClose").click();
+    await action.click();
+    await expect(action.locator(".btn-label")).toHaveText("Connect");
+  });
+}
+
 test("an unexpected LAN drop reconnects automatically and keeps the log", async ({ page }) => {
   await connectLan(page);
   const before = await page.evaluate(() => window.__ws.instances.length);
