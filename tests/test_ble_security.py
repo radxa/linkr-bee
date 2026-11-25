@@ -24,7 +24,7 @@ class BleSecurityTests(unittest.TestCase):
                         "-Werror", "-I", str(directory), str(ROOT / "tests/ble_security_harness.c"),
                         "-o", str(cls.binary)], check=True)
 
-    def test_c3_c5_production_configs_require_gpio_authorization(self):
+    def test_production_configs_require_gpio_authorization(self):
         for board in ["esp32c3_supermini", "esp32c3_devkitm", "esp32c3_devkitc",
                       "esp32c5_devkitc_esp32c5_hpcore", "linkr_bee_x1_0"]:
             with self.subTest(board=board):

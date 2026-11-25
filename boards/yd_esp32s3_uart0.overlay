@@ -1,0 +1,16 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* Bench option for the CH343P and UART0 activity LEDs on GPIO43/44.
+ * On reset the ROM transmits at 115200 baud on the same TX pin. */
+/ {
+	chosen {
+		zephyr,linkr-ble-uart = &uart0;
+	};
+};
+
+&uart0 {
+	status = "okay";
+};
+
+&uart1 {
+	status = "disabled";
+};

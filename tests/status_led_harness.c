@@ -104,6 +104,33 @@ int main(int argc, char **argv)
         assert(linkr_status_led_set_rgb(1, 2, 3) == -ENODEV);
         return 0;
     }
+#if defined(CONFIG_LINKR_BLE_BRIDGE_RGB_MANUAL_ONLY)
+    if (scenario == 13) {
+        /* The bench board has UART TX/RX LEDs, so the addressable pixel is a
+         * user light: dark by default, unaffected by BLE/WiFi/AI/activity,
+         * and a manual colour is held past the old five-second preview. */
+        assert(linkr_status_led_init() == 0);
+        advance(100);
+        expect(0, 0, 0);
+        linkr_status_led_ble(true);
+        linkr_status_led_wifi(true);
+        linkr_status_led_ai(true);
+        advance(200);
+        expect(0, 0, 0);
+        assert(linkr_status_led_set_rgb(255, 0, 0) == 0);
+        advance(300);
+        expect(77, 0, 0);
+        advance(6000);
+        expect(77, 0, 0);
+        linkr_status_led_activity();
+        advance(6100);
+        expect(77, 0, 0);
+        linkr_status_led_off();
+        advance(6200);
+        expect(0, 0, 0);
+        return 0;
+    }
+#endif
     assert(linkr_status_led_init() == 0);
     if (scenario == 12) {
         /* Nothing has ever connected: white says the board is up and well. */

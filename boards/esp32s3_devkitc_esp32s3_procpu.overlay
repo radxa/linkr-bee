@@ -1,0 +1,61 @@
+/*
+ * VCC-GND YD-ESP32-S3 V1.4 (8 MB and N16R8 modules).
+ * UART1 on GPIO17/18 carries bridge traffic. UART0 on GPIO43/44 is also
+ * wired to the CH343P and carries the ROM boot log before Zephyr starts.
+ * The console uses the native USB Serial/JTAG port on GPIO19/20.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/ {
+	chosen {
+		zephyr,linkr-ble-uart = &uart1;
+		zephyr,console = &usb_serial;
+		zephyr,shell-uart = &usb_serial;
+	};
+
+	aliases {
+		linkr-pairing = &linkr_pairing;
+		linkr-rgb = &linkr_rgb;
+	};
+
+	linkr_pairing_keys {
+		compatible = "gpio-keys";
+
+		linkr_pairing: pairing {
+			label = "Linkr pairing authorization (BOOT)";
+			gpios = <&gpio0 0 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+		};
+	};
+
+	/* U1 on V1.4 is an XL-5050RGBC-WS2812B. GPIO48 is pin 16 of
+	 * gpio1 and reaches DIN through the RGB solder link. */
+	linkr_rgb: linkr-rgb {
+		compatible = "radxa,linkr-ws2812";
+		data-gpios = <&gpio1 16 GPIO_ACTIVE_HIGH>;
+		chain-length = <1>;
+		color-order = "GRB";
+		channel-count = <3>;
+		status = "okay";
+	};
+};
+
+&uart0 {
+	status = "disabled";
+};
+
+&uart1 {
+	status = "okay";
+	current-speed = <115200>;
+	pinctrl-0 = <&uart1_default>;
+	pinctrl-names = "default";
+};
+
+&usb_serial {
+	status = "okay";
+};
+
+/* Enable the WiFi node used by the single Linkr firmware. */
+&wifi {
+	status = "okay";
+};

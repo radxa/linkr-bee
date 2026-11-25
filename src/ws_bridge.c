@@ -47,11 +47,8 @@ LOG_MODULE_REGISTER(linkr_ws, LOG_LEVEL_INF);
  * saw data ready, so this only covers a frame split across TCP segments. */
 #define WS_AUTH_RECV_TIMEOUT_MS 500
 
-/* The per-client TX ring is a byte-oriented Zephyr ring buffer: ring_buf_*
- * accept arbitrary sizes and nothing here masks the size (there is no
- * "& (WS_TX_BUF_SIZE - 1)" arithmetic), so a power-of-two size is not an
- * invariant this code needs. The assert that used to demand one rejected most
- * of the Kconfig range for no functional reason and was dropped instead. */
+BUILD_ASSERT(WS_TX_BUF_SIZE <= RING_BUFFER_MAX_SIZE,
+	     "WebSocket TX ring exceeds the configured ring buffer index size");
 BUILD_ASSERT(sizeof(CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_AUTH_TOKEN) <=
 		     WS_RX_BUF_SIZE,
 	     "WebSocket auth token must fit in one receive buffer");

@@ -19,7 +19,8 @@
  *
  * Only valid on SoCs whose linker script defines the section: the ESP32-C3
  * has no PSRAM support at all, so the attribute expands to nothing there and
- * the buffer stays in DRAM.
+ * the buffer stays in DRAM. The S3 linker script defines the same section and
+ * its PSRAM init zeroes it, so the C5 rules apply unchanged.
  *
  * Rules for what belongs here:
  *  - Data only: no kernel objects (k_mutex/k_sem/k_msgq/ring_buf structures
@@ -28,7 +29,8 @@
  *    round trip inside an interrupt handler is not acceptable).
  *  - Safe for the object to be zeroed at PSRAM init instead of at load.
  */
-#if defined(CONFIG_ESP_SPIRAM) && defined(CONFIG_SOC_SERIES_ESP32C5)
+#if defined(CONFIG_ESP_SPIRAM) && \
+	(defined(CONFIG_SOC_SERIES_ESP32C5) || defined(CONFIG_SOC_SERIES_ESP32S3))
 #define LINKR_EXT_RAM_BSS __attribute__((section(".ext_ram.bss")))
 #else
 #define LINKR_EXT_RAM_BSS

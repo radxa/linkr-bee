@@ -3,7 +3,7 @@
 set -eu
 
 repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
-boards=${BOARD:-"esp32c3_supermini esp32c3_devkitm esp32c3_devkitc esp32c5_devkitc/esp32c5/hpcore linkr_bee_x1_0 esp32_devkitc/esp32/procpu"}
+boards=${BOARD:-"esp32c3_supermini esp32c3_devkitm esp32c3_devkitc esp32c5_devkitc/esp32c5/hpcore linkr_bee_x1_0 esp32_devkitc/esp32/procpu esp32s3_devkitc/esp32s3/procpu"}
 
 python3 -m unittest discover -s "$repo_dir/tests" -v
 
@@ -53,7 +53,7 @@ for board in $boards; do
   if grep -Eq '^CONFIG_SOC_SERIES_ESP32(C3|C5)=y$' "$config"; then
     grep -qx 'CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=y' "$config"
   fi
-  if grep -qx 'CONFIG_SOC_SERIES_ESP32C3=y' "$config"; then
+  if grep -Eq '^CONFIG_SOC_SERIES_ESP32(C3|S3)=y$' "$config"; then
     grep -qx 'CONFIG_ESP32_BT_CTLR_LE_SECURITY_ENABLE=y' "$config"
   fi
   if [ "$board" = "linkr_bee_x1_0" ]; then
@@ -111,6 +111,69 @@ for board in $boards; do
         exit 1
         ;;
     esac
+    # The release overlay leaves the RGB driver inactive. Also compile it
+    # against the C5 register definitions with a pixel on the first GPIO bank.
+    west build -p always -d "$build_dir-rgb" -b "$board" "$repo_dir" -t app -- \
+      -DEXTRA_DTC_OVERLAY_FILE="$repo_dir/tests/esp32c5_rgb.overlay"
+  fi
+  # The S3 target has two variants: the default build makes no PSRAM
+  # assumption (so it runs on 8 MB-flash modules with or without a 2 MB part),
+  # and an N16R8 build adds the 16 MB flash / 8 MB octal PSRAM sizes plus the
+  # enlarged buffers. Check both so neither silently drifts.
+  if grep -qx 'CONFIG_SOC_SERIES_ESP32S3=y' "$config"; then
+    grep -qx 'CONFIG_LINKR_BLE_BRIDGE_RGB_STATUS_LED=y' "$config"
+    grep -qx 'CONFIG_LINKR_BLE_BRIDGE_RGB_MANUAL_ONLY=y' "$config"
+    # Default variant: no external RAM, data buffers back in internal SRAM.
+    grep -qx '# CONFIG_ESP_SPIRAM is not set' "$config"
+    grep -qx '# CONFIG_RING_BUFFER_LARGE is not set' "$config"
+    grep -qx 'CONFIG_LINKR_BLE_BRIDGE_UART_RX_BUFFER_SIZE=8192' "$config"
+    grep -qx 'CONFIG_LINKR_BLE_BRIDGE_LOG_RING_SIZE=8192' "$config"
+
+    # N16R8 variant: the extra fragments must produce the 8 MB octal part and
+    # the enlarged PSRAM-resident buffers.
+    n16r8_dir="$repo_dir/build-verify-$build_name-n16r8"
+    west build -p always -d "$n16r8_dir" -b "$board" "$repo_dir" -- \
+      -DEXTRA_CONF_FILE="$repo_dir/boards/esp32s3_devkitc_esp32s3_procpu_n16r8.conf" \
+      -DEXTRA_DTC_OVERLAY_FILE="$repo_dir/boards/esp32s3_devkitc_esp32s3_procpu_n16r8.overlay"
+    n16r8_config="$n16r8_dir/zephyr/.config"
+    python3 "$repo_dir/tools/esp_simpleboot_image.py" --check "$n16r8_dir/zephyr/zephyr.bin"
+    for variant in "$build_dir" "$n16r8_dir"; do
+      dts="$variant/zephyr/zephyr.dts"
+      grep -Fq 'zephyr,linkr-ble-uart = &uart1;' "$dts"
+      grep -Fq 'zephyr,console = &usb_serial;' "$dts"
+      sed -n '/linkr_rgb: linkr-rgb {/,/};/p' "$dts" | grep -Fq 'channel-count = < 0x3 >;'
+    done
+    grep -qx 'CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y' "$n16r8_config"
+    grep -qx 'CONFIG_ESP_SPIRAM=y' "$n16r8_config"
+    grep -qx 'CONFIG_ESP_SPIRAM_SIZE=8388608' "$n16r8_config"
+    grep -qx 'CONFIG_SPIRAM_TYPE_ESPPSRAM64=y' "$n16r8_config"
+    grep -qx 'CONFIG_SPIRAM_MODE_OCT=y' "$n16r8_config"
+    grep -qx 'CONFIG_SPIRAM_SPEED_80M=y' "$n16r8_config"
+    grep -qx '# CONFIG_ESP_SPIRAM_MEMTEST is not set' "$n16r8_config"
+    grep -qx 'CONFIG_ESP_WIFI_HEAP_SYSTEM=y' "$n16r8_config"
+    grep -qx '# CONFIG_ESP_WIFI_HEAP_SPIRAM is not set' "$n16r8_config"
+    grep -qx '# CONFIG_ESP32_WIFI_NET_ALLOC_SPIRAM is not set' "$n16r8_config"
+    # .ext_ram.bss sits at 0x3Cxxxxxx on this SoC, not in internal SRAM.
+    ext_ram_start=$(awk '/_ext_ram_bss_start = ABSOLUTE/ {print $1; exit}' \
+      "$n16r8_dir/zephyr/zephyr.map")
+    case "$ext_ram_start" in
+      0x3c*) ;;
+      *)
+        echo "S3 PSRAM buffers are not in external RAM (got '${ext_ram_start:-nothing}')" >&2
+        exit 1
+        ;;
+    esac
+    # The point of this variant is to spend the extra PSRAM on buffers that
+    # make the bridge feel better, not to match the C3 defaults. Keep the
+    # enlarged settings from silently regressing, and keep the external heap
+    # big enough to fill the part.
+    grep -qx 'CONFIG_RING_BUFFER_LARGE=y' "$n16r8_config"
+    grep -qx 'CONFIG_LINKR_BLE_BRIDGE_LOG_RING_SIZE=131072' "$n16r8_config"
+    grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WEBDAV_UPLOAD_CHUNK=65536' "$n16r8_config"
+    grep -qx 'CONFIG_LINKR_BLE_BRIDGE_WS_BRIDGE_CLIENT_BUFFER_SIZE=32768' "$n16r8_config"
+    grep -qx 'CONFIG_LINKR_BLE_BRIDGE_PEER_TX_QUEUE_DEPTH=64' "$n16r8_config"
+    grep -qx 'CONFIG_LINKR_BLE_BRIDGE_UART_RX_BUFFER_SIZE=24576' "$n16r8_config"
+    grep -qx 'CONFIG_ESP_SPIRAM_HEAP_SIZE=8049120' "$n16r8_config"
   fi
   grep -qx 'CONFIG_BT_SMP_APP_PAIRING_ACCEPT=y' "$config"
   grep -qx 'CONFIG_BT_BONDING_REQUIRED=y' "$config"

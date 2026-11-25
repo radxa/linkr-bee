@@ -124,6 +124,55 @@ existing services and client limits with smaller bounded queues:
 | C3 / Bee X1.0 | 8 dynamic WiFi RX/TX buffers, 40 KiB WiFi heap reservation, 8 chunks per BLE peer, 4 KiB deferred logs, 4 KiB HTTP/system/connect stacks |
 | C5 | 6 dynamic WiFi RX/TX buffers, 36 KiB WiFi and 44000 B Bluetooth heap reservations, 12 MSYS-2 blocks, 8 controller ACL buffers of 255 bytes, 20 network buffers and 10 packet descriptors per direction |
 | WROOM | Existing 52000 B system heap, 4 KiB UART capture, 4 chunks per BLE peer, 1 KiB LAN rings, 4 KiB HTTP and 3 KiB LAN client stacks |
+| YD-ESP32-S3 (default) | No PSRAM assumption: 8 KiB UART capture, 8-chunk BLE peer queues, 32 network buffers per direction, 4 KiB HTTP stack |
+| YD-ESP32-S3 N16R8 | 7.68 MiB PSRAM heap; 128 KiB log ring, 64 KiB WebDAV chunk, 64-deep BLE peer queues and 2 × 32 KiB LAN rings in PSRAM; 24 KiB UART capture and the WiFi pools in DRAM; 5 KiB HTTP/connect/mgmt stacks |
+
+![VCC-GND YD-ESP32-S3 (N16R8)](../boards/esp32s3_devkitc_esp32s3_procpu.png)
+
+The VCC-GND YD-ESP32-S3 V1.4 bench build uses UART1 for the target console.
+Connect GPIO17 (Bee TX) to the target's RX, GPIO18 (Bee RX) to its TX, and
+connect both grounds. Use 3.3 V UART levels. Zephyr logs use the native USB
+Serial/JTAG port on GPIO19/20. The ROM boot log, CH343P, and the board's
+two TX/RX indicators use UART0 on GPIO43/44. With the default wiring, a Bee
+reset leaves the target's serial input quiet.
+
+The V1.4 schematic identifies U1 as an XL-5050RGBC-WS2812B, a 24-bit GRB
+pixel on GPIO48. Check the RGB solder link if the pixel stays dark.
+The pixel starts off and holds the colour set through `@l` at 30% brightness.
+The driver generates the waveform from IRAM.
+[V1.4 schematic](https://github.com/vcc-gnd/YD-ESP32-S3/blob/main/5-public-YD-ESP32-S3-Hardware%20info/YD-ESP32-S3-SCH-V1.4.pdf) · [U1 datasheet](https://www.xinglight.cn/uploadfile/202406/4c1ee57988f3bce.pdf)
+
+The default build makes no PSRAM assumption, so it runs on 8 MB-flash modules
+with no PSRAM as well as on an N16R8 module (where the PSRAM then stays
+unused); a 2 MB N8R2 module also uses this build, because PSRAM mode, size and
+heap placement are compile-time values:
+
+```
+west build -p always -b esp32s3_devkitc/esp32s3/procpu linkr-bee
+```
+
+The N16R8 build adds the 16 MB flash and 8 MB octal PSRAM sizes plus the
+enlarged PSRAM-resident buffers:
+
+```
+west build -p always -b esp32s3_devkitc/esp32s3/procpu linkr-bee -- \
+    -DEXTRA_CONF_FILE=boards/esp32s3_devkitc_esp32s3_procpu_n16r8.conf \
+    -DEXTRA_DTC_OVERLAY_FILE=boards/esp32s3_devkitc_esp32s3_procpu_n16r8.overlay
+```
+
+Two independent overlays are available for bench hardware. Include the relevant
+paths in `EXTRA_DTC_OVERLAY_FILE` and separate multiple paths with semicolons
+inside one quoted argument. For N16R8, retain its memory overlay in that list.
+
+- `boards/yd_esp32s3_uart0.overlay` routes bridge traffic through the CH343P and
+  the TX/RX indicators. GPIO43 transmits ROM messages at 115200 baud on reset.
+  GPIO44 shares the CH343P TX output. Use the CH343P USB port as the serial
+  endpoint or keep its transmitter isolated before attaching another TX driver.
+- `boards/yd_esp32s3_rgbw.overlay` selects a 32-bit GRBW replacement pixel.
+  The three-channel management command drives RGB and leaves W at zero.
+
+Use `xtensa-espressif_esp32s3_zephyr-elf` SDK 1.0.1 for either. This target is
+a bench configuration and is not part of the release matrix.
 
 Bee X1.0 additionally uses a 2 KiB main stack and a 1 KiB logging stack. Its
 Zephyr 4.5 diagnostic runs measured 1092 B and 732 B respectively during idle,

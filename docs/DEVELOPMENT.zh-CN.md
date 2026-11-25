@@ -118,6 +118,47 @@ Zephyr 4.5 的射频与网络代码占用更多 SRAM。默认配置保留原有�
 | C3 / Bee X1.0 | WiFi 动态 RX/TX 各 8 个、WiFi 堆预留 40 KiB、每个 BLE peer 8 块、延迟日志 4 KiB、HTTP/系统/连接线程栈各 4 KiB |
 | C5 | WiFi 动态 RX/TX 各 6 个、WiFi 堆预留 36 KiB、Bluetooth 堆预留 44000 B、12 个 MSYS-2 块、8 个 255 B 控制器 ACL 缓冲、网络缓冲各 20 个、包描述符各 10 个 |
 | WROOM | 保持 52000 B 系统堆，UART 接收 4 KiB、每个 BLE peer 4 块、LAN 环形缓冲 1 KiB、HTTP 栈 4 KiB、LAN 客户端栈 3 KiB |
+| YD-ESP32-S3（默认） | 不假设 PSRAM：8 KiB UART 接收、每个 BLE peer 8 块、网络缓冲每方向 32 个、HTTP 栈 4 KiB |
+| YD-ESP32-S3 N16R8 | 7.68 MiB PSRAM 堆；128 KiB 日志环形缓冲、64 KiB WebDAV 分块、深度 64 的 BLE peer 队列以及 2 × 32 KiB LAN 环形缓冲放入 PSRAM；24 KiB UART 接收与 WiFi 缓冲池留在 DRAM；HTTP/连接/管理线程栈各 5 KiB |
+
+![VCC-GND YD-ESP32-S3（N16R8）](../boards/esp32s3_devkitc_esp32s3_procpu.png)
+
+VCC-GND YD-ESP32-S3 V1.4 默认用 UART1 连接目标设备。将 GPIO17（Bee TX）接到
+目标 RX，GPIO18（Bee RX）接到目标 TX，两端共地，使用 3.3 V 串口电平。Zephyr
+日志走 GPIO19/20 的原生 USB Serial/JTAG。ROM 启动日志、CH343P 和板载 TX/RX
+指示灯使用 UART0（GPIO43/44）。按默认接线，Bee 复位时目标串口不会收到启动日志。
+
+V1.4 原理图将 U1 标为 XL-5050RGBC-WS2812B，GPIO48 按 24 位 GRB 格式驱动。
+灯不亮时可检查 RGB 焊桥是否已连通。该灯上电熄灭，通过 `@l` 设色后以 30%
+亮度保持，驱动在 IRAM 中生成波形。[V1.4 原理图](https://github.com/vcc-gnd/YD-ESP32-S3/blob/main/5-public-YD-ESP32-S3-Hardware%20info/YD-ESP32-S3-SCH-V1.4.pdf) · [U1 数据手册](https://www.xinglight.cn/uploadfile/202406/4c1ee57988f3bce.pdf)
+
+默认构建不假设存在 PSRAM，因此既能用于 8 MB flash、无 PSRAM 的模组，也能用于
+N16R8（此时 PSRAM 闲置不用）；2 MB 的 N8R2 模组同样使用默认构建，因为 PSRAM
+模式、容量和堆的位置都是编译期决定的：
+
+```
+west build -p always -b esp32s3_devkitc/esp32s3/procpu linkr-bee
+```
+
+N16R8 构建额外声明 16 MB flash、8 MB 八线 PSRAM，并启用放入 PSRAM 的放大缓冲：
+
+```
+west build -p always -b esp32s3_devkitc/esp32s3/procpu linkr-bee -- \
+    -DEXTRA_CONF_FILE=boards/esp32s3_devkitc_esp32s3_procpu_n16r8.conf \
+    -DEXTRA_DTC_OVERLAY_FILE=boards/esp32s3_devkitc_esp32s3_procpu_n16r8.overlay
+```
+
+以下两个台架 overlay 可独立选用。将所需路径加入 `EXTRA_DTC_OVERLAY_FILE`，
+多个路径用分号分隔，并将整个参数值放在引号内。N16R8 还需在列表中保留其内存 overlay。
+
+- `boards/yd_esp32s3_uart0.overlay` 将桥接串口切到 CH343P 和板载 TX/RX 灯所在的
+  UART0。复位时 GPIO43 会以 115200 波特率发送 ROM 日志。GPIO44 与 CH343P 的 TX
+  共线，可直接通过 CH343P 的 USB 口收发；外接另一驱动端前需隔离 CH343P 的 TX。
+- `boards/yd_esp32s3_rgbw.overlay` 适用于换装 32 位 GRBW 灯珠的板子。
+  管理命令仍使用 RGB 三通道，白色通道保持为零。
+
+两者都使用 SDK 1.0.1 的 `xtensa-espressif_esp32s3_zephyr-elf` 工具链。该目标是
+台架配置，不进入发布矩阵。
 
 Bee X1.0 另外将主线程栈设为 2 KiB、日志线程栈设为 1 KiB。Zephyr 4.5 诊断镜像在
 空闲、BLE 管理与数据收发、WiFi 扫描及 1500000 波特率 UART 回环中，分别测得

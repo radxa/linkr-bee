@@ -40,6 +40,7 @@ static const struct linkr_rgb led_activity_color = {
  *   green  - WiFi is associated (it wins over BLE: the board is reachable)
  *   cyan   - an AI session holds the console
  */
+#if !defined(CONFIG_LINKR_BLE_BRIDGE_RGB_MANUAL_ONLY)
 static const struct linkr_rgb led_blue = {0, 0, 32};
 /* Idle white. Equal channels are not white on this part: its green die is
  * markedly more efficient, so {255,255,255} reads green even at full duty
@@ -49,6 +50,7 @@ static const struct linkr_rgb led_blue = {0, 0, 32};
 static const struct linkr_rgb led_white = {255, 255, 255};
 static const struct linkr_rgb led_cyan = {0, 24, 24};
 static const struct linkr_rgb led_green = {0, 32, 0};
+#endif
 #define LED_BLINK_MS 100
 #define LED_PREVIEW_MS 5000
 #define LED_AI_LEASE_MS 15000
@@ -70,6 +72,10 @@ static void led_write(const struct linkr_rgb *color)
 		.g = (color->g * CONFIG_LINKR_BLE_BRIDGE_RGB_BRIGHTNESS + 50U) / 100U,
 		.b = (color->b * CONFIG_LINKR_BLE_BRIDGE_RGB_BRIGHTNESS + 50U) / 100U,
 	};
+	/* One frame. The bit loop lives in IRAM (see WS_IRAM in
+	 * src/linkr_ws2812.c), so an instruction fetch cannot stretch the first
+	 * high cells; this used to turn red into yellow until the loop was
+	 * moved out of flash. Sending it twice is no longer needed. */
 	(void)linkr_ws2812_write(&output, 1);
 }
 
@@ -77,6 +83,12 @@ static void led_write(const struct linkr_rgb *color)
  * ownership remains visible even during a preview. */
 static struct linkr_rgb led_color(int64_t now, const char **reason)
 {
+#if defined(CONFIG_LINKR_BLE_BRIDGE_RGB_MANUAL_ONLY)
+	/* Hold the user-selected colour across connection state changes. */
+	ARG_UNUSED(now);
+	*reason = "manual";
+	return led_base;
+#else
 	if (now < led_ai_deadline) {
 		*reason = "ai";
 		return led_cyan;
@@ -97,6 +109,7 @@ static struct linkr_rgb led_color(int64_t now, const char **reason)
 	}
 	*reason = "idle";
 	return led_white;
+#endif
 }
 
 static void led_next(int64_t *next, int64_t deadline, int64_t now)
@@ -207,6 +220,9 @@ void linkr_status_led_ai(bool active)
 
 void linkr_status_led_activity(void)
 {
+#if defined(CONFIG_LINKR_BLE_BRIDGE_RGB_MANUAL_ONLY)
+	return;
+#endif
 	if (!led_ready) return;
 	k_spinlock_key_t key = k_spin_lock(&led_lock);
 	bool start = !led_activity_active;
@@ -225,7 +241,9 @@ int linkr_status_led_set_rgb(uint8_t r, uint8_t g, uint8_t b)
 	if (!led_ready) return -ENODEV;
 	k_spinlock_key_t key = k_spin_lock(&led_lock);
 	led_base = (struct linkr_rgb){r, g, b};
+#if !defined(CONFIG_LINKR_BLE_BRIDGE_RGB_MANUAL_ONLY)
 	led_preview_deadline = k_uptime_get() + LED_PREVIEW_MS;
+#endif
 	++led_revision;
 	k_spin_unlock(&led_lock, key);
 	(void)k_work_reschedule(&led_apply_work, K_NO_WAIT);
