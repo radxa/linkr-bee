@@ -888,7 +888,66 @@ test("Pi inspects subsequent output without treating a returned prompt as comman
   await page.screenshot({ path: "test-results/agent-execution.png" });
 });
 
-test("AI keyboard collapses the terminal and restores it when dismissed", async ({ page }) => {
+test("the assistant opens full height and its toggle brings the split back", async ({ page }) => {
+  await expect(page.locator("#terminalWorkspace")).toHaveAttribute("data-agent-layout", "agent");
+  await expect(page.locator("#terminalCard")).toBeHidden();
+  const full = await page.locator("#agentPanel").boundingBox();
+  await page.locator("#agentToggleTerminal").tap();
+  await expect(page.locator("#terminalWorkspace")).toHaveAttribute("data-agent-layout", "rows");
+  await expect(page.locator("#terminalCard")).toBeVisible();
+  await expect(page.locator("#agentToggleTerminal")).toHaveAttribute("aria-pressed", "true");
+  const chat = await page.locator("#agentPanel").boundingBox();
+  const term = await page.locator("#terminalCard").boundingBox();
+  expect(term.y + term.height).toBeLessThanOrEqual(chat.y);
+  expect(chat.height).toBeLessThan(full.height);
+
+  await page.evaluate(() => { window.originalTerminal = window.__test.state.term;
+    window.__test.handleIncomingBytes(new TextEncoder().encode("KEEP_THIS_LOG\r\n")); });
+  await page.locator("#agentClose").tap();
+  await expect(page.locator("#agentPanel")).toBeHidden();
+  await expect(page.locator("#terminalCard")).toBeVisible();
+  await page.locator("#agentButton").tap();
+  await expect(page.locator("#agentPanel")).toBeVisible();
+  await expect(page.locator("#terminalWorkspace")).toHaveAttribute("data-agent-layout", "agent");
+  expect(await page.evaluate(() => window.originalTerminal === window.__test.state.term)).toBe(true);
+  expect(await page.evaluate(() => Array.from({length: window.__test.state.term.buffer.active.length}, (_,i) => window.__test.state.term.buffer.active.getLine(i)?.translateToString()).join("\n"))).toContain("KEEP_THIS_LOG");
+});
+
+test("a tool row and its approval keep the newest step in view", async ({ page }) => {
+  await chooseMode(page, "manual");
+  // A transcript taller than the pane first, so falling behind is possible at all.
+  await mockModel(page, async (_request, count) => {
+    if (count === 1) return { text: Array.from({ length: 30 }, (_, index) => `日志段 ${index + 1}：` + "串口输出的一长行内容，用来把对话区撑出滚动条。").join("\n\n") };
+    if (count === 2) return { tool: { name: "send_serial_input", args: { text: "uname -a", appendEnter: true } } };
+    if (count === 3) return { text: "已发送，等待目标输出。" };
+    // Delayed, so the person can scroll back while this answer is still coming.
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    return { text: Array.from({ length: 20 }, (_, index) => `补充说明 ${index + 1}：` + "这一段在用户已经上滚之后才到达。").join("\n\n") };
+  });
+  const gap = () => page.locator("#agentMessages").evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight);
+  await ask(page, "先读一段长日志");
+  await expect(page.locator("#agentMessages")).toContainText("日志段 30");
+  await expect.poll(gap).toBeLessThan(8);
+  // The approval opens inside the activity group, which grows the pane without
+  // adding a message: this is the step that used to stay off screen.
+  await ask(page, "发送一条命令");
+  await expect(page.locator("#agentMessages .agent-actions .btn-primary")).toBeVisible();
+  await expect.poll(gap).toBeLessThan(70);
+  // Someone reading older output keeps their place: the turn continues (approval,
+  // the execution result, then the answer) and none of it may drag them down.
+  await page.locator("#agentMessages .agent-actions .btn-primary").tap();
+  await expect(page.locator("#agentMessages")).toContainText("已发送，等待目标输出");
+  // Reading history while the next answer streams in must not drag the view down.
+  await ask(page, "再补一条");
+  await page.locator("#agentMessages").evaluate((el) => { el.scrollTop = 0; });
+  await expect(page.locator("#agentMessages")).toContainText("补充说明 20");
+  expect(await page.locator("#agentMessages").evaluate((el) => el.scrollTop)).toBeLessThan(80);
+});
+
+test("AI keyboard collapses the split terminal and restores it when dismissed", async ({ page }) => {
+  // Full height has no terminal pane to collapse; the split is what the keyboard
+  // shortens, and the peek keeps the log one tap away while it is out of view.
+  await page.locator("#agentToggleTerminal").tap();
   await expect(page.locator("#terminalCard")).toBeVisible();
   const before = await page.locator("#terminalCard").boundingBox();
   const cols = await page.evaluate(() => window.__test.state.term.cols);
@@ -916,6 +975,10 @@ test("AI keyboard collapses the terminal and restores it when dismissed", async 
 
 test("landscape keyboard keeps AI input and stop controls inside the visible viewport", async ({ page }) => {
   await page.setViewportSize({ width: 844, height: 390 });
+  await chooseMode(page, "manual");
+  await mockModel(page, () => ({ tool: { name: "send_serial_input", args: { text: "pwd", appendEnter: true } } }));
+  await ask(page);
+  await expect(page.locator("#agentMessages .agent-actions .btn-primary")).toBeVisible();
   await page.locator("#agentQuestion").focus();
   await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   await page.evaluate(() => {
@@ -924,24 +987,56 @@ test("landscape keyboard keeps AI input and stop controls inside the visible vie
   });
   await expect(page.locator("#terminalCard")).toBeHidden();
   await expect(page.locator("#agentActiveMode")).toBeVisible();
-  await expect.poll(() => page.locator("#agentAsk").evaluate((button) => button.getBoundingClientRect().bottom)).toBeLessThanOrEqual(215);
+  for (const id of ["agentQuestion", "agentStop"]) {
+    const control = page.locator(`#${id}`);
+    await expect(control).toBeVisible();
+    await expect.poll(() => control.evaluate(el => el.getBoundingClientRect().bottom)).toBeLessThanOrEqual(215);
+  }
   await page.screenshot({ path: "test-results/agent-keyboard-landscape.png" });
+  await page.locator("#agentStop").tap();
+  await expect(page.locator("#agentAsk")).toBeEnabled();
 });
 
-for (const [name, width, height, orientation] of [["phone", 390, 844, "rows"], ["tablet", 1194, 834, "columns"], ["narrow tablet window", 744, 1000, "rows"]]) {
-  test(`${name} uses ${orientation} without replacing the terminal`, async ({ page }) => {
+for (const [name, width, height, layout] of [["phone", 390, 844, "agent"], ["tablet", 1194, 834, "columns"], ["narrow tablet window", 744, 1000, "agent"]]) {
+  test(`${name} uses ${layout} without replacing the terminal`, async ({ page }) => {
     await page.setViewportSize({ width, height });
-    await expect(page.locator("#terminalWorkspace")).toHaveAttribute("data-agent-layout", orientation);
-    const term = await page.locator("#terminalCard").boundingBox();
+    await expect(page.locator("#terminalWorkspace")).toHaveAttribute("data-agent-layout", layout);
     const chat = await page.locator("#agentPanel").boundingBox();
-    if (orientation === "rows") expect(term.y + term.height).toBeLessThanOrEqual(chat.y);
-    else expect(term.x + term.width).toBeLessThanOrEqual(chat.x);
+    // The toggle exists at every width; what it switches is what differs.
+    await expect(page.locator("#agentToggleTerminal")).toBeVisible();
+    if (layout === "columns") {
+      // A wide window opens with both panes, so the toggle starts pressed.
+      const term = await page.locator("#terminalCard").boundingBox();
+      expect(term.x + term.width).toBeLessThanOrEqual(chat.x);
+      await expect(page.locator("#agentToggleTerminal")).toHaveAttribute("aria-pressed", "true");
+      await page.locator("#agentToggleTerminal").tap();
+      await expect(page.locator("#terminalWorkspace")).toHaveAttribute("data-agent-layout", "agent");
+      await expect(page.locator("#terminalCard")).toBeHidden();
+      await expect(page.locator("#agentToggleTerminal")).toHaveAttribute("aria-pressed", "false");
+      // Alone, the assistant owns the whole workspace: wider than the right column.
+      expect((await page.locator("#agentPanel").boundingBox()).width).toBeGreaterThan(chat.width);
+      await page.locator("#agentToggleTerminal").tap();
+      await expect(page.locator("#terminalWorkspace")).toHaveAttribute("data-agent-layout", "columns");
+      await expect(page.locator("#terminalCard")).toBeVisible();
+    } else {
+      // A narrow window opens the assistant alone, with the terminal one tap away.
+      await expect(page.locator("#terminalCard")).toBeHidden();
+      await expect(page.locator("#agentToggleTerminal")).toHaveAttribute("aria-pressed", "false");
+      await page.locator("#agentToggleTerminal").tap();
+      await expect(page.locator("#terminalWorkspace")).toHaveAttribute("data-agent-layout", "rows");
+      const term = await page.locator("#terminalCard").boundingBox();
+      expect(term.y + term.height).toBeLessThanOrEqual((await page.locator("#agentPanel").boundingBox()).y);
+      expect((await page.locator("#agentPanel").boundingBox()).height).toBeLessThan(chat.height);
+      await page.locator("#agentToggleTerminal").tap();
+      await expect(page.locator("#terminalWorkspace")).toHaveAttribute("data-agent-layout", "agent");
+    }
     expect(chat.x + chat.width).toBeLessThanOrEqual(width);
     expect(chat.y + chat.height).toBeLessThanOrEqual(height);
     await page.evaluate(() => { window.originalTerminal = window.__test.state.term;
       window.__test.handleIncomingBytes(new TextEncoder().encode("KEEP_THIS_LOG\r\n")); });
     await page.locator("#agentClose").tap();
     await expect(page.locator("#agentPanel")).toBeHidden();
+    await expect(page.locator("#terminalCard")).toBeVisible();
     await page.locator("#agentButton").tap();
     await expect(page.locator("#agentPanel")).toBeVisible();
     expect(await page.evaluate(() => window.originalTerminal === window.__test.state.term)).toBe(true);
@@ -952,6 +1047,8 @@ for (const [name, width, height, orientation] of [["phone", 390, 844, "rows"], [
 }
 
 test("show terminal switches input back to UART while the keyboard is open", async ({ page }) => {
+  await page.locator("#agentToggleTerminal").tap();
+  await expect(page.locator("#terminalWorkspace")).toHaveAttribute("data-agent-layout", "rows");
   await page.locator("#agentQuestion").focus();
   await page.evaluate(() => {
     Object.defineProperty(visualViewport, "height", { configurable: true, get: () => 420 });
@@ -974,6 +1071,11 @@ test("entering Agent mode exits native terminal fullscreen", async ({ page }) =>
   await page.locator("#agentButton").tap();
   await expect(page.locator("#agentPanel")).toBeVisible();
   await expect.poll(() => page.evaluate(() => document.fullscreenElement)).toBeNull();
+  // The fullscreen terminal is left behind: the assistant owns the screen alone
+  // until the person asks for the split back.
+  await expect(page.locator("#terminalWorkspace")).toHaveAttribute("data-agent-layout", "agent");
+  await expect(page.locator("#terminalCard")).toBeHidden();
+  await page.locator("#agentClose").tap();
   await expect(page.locator("#terminalCard")).toBeVisible();
 });
 

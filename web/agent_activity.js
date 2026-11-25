@@ -3,9 +3,14 @@
 import {renderAssistantMarkdown} from './agent_markdown.js';
 const REASONING_LIMIT = 12000;
 
-export function createAgentActivity({messages, text}) {
+export function createAgentActivity({messages, text, onChange = null}) {
   let current = null;
   const owners = new WeakMap();
+  /* Every path that grows the transcript passes through this module (a tool row,
+   * a revealed approval, a finished group). Reporting each change lets the panel
+   * keep the newest content in view instead of stopping at the last row it added
+   * itself. */
+  const changed = () => onChange?.();
   function paint(group) {
     const seconds = Math.max(0, Math.floor(((group.ended || Date.now()) - group.started) / 1000));
     group.title.textContent = text(group.state === 'running' ? 'activityRunning' : group.state === 'error' ? 'activityError' : group.state === 'interrupted' ? 'activityStopped' : 'activityDone');
@@ -27,16 +32,16 @@ export function createAgentActivity({messages, text}) {
     const group = {details,body,title,count,countValue:0,started:Date.now(),ended:null,state:'running',manual:false};
     summary.addEventListener('click', () => { group.manual = true; });
     group.timer = setInterval(() => paint(group), 1000);
-    current = group; paint(group); return group;
+    current = group; paint(group); changed(); return group;
   }
   function attach(row) {
     const group = ensure();
     if (!owners.has(row)) { group.countValue++; owners.set(row,group); }
-    row.classList.add('agent-process-entry'); group.body.append(row); paint(group);
+    row.classList.add('agent-process-entry'); group.body.append(row); paint(group); changed();
   }
   function reveal(body, {error = false} = {}) {
     const group = owners.get(body.closest('.agent-message'));
-    if (group) { group.hasIssue ||= error; group.details.open = true; paint(group); }
+    if (group) { group.hasIssue ||= error; group.details.open = true; paint(group); changed(); }
   }
   function finish(state = 'done') {
     if (!current || current.ended !== null) return;
@@ -44,7 +49,7 @@ export function createAgentActivity({messages, text}) {
     current.state = state; current.ended = Date.now(); clearInterval(current.timer);
     if (state === 'error') current.details.open = true;
     else if (!current.manual) current.details.open = false;
-    paint(current);
+    paint(current); changed();
   }
   return {
     attach, reveal, finish,
