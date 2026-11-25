@@ -962,8 +962,9 @@ export function createAgentPanel({ button, workspace, terminal, settings, bindin
               const command = accessory.command(action, args);
               const body = toolRows.get(id) || addMessage(`accessory_${action}`);
               body.textContent = "";
+              const approval = requestAccessoryApproval({ container: body, command, lang: getLang(), signal });
               activity.reveal(body);
-              await requestAccessoryApproval({ container: body, command, lang: getLang(), signal });
+              await approval;
               return accessory.execute({ action, args, command, signal });
             },
           },

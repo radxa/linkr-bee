@@ -84,6 +84,40 @@ test("diagnostics are read without an approval card", async ({ page }) => {
   await expect(page.getByRole("button", { name: /Allow change|允许修改/ })).toHaveCount(0);
 });
 
+for (const readingHistory of [false, true]) {
+  test(`accessory approval ${readingHistory ? "preserves the history position" : "follows the transcript to its buttons"}`, async ({ page }) => {
+    await page.setViewportSize({ width: 320, height: 640 });
+    let showApproval;
+    const ready = new Promise(resolve => { showApproval = resolve; });
+    let turns = 0;
+    await mockModel(page, async () => {
+      if (++turns === 1) {
+        return { text: Array.from({ length: 45 }, (_, i) => `Serial log entry ${i + 1}.`).join("\n\n") };
+      }
+      await ready;
+      return { tool: { name: "set_webdav", args: { action: "on", url: "https://example.com/" + "sensor-recordings/".repeat(7) } } };
+    });
+    const messages = page.locator("#agentMessages");
+    await ask(page, "Show the serial log");
+    await expect(messages).toContainText("Serial log entry 45.");
+    await ask(page, "Configure log upload");
+    await expect(page.locator("#agentStop")).toBeEnabled();
+    await messages.evaluate(async (el, history) => {
+      el.scrollTop = history ? 0 : el.scrollHeight;
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    }, readingHistory);
+    showApproval();
+    const allow = page.getByRole("button", { name: /Allow change|允许修改/ });
+    await expect(allow).toBeVisible();
+    if (readingHistory) {
+      expect(await messages.evaluate(el => el.scrollTop)).toBe(0);
+    } else {
+      await expect(allow).toBeInViewport({ ratio: 1 });
+      await expect(messages.getByRole("button", { name: /Reject|拒绝/ })).toBeInViewport({ ratio: 1 });
+    }
+  });
+}
+
 for (const approved of [true, false]) {
   test(`a UART change ${approved ? "runs after approval" : "never reaches the device when rejected"}`, async ({ page }) => {
     await page.evaluate(() => window.__test.setControl(async (command) => {

@@ -67,4 +67,5 @@ html.soft-keyboard-open .agent-input-hint { display: none; }
 .agent-tight .agent-messages { padding-block: 4px; }
 .agent-tight .agent-history > summary { min-height: 24px; }
 .agent-tight .agent-usage:empty { display: none; }
-html.agent-keyboard-chat .agent-tight :is(.agent-history, .agent-usage, .agent-queue-controls) { display: none; }
+html.agent-keyboard-chat .agent-tight :is(.agent-history, .agent-usage, .agent-queue-controls),
+html.soft-keyboard-open [data-agent-layout="agent"] .agent-tight :is(.agent-history, .agent-usage, .agent-queue-controls) { display: none; }

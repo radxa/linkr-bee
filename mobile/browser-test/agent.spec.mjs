@@ -975,6 +975,10 @@ test("AI keyboard collapses the split terminal and restores it when dismissed", 
 
 test("landscape keyboard keeps AI input and stop controls inside the visible viewport", async ({ page }) => {
   await page.setViewportSize({ width: 844, height: 390 });
+  await chooseMode(page, "manual");
+  await mockModel(page, () => ({ tool: { name: "send_serial_input", args: { text: "pwd", appendEnter: true } } }));
+  await ask(page);
+  await expect(page.locator("#agentMessages .agent-actions .btn-primary")).toBeVisible();
   await page.locator("#agentQuestion").focus();
   await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   await page.evaluate(() => {
@@ -983,8 +987,14 @@ test("landscape keyboard keeps AI input and stop controls inside the visible vie
   });
   await expect(page.locator("#terminalCard")).toBeHidden();
   await expect(page.locator("#agentActiveMode")).toBeVisible();
-  await expect.poll(() => page.locator("#agentAsk").evaluate((button) => button.getBoundingClientRect().bottom)).toBeLessThanOrEqual(215);
+  for (const id of ["agentQuestion", "agentStop"]) {
+    const control = page.locator(`#${id}`);
+    await expect(control).toBeVisible();
+    await expect.poll(() => control.evaluate(el => el.getBoundingClientRect().bottom)).toBeLessThanOrEqual(215);
+  }
   await page.screenshot({ path: "test-results/agent-keyboard-landscape.png" });
+  await page.locator("#agentStop").tap();
+  await expect(page.locator("#agentAsk")).toBeEnabled();
 });
 
 for (const [name, width, height, layout] of [["phone", 390, 844, "agent"], ["tablet", 1194, 834, "columns"], ["narrow tablet window", 744, 1000, "agent"]]) {
