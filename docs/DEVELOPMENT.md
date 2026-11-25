@@ -129,32 +129,18 @@ existing services and client limits with smaller bounded queues:
 
 ![VCC-GND YD-ESP32-S3 (N16R8)](../boards/esp32s3_devkitc_esp32s3_procpu.png)
 
-The bench target `esp32s3_devkitc/esp32s3/procpu` with
-`boards/esp32s3_devkitc_esp32s3_procpu.{conf,overlay}` describes the VCC-GND
-YD-ESP32-S3: an addressable RGB LED on GPIO48 and two single-colour TX/RX LEDs
-that sit on the UART0 lines (GPIO43/44). The pixel is a four-channel RGBW part
-in the SK6812 family (32 bits per pixel), so the overlay
-sets `channel-count = <4>`; with the X1 board's 24-bit frame the shift register
-is one byte short, red leaks into green and the pixel cannot be turned off. The
-LED nets to GPIO48 only through a solder bridge that the factory leaves open,
-so close that bridge before the LED can light. The first frame after the
-driver had been idle used to arrive wrong: runs of zero bits were seen as ones,
-so red latched as yellow and an all-zero frame left the previous colour on.
-The cause was instruction fetch rather than the data line -- the bit loop ran
-from flash and missed the instruction cache, stretching its first high cells.
-The loop now lives in IRAM (`.iram1`), which is the only way the 350 ns cells
-are predictable, so one frame per update is enough.
-UART0 is therefore the bridge UART, so those two LEDs show live
-bridge traffic in each direction. Because that is this board's data
-indication, the addressable RGB is not a second status light:
-`RGB_MANUAL_ONLY` keeps it dark until the management `@l` command sets a
-colour, holds that colour instead of previewing for five seconds, and never
-blinks on UART activity. The console moves to the native USB
-Serial/JTAG port. The CH343 port then carries bridge data instead of logs,
-and the ROM loader still flashes over either USB port. Connect the SBC to the
-UART0 header pins with the CH343 port unplugged and power the board from the
-native USB port: GPIO44 is shared with the CH343 TXD output, so two drivers on
-that net would fight.
+The VCC-GND YD-ESP32-S3 V1.4 bench build uses UART1 for the target console.
+Connect GPIO17 (Bee TX) to the target's RX, GPIO18 (Bee RX) to its TX, and
+connect both grounds. Use 3.3 V UART levels. Zephyr logs use the native USB
+Serial/JTAG port on GPIO19/20. The ROM boot log, CH343P, and the board's
+two TX/RX indicators use UART0 on GPIO43/44. With the default wiring, a Bee
+reset leaves the target's serial input quiet.
+
+The V1.4 schematic identifies U1 as an XL-5050RGBC-WS2812B, a 24-bit GRB
+pixel on GPIO48. Check the RGB solder link if the pixel stays dark.
+The pixel starts off and holds the colour set through `@l` at 30% brightness.
+The driver generates the waveform from IRAM.
+[V1.4 schematic](https://github.com/vcc-gnd/YD-ESP32-S3/blob/main/5-public-YD-ESP32-S3-Hardware%20info/YD-ESP32-S3-SCH-V1.4.pdf) · [U1 datasheet](https://www.xinglight.cn/uploadfile/202406/4c1ee57988f3bce.pdf)
 
 The default build makes no PSRAM assumption, so it runs on 8 MB-flash modules
 with no PSRAM as well as on an N16R8 module (where the PSRAM then stays
@@ -173,6 +159,17 @@ west build -p always -b esp32s3_devkitc/esp32s3/procpu linkr-bee -- \
     -DEXTRA_CONF_FILE=boards/esp32s3_devkitc_esp32s3_procpu_n16r8.conf \
     -DEXTRA_DTC_OVERLAY_FILE=boards/esp32s3_devkitc_esp32s3_procpu_n16r8.overlay
 ```
+
+Two independent overlays are available for bench hardware. Include the relevant
+paths in `EXTRA_DTC_OVERLAY_FILE` and separate multiple paths with semicolons
+inside one quoted argument. For N16R8, retain its memory overlay in that list.
+
+- `boards/yd_esp32s3_uart0.overlay` routes bridge traffic through the CH343P and
+  the TX/RX indicators. GPIO43 transmits ROM messages at 115200 baud on reset.
+  GPIO44 shares the CH343P TX output. Use the CH343P USB port as the serial
+  endpoint or keep its transmitter isolated before attaching another TX driver.
+- `boards/yd_esp32s3_rgbw.overlay` selects a 32-bit GRBW replacement pixel.
+  The three-channel management command drives RGB and leaves W at zero.
 
 Use `xtensa-espressif_esp32s3_zephyr-elf` SDK 1.0.1 for either. This target is
 a bench configuration and is not part of the release matrix.

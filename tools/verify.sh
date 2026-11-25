@@ -111,22 +111,18 @@ for board in $boards; do
         exit 1
         ;;
     esac
+    # The release overlay leaves the RGB driver inactive. Also compile it
+    # against the C5 register definitions with a pixel on the first GPIO bank.
+    west build -p always -d "$build_dir-rgb" -b "$board" "$repo_dir" -t app -- \
+      -DEXTRA_DTC_OVERLAY_FILE="$repo_dir/tests/esp32c5_rgb.overlay"
   fi
   # The S3 target has two variants: the default build makes no PSRAM
   # assumption (so it runs on 8 MB-flash modules with or without a 2 MB part),
   # and an N16R8 build adds the 16 MB flash / 8 MB octal PSRAM sizes plus the
   # enlarged buffers. Check both so neither silently drifts.
-  #
-  # The RGB status LED is an alias in the board overlay, so a missing alias
-  # silently leaves the large LED dark; the YD-ESP32-S3 pixel is also RGBW, and
-  # a 24-bit frame misaligns its shift register (red reads as yellow and the
-  # pixel cannot be turned off).
   if grep -qx 'CONFIG_SOC_SERIES_ESP32S3=y' "$config"; then
     grep -qx 'CONFIG_LINKR_BLE_BRIDGE_RGB_STATUS_LED=y' "$config"
-    # The two UART0 LEDs carry the traffic indication, so the addressable
-    # pixel must stay a dark-by-default user light on this board.
     grep -qx 'CONFIG_LINKR_BLE_BRIDGE_RGB_MANUAL_ONLY=y' "$config"
-    grep -q 'channel-count = < 0x4 >' "$build_dir/zephyr/zephyr.dts"
     # Default variant: no external RAM, data buffers back in internal SRAM.
     grep -qx '# CONFIG_ESP_SPIRAM is not set' "$config"
     grep -qx '# CONFIG_RING_BUFFER_LARGE is not set' "$config"
@@ -141,7 +137,12 @@ for board in $boards; do
       -DEXTRA_DTC_OVERLAY_FILE="$repo_dir/boards/esp32s3_devkitc_esp32s3_procpu_n16r8.overlay"
     n16r8_config="$n16r8_dir/zephyr/.config"
     python3 "$repo_dir/tools/esp_simpleboot_image.py" --check "$n16r8_dir/zephyr/zephyr.bin"
-    grep -q 'channel-count = < 0x4 >' "$n16r8_dir/zephyr/zephyr.dts"
+    for variant in "$build_dir" "$n16r8_dir"; do
+      dts="$variant/zephyr/zephyr.dts"
+      grep -Fq 'zephyr,linkr-ble-uart = &uart1;' "$dts"
+      grep -Fq 'zephyr,console = &usb_serial;' "$dts"
+      sed -n '/linkr_rgb: linkr-rgb {/,/};/p' "$dts" | grep -Fq 'channel-count = < 0x3 >;'
+    done
     grep -qx 'CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y' "$n16r8_config"
     grep -qx 'CONFIG_ESP_SPIRAM=y' "$n16r8_config"
     grep -qx 'CONFIG_ESP_SPIRAM_SIZE=8388608' "$n16r8_config"

@@ -563,7 +563,8 @@ config LINKR_BLE_BRIDGE_WEBDAV_UPLOAD_CHUNK
 config LINKR_BLE_BRIDGE_LOG_RING_SIZE
 	int "WebDAV log staging ring buffer size in bytes"
 	default 8192
-	range 512 262144
+	range 512 262144 if RING_BUFFER_LARGE
+	range 512 32767
 	depends on LINKR_BLE_BRIDGE_WEBDAV
 	help
 	  Bytes of UART RX data staged for periodic WebDAV upload. When the
@@ -625,7 +626,8 @@ config LINKR_BLE_BRIDGE_WS_BRIDGE_MAX_CLIENTS
 config LINKR_BLE_BRIDGE_WS_BRIDGE_CLIENT_BUFFER_SIZE
 	int "Per-client TX ring buffer size in bytes"
 	default 2048
-	range 512 65536
+	range 512 65536 if RING_BUFFER_LARGE
+	range 512 32767
 	depends on LINKR_BLE_BRIDGE_WS_BRIDGE
 	help
 	  Bytes of UART RX buffered per WebSocket client. A client slower than
@@ -722,12 +724,9 @@ config LINKR_BLE_BRIDGE_RGB_MANUAL_ONLY
 	depends on LINKR_BLE_BRIDGE_RGB_STATUS_LED
 	default n
 	help
-	  For boards whose bridge traffic is already shown by dedicated UART
-	  TX/RX LEDs. The addressable RGB then stops mirroring BLE/WiFi/AI
-	  state, never blinks on UART activity, and stays dark until the
-	  management @l command sets a colour. That colour is held until the
-	  next @l command or reboot instead of returning to a status colour
-	  after five seconds.
+	  Keep the pixel dark until the management @l command sets a colour,
+	  then hold that colour until the next command or reboot. BLE, WiFi,
+	  AI ownership and UART activity do not change the user light.
 
 config LINKR_BLE_BRIDGE_RGB_BRIGHTNESS
 	int "RGB status LED brightness (percent)"

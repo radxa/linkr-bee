@@ -1,0 +1,12 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* Compile the RGB driver on the C5 even though the release board has no pixel. */
+/ {
+	aliases {
+		linkr-rgb = &test_rgb;
+	};
+
+	test_rgb: test-rgb {
+		compatible = "radxa,linkr-ws2812";
+		data-gpios = <&gpio0 3 GPIO_ACTIVE_HIGH>;
+	};
+};

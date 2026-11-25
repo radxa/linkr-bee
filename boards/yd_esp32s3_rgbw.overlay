@@ -1,0 +1,5 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* For a board fitted with a GRBW pixel on the GPIO48 data line. */
+&linkr_rgb {
+	channel-count = <4>;
+};

@@ -123,24 +123,14 @@ Zephyr 4.5 的射频与网络代码占用更多 SRAM。默认配置保留原有�
 
 ![VCC-GND YD-ESP32-S3（N16R8）](../boards/esp32s3_devkitc_esp32s3_procpu.png)
 
-台架目标 `esp32s3_devkitc/esp32s3/procpu` 配合
-`boards/esp32s3_devkitc_esp32s3_procpu.{conf,overlay}` 描述 VCC-GND
-YD-ESP32-S3：GPIO48 上的可寻址 RGB 灯，以及接在 UART0 线路（GPIO43/44）上的
-两颗单色 TX/RX 灯。这颗灯是 SK6812 系列的四通道
-RGBW 灯（每像素 32 位），overlay 里必须写 `channel-count = <4>`：沿用 X1 的 24
-位帧会少一个字节，导致红色串到绿色（红变黄）且无法关灯。灯与 GPIO48 之间
-隔着一处出厂默认断开的焊桥，必须先短接这处焊桥，灯才能点亮。
-驱动空闲一段时间后的第一帧曾经必然出错：一串 0 位被当成 1 位，于是红色锁成黄色，
-全零帧保留上一帧颜色。原因不在数据线，而在取指——位循环放在 flash 里，指令缓存
-未命中把开头几个高电平拉长。现在位循环放在 IRAM（`.iram1`），350 纳秒的码元才
-可预测，因此每次更新只发一帧。
-因此 UART0 作为桥接串口，这两颗灯会按方向显示实时桥接流量。数据指示已经由它们
-承担，所以可寻址 RGB 不再充当第二个状态灯：`RGB_MANUAL_ONLY` 让它默认熄灭，
-只有管理命令 `@l` 设置颜色后才亮，并一直保持该颜色（不再 5 秒后回到状态色），
-也不随串口活动闪烁。控制台改到原生 USB
-Serial/JTAG 口。CH343 口此后传输桥接数据而不再输出日志，ROM 下载模式仍可通过
-任一 USB 口烧录。连接 SBC 时请拔掉 CH343 口，只用原生 USB 口供电，因为
-GPIO44 与 CH343 的 TXD 输出共用，两路同时驱动会相互冲突。
+VCC-GND YD-ESP32-S3 V1.4 默认用 UART1 连接目标设备。将 GPIO17（Bee TX）接到
+目标 RX，GPIO18（Bee RX）接到目标 TX，两端共地，使用 3.3 V 串口电平。Zephyr
+日志走 GPIO19/20 的原生 USB Serial/JTAG。ROM 启动日志、CH343P 和板载 TX/RX
+指示灯使用 UART0（GPIO43/44）。按默认接线，Bee 复位时目标串口不会收到启动日志。
+
+V1.4 原理图将 U1 标为 XL-5050RGBC-WS2812B，GPIO48 按 24 位 GRB 格式驱动。
+灯不亮时可检查 RGB 焊桥是否已连通。该灯上电熄灭，通过 `@l` 设色后以 30%
+亮度保持，驱动在 IRAM 中生成波形。[V1.4 原理图](https://github.com/vcc-gnd/YD-ESP32-S3/blob/main/5-public-YD-ESP32-S3-Hardware%20info/YD-ESP32-S3-SCH-V1.4.pdf) · [U1 数据手册](https://www.xinglight.cn/uploadfile/202406/4c1ee57988f3bce.pdf)
 
 默认构建不假设存在 PSRAM，因此既能用于 8 MB flash、无 PSRAM 的模组，也能用于
 N16R8（此时 PSRAM 闲置不用）；2 MB 的 N8R2 模组同样使用默认构建，因为 PSRAM
@@ -157,6 +147,15 @@ west build -p always -b esp32s3_devkitc/esp32s3/procpu linkr-bee -- \
     -DEXTRA_CONF_FILE=boards/esp32s3_devkitc_esp32s3_procpu_n16r8.conf \
     -DEXTRA_DTC_OVERLAY_FILE=boards/esp32s3_devkitc_esp32s3_procpu_n16r8.overlay
 ```
+
+以下两个台架 overlay 可独立选用。将所需路径加入 `EXTRA_DTC_OVERLAY_FILE`，
+多个路径用分号分隔，并将整个参数值放在引号内。N16R8 还需在列表中保留其内存 overlay。
+
+- `boards/yd_esp32s3_uart0.overlay` 将桥接串口切到 CH343P 和板载 TX/RX 灯所在的
+  UART0。复位时 GPIO43 会以 115200 波特率发送 ROM 日志。GPIO44 与 CH343P 的 TX
+  共线，可直接通过 CH343P 的 USB 口收发；外接另一驱动端前需隔离 CH343P 的 TX。
+- `boards/yd_esp32s3_rgbw.overlay` 适用于换装 32 位 GRBW 灯珠的板子。
+  管理命令仍使用 RGB 三通道，白色通道保持为零。
 
 两者都使用 SDK 1.0.1 的 `xtensa-espressif_esp32s3_zephyr-elf` 工具链。该目标是
 台架配置，不进入发布矩阵。

@@ -84,9 +84,7 @@ static void led_write(const struct linkr_rgb *color)
 static struct linkr_rgb led_color(int64_t now, const char **reason)
 {
 #if defined(CONFIG_LINKR_BLE_BRIDGE_RGB_MANUAL_ONLY)
-	/* This board has its own UART TX/RX LEDs, so the addressable LED is a
-	 * user light, not a state display: stay dark until @l sets a colour and
-	 * then hold that colour. */
+	/* Hold the user-selected colour across connection state changes. */
 	ARG_UNUSED(now);
 	*reason = "manual";
 	return led_base;
@@ -223,7 +221,6 @@ void linkr_status_led_ai(bool active)
 void linkr_status_led_activity(void)
 {
 #if defined(CONFIG_LINKR_BLE_BRIDGE_RGB_MANUAL_ONLY)
-	/* UART0's TX/RX LEDs already show bridge traffic on this board. */
 	return;
 #endif
 	if (!led_ready) return;

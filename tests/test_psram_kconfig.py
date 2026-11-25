@@ -42,6 +42,25 @@ class PsramKconfigTests(unittest.TestCase):
                             self.assertEqual(conf.syms['SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY'].str_value, expected)
             self.assertEqual((hal / 'Kconfig').read_text(), original)
 
+    def test_ring_capacity_matches_index_width(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (pathlib.Path(tmp) / 'Kconfig.zephyr').write_text(
+                'config RING_BUFFER_LARGE\n    bool "Use wide ring indices"\n')
+            with patch.dict(os.environ, {'srctree': tmp}):
+                conf = kconfiglib.Kconfig(str(ROOT / 'Kconfig'), warn=False)
+                for name, maximum in [('WS_BRIDGE_CLIENT_BUFFER_SIZE', 65536),
+                                      ('LOG_RING_SIZE', 262144)]:
+                    capacity = conf.syms['LINKR_BLE_BRIDGE_' + name]
+                    with self.subTest(name=name):
+                        conf.syms['RING_BUFFER_LARGE'].set_value('n')
+                        capacity.set_value('32767')
+                        self.assertEqual(capacity.str_value, '32767')
+                        capacity.set_value('32768')
+                        self.assertNotEqual(capacity.str_value, '32768')
+                        conf.syms['RING_BUFFER_LARGE'].set_value('y')
+                        capacity.set_value(str(maximum))
+                        self.assertEqual(capacity.str_value, str(maximum))
+
     def test_rf_heap_defaults_fall_back_for_larger_custom_pools(self):
         pools = {
             'ESP32_WIFI_DYNAMIC_RX_BUFFER_NUM': 6,

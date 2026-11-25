@@ -29,37 +29,29 @@ LOG_MODULE_DECLARE(linkr_ble_bridge, LOG_LEVEL_INF);
 #if DT_HAS_ALIAS(linkr_rgb)
 
 #include <esp_cpu.h>
-#include <soc/gpio_struct.h>
+#include <soc/gpio_reg.h>
+#include <soc/soc.h>
 
 #define LINKR_RGB_NODE DT_ALIAS(linkr_rgb)
 
-/* The GPIO controller that owns the data pin, used for direct writes. */
-static gpio_dev_t *const ws_regs = (gpio_dev_t *)DT_REG_ADDR(DT_NODELABEL(gpio0));
 static const struct gpio_dt_spec ws_data =
 	GPIO_DT_SPEC_GET(LINKR_RGB_NODE, data_gpios);
 static const size_t ws_chain_length = (size_t)DT_PROP(LINKR_RGB_NODE, chain_length);
 /* Bytes per pixel: 3 for WS2812-style parts, 4 for RGBW parts. */
 #define WS_CHANNELS DT_PROP(LINKR_RGB_NODE, channel_count)
 
-/*
- * Devicetree splits the ESP32-S3 pads across two GPIO controllers: gpio0 owns
- * GPIO0..31 and gpio1 owns the local pins 0..21 that are GPIO32..53. The GPIO
- * API rejects a pin index of 32 or more, so the RGB LED on GPIO48 must be
- * described as <&gpio1 16>. Register writes still use the absolute pad number,
- * which this offset recovers at compile time.
- */
-#define LINKR_RGB_CTLR DT_GPIO_CTLR(LINKR_RGB_NODE, data_gpios)
-#if DT_SAME_NODE(LINKR_RGB_CTLR, DT_NODELABEL(gpio0))
-#define WS_PAD_OFFSET 0
-#elif DT_NODE_EXISTS(DT_NODELABEL(gpio1)) && \
-	DT_SAME_NODE(LINKR_RGB_CTLR, DT_NODELABEL(gpio1))
-#define WS_PAD_OFFSET 32
+/* Pin numbers are local to their GPIO bank. S3 GPIO48 is gpio1 pin 16. */
+#define WS_GPIO_BANK DT_GPIO_CTLR(LINKR_RGB_NODE, data_gpios)
+#define WS_PIN_MASK BIT(DT_GPIO_PIN(LINKR_RGB_NODE, data_gpios))
+#if DT_SAME_NODE(WS_GPIO_BANK, DT_NODELABEL(gpio0))
+#define WS_SET_REG GPIO_OUT_W1TS_REG
+#define WS_CLEAR_REG GPIO_OUT_W1TC_REG
+#elif DT_NODE_EXISTS(DT_NODELABEL(gpio1)) && DT_SAME_NODE(WS_GPIO_BANK, DT_NODELABEL(gpio1))
+#define WS_SET_REG GPIO_OUT1_W1TS_REG
+#define WS_CLEAR_REG GPIO_OUT1_W1TC_REG
 #else
 #error "unexpected GPIO controller for the RGB LED"
 #endif
-/* Plain integer for preprocessor comparisons; the casted form is for code. */
-#define WS_PAD_NUM (WS_PAD_OFFSET + DT_GPIO_PIN(LINKR_RGB_NODE, data_gpios))
-#define WS_PAD ((uint32_t)WS_PAD_NUM)
 
 /*
  * The core clock is fixed by CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ (160 MHz on the
@@ -84,48 +76,14 @@ static inline uint32_t ws_cycles(void)
 	return esp_cpu_get_cycle_count();
 }
 
-/*
- * The register map differs by SoC generation: C3 exposes the W1TS/W1TC
- * registers as bitfield unions (hence `.val`), while the S3 declares them as
- * plain 32-bit words.
- *
- * Pins also have to be addressed by bank. `out_w1ts` covers GPIO0..31 only;
- * the S3 has 48 pins, so GPIO32..48 are driven through `out1_w1ts`. Writing
- * BIT(48) into the 32-bit `out_w1ts` register is silently truncated, which is
- * exactly why the S3 board's RGB LED (GPIO48) stayed dark while the C3 board's
- * (GPIO3) worked. Both forms are a single store, which is all the
- * interrupt-locked waveform needs.
- */
 static inline void ws_pin_high(void)
 {
-#if defined(CONFIG_SOC_SERIES_ESP32C3)
-	ws_regs->out_w1ts.val = BIT(WS_PAD);
-#elif defined(CONFIG_SOC_SERIES_ESP32S3)
-	/* Compile-time branch: the unused arm must not be emitted, because
-	 * BIT(48) on a 32-bit value is undefined and GCC warns about it. */
-#if WS_PAD_NUM < 32
-	ws_regs->out_w1ts = BIT(WS_PAD);
-#else
-	ws_regs->out1_w1ts.val = BIT(WS_PAD - 32);
-#endif
-#else
-	ws_regs->out_w1ts = BIT(WS_PAD);
-#endif
+	REG_WRITE(WS_SET_REG, WS_PIN_MASK);
 }
 
 static inline void ws_pin_low(void)
 {
-#if defined(CONFIG_SOC_SERIES_ESP32C3)
-	ws_regs->out_w1tc.val = BIT(WS_PAD);
-#elif defined(CONFIG_SOC_SERIES_ESP32S3)
-#if WS_PAD_NUM < 32
-	ws_regs->out_w1tc = BIT(WS_PAD);
-#else
-	ws_regs->out1_w1tc.val = BIT(WS_PAD - 32);
-#endif
-#else
-	ws_regs->out_w1tc = BIT(WS_PAD);
-#endif
+	REG_WRITE(WS_CLEAR_REG, WS_PIN_MASK);
 }
 
 /*
