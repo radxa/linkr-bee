@@ -129,8 +129,11 @@ VCC-GND YD-ESP32-S3 V1.4 默认用 UART1 连接目标设备。将 GPIO17（Bee T
 指示灯使用 UART0（GPIO43/44）。按默认接线，Bee 复位时目标串口不会收到启动日志。
 
 V1.4 原理图将 U1 标为 XL-5050RGBC-WS2812B，GPIO48 按 24 位 GRB 格式驱动。
-灯不亮时可检查 RGB 焊桥是否已连通。该灯上电熄灭，通过 `@l` 设色后以 30%
-亮度保持，驱动在 IRAM 中生成波形。[V1.4 原理图](https://github.com/vcc-gnd/YD-ESP32-S3/blob/main/5-public-YD-ESP32-S3-Hardware%20info/YD-ESP32-S3-SCH-V1.4.pdf) · [U1 数据手册](https://www.xinglight.cn/uploadfile/202406/4c1ee57988f3bce.pdf)
+灯不亮时可检查 RGB 焊桥是否已连通。该灯以 30% 亮度跟随桥状态：空闲白、
+仅 WiFi 关联琥珀、BLE 客户端蓝、LAN（WebSocket）客户端绿、AI 会话青
+（AI > LAN > BLE > WiFi > 空闲）；`@l` 设色后显示 5 秒预览，驱动在 IRAM 中生成波形。
+启用配对 GPIO 校验的板型在授权窗口打开期间还会让同一像素蓝色呼吸
+（AI > LAN > 配对 > BLE > WiFi > 空闲）。[V1.4 原理图](https://github.com/vcc-gnd/YD-ESP32-S3/blob/main/5-public-YD-ESP32-S3-Hardware%20info/YD-ESP32-S3-SCH-V1.4.pdf) · [U1 数据手册](https://www.xinglight.cn/uploadfile/202406/4c1ee57988f3bce.pdf)
 
 默认构建不假设存在 PSRAM，因此既能用于 8 MB flash、无 PSRAM 的模组，也能用于
 N16R8（此时 PSRAM 闲置不用）；2 MB 的 N8R2 模组同样使用默认构建，因为 PSRAM
@@ -159,6 +162,16 @@ west build -p always -b esp32s3_devkitc/esp32s3/procpu linkr-bee -- \
 
 两者都使用 SDK 1.0.1 的 `xtensa-espressif_esp32s3_zephyr-elf` 工具链。该目标是
 台架配置，不进入发布矩阵。
+
+两个板级配置都把 esptool 的 flash 大小固定为 Devicetree 声明的值（默认构建
+8 MB，N16R8 为 16 MB），`tools/verify.sh` 会断言该值，因此 `west flash` 无需
+额外传 `--flash-size`。
+
+S3 还把 Zephyr 的蓝牙长工作任务队列栈从 1404 字节提高到 2048 字节：`@k?` 在这颗
+控制器上实测已用到 1200 字节，几乎没有余量。改其他栈之前，先让板子跑一段真实流量
+再用 `@k?` 看数据。这个数据来自 N16R8 台架配置，也只有它打开了
+`CONFIG_LINKR_BLE_BRIDGE_STACK_DIAGNOSTICS`；默认的 S3 构建不带这个命令，也不做
+填栈。
 
 Bee X1.0 另外将主线程栈设为 2 KiB、日志线程栈设为 1 KiB。Zephyr 4.5 诊断镜像在
 空闲、BLE 管理与数据收发、WiFi 扫描及 1500000 波特率 UART 回环中，分别测得
@@ -324,6 +337,10 @@ Serial/JTAG console、UART0（GPIO20/21）作桥接口、SW1（GPIO3）作配对
 binding 在 `dts/bindings/linkr/`。没有对应节点的板子上这些源文件编译成桩，
 `@l`/`@o`/`@r` 命令返回 `ERR ... unsupported`，同一份固件树仍服务全部板型。
 
+`@l off` 只是和普通颜色一样的一次设色，不是常驻开关：在像素同时充当状态灯的
+板子上（X1.0 和 S3 台架构建），它会先显示 5 秒黑屏，然后回到空闲或连接状态色；
+固件没有“上报状态的同时把灯永久压黑”的命令。
+
 Kconfig：`CONFIG_LINKR_BLE_BRIDGE_RGB_STATUS_LED`、
 `CONFIG_LINKR_BLE_BRIDGE_RGB_ACTIVITY_COLOR`、
 `CONFIG_LINKR_BLE_BRIDGE_OPTO_SWITCH`、`CONFIG_LINKR_BLE_BRIDGE_IR`、
@@ -478,6 +495,8 @@ board conf 默认 `CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=n`，不需要按
 GPIO4；只有把该选项设为 `y` 时，GPIO4 才作为物理授权输入。已有绑定的加密
 重连无需操作配对 GPIO；新主机配对需在按下配对键后的 30 秒授权窗口内发起
 （`CONFIG_LINKR_BLE_BRIDGE_PAIRING_GRACE_MS`，设为 0 恢复“请求时必须按住”）。
+带 RGB 状态灯的板子在窗口打开期间让像素蓝色呼吸，提示“现在可以配对”；配对完成、
+LAN 或 AI 接管、或窗口结束都会停止动画。
 默认最多保存 8 台主机，不自动淘汰旧绑定；满后通过
 恢复出厂清空。接线、客户端操作和验收方法见[蓝牙配对](BLE_PAIRING.md)。
 
@@ -525,8 +544,27 @@ UART RX 字节（SBC console 输出）会被缓存，并定期 HTTP PUT 到 `<we
 
 | 短形式 | 长形式 | 说明 |
 |--------|--------|------|
-| `@i?` | `@linkr info?` | 读取设备诊断信息（固件版本、运行时间、UART 统计、WiFi 状态、WebDAV 计数器） |
+| `@i?` | `@linkr info?` | 读取设备诊断信息（固件版本、运行时间、UART 统计、PSRAM 堆检查、WiFi 状态、WebDAV 计数器） |
+| `@k?` | `@linkr stacks?` | 以 used/size 字节读取每个线程的栈高水位（编译选项，默认关闭） |
 | `@h` | `@linkr help` | 列出可用命令 |
+
+带 PSRAM 的目标会在 `sys` 帧里附带 `ext_ram=<状态>`：`ok` 表示启动检查确认
+共享堆落在映射区内，`overlap`、`overflow`、`unavailable` 是失败原因，
+`unchecked` 表示检查没有执行。没有 PSRAM 的目标不返回这个字段。
+
+`@k?` 为每个存活线程返回一帧 `@stack <名称> <used>/<size>`。内核统计栈底仍然
+保留 0xaa 填充值的字节数，因此 `used` 就是该线程创建以来的高水位。线程名里的
+空格会替换成 `_`，保证整帧仍是 token 列表。一条管理响应最多 512 字节，所以
+一页放满时末尾返回 `@stack more=<索引>`（全部列完则是 `@stack done`），再用
+`@k? <索引>` 从该处继续。刚启动时线程还没跑过，数字只反映入口点，跑一段时间
+后才有参考价值。
+
+这个命令是编译选项 `CONFIG_LINKR_BLE_BRIDGE_STACK_DIAGNOSTICS`，默认关闭。
+高水位只有在每个线程创建时把栈填成 0xaa 才能读出来，而这次填充事后补不了，
+所以该选项会 `select CONFIG_INIT_STACKS`，代价是启动时把每个线程栈各写一遍
+（几十 KB，一次性）。N16R8 台架配置打开了它。没有打开该选项的构建不会在
+`@h` 里列出 `@k?`，收到时回答 `ERR stacks unsupported`，客户端因此能区分
+“这块板量不了”和“打错了”。把它当量具，不要当产品契约：只在你确实要测的板子上开。
 
 ### WiFi 命令
 
@@ -1342,6 +1380,7 @@ BLE 回环、WiFi 扫描和 UART 线速接收测试；其他板型，以及 WiFi
 | 配置选项 | 默认值 | 说明 |
 |----------|--------|------|
 | `CONFIG_LINKR_BLE_BRIDGE_CONTROL_COMMANDS` | `y` | 启用管理命令（`@u`、`@w`、`@d` 等） |
+| `CONFIG_LINKR_BLE_BRIDGE_STACK_DIAGNOSTICS` | `n` | 启用 `@k?`；会选中 `CONFIG_INIT_STACKS`（启动时把每个栈填一遍） |
 | `CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION` | `0.1.2` | 上报的固件版本 |
 
 ### 测试配置

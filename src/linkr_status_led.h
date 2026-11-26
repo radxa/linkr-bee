@@ -5,8 +5,9 @@
  *   - the ESP32-C3/C5 dev boards and the Super Mini drive a plain GPIO LED
  *     (led0), activity = a 40 ms pulse, exactly like before;
  *   - the Linkr Bee X1.0 has an addressable RGB LED on GPIO8. It
- *     shows BLE blue, WiFi white and AI takeover cyan, with UART activity
- *     blinking the current colour.
+ *     shows idle white, WiFi-associated amber, BLE-client blue, LAN-client
+ *     green and AI takeover cyan, with UART activity blinking the current
+ *     colour.
  *
  * Keeping the choice here means main.c and the control commands do not have
  * to know which kind of LED the board has.
@@ -29,10 +30,16 @@ int linkr_status_led_init(void);
 void linkr_status_led_activity(void);
 
 /* Automatic connection state; only RGB boards use these notifications.
- * AI is a 15-second lease renewed by the current controller; false clears it. */
+ * AI is a 15-second lease renewed by the current controller; false clears it.
+ * wifi means the link is associated; lan_client is one event per authenticated
+ * WebSocket client (true on attach, false when it leaves), so the board can
+ * count them; pairing breathes blue while the pairing window is open.
+ * Priority is AI > lan > pairing > ble > wifi > idle. */
 void linkr_status_led_ble(bool connected);
 void linkr_status_led_wifi(bool connected);
+void linkr_status_led_lan_client(bool attached);
 void linkr_status_led_ai(bool active);
+void linkr_status_led_pairing(bool active);
 
 /* Preview a colour for five seconds on RGB boards, then return to automatic
  * status. AI status has priority over the preview. On other boards, set the

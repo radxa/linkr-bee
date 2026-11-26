@@ -138,7 +138,11 @@ reset leaves the target's serial input quiet.
 
 The V1.4 schematic identifies U1 as an XL-5050RGBC-WS2812B, a 24-bit GRB
 pixel on GPIO48. Check the RGB solder link if the pixel stays dark.
-The pixel starts off and holds the colour set through `@l` at 30% brightness.
+The pixel mirrors the bridge state at 30% brightness: idle white, a bare
+WiFi association amber, a BLE client blue, a LAN WebSocket client green and
+an AI session cyan (AI > LAN > BLE > WiFi > idle); `@l` shows a five-second
+preview. When the pairing GPIO check is enabled, the same pixel breathes blue
+while the authorization window is open (AI > LAN > pairing > BLE > WiFi > idle).
 The driver generates the waveform from IRAM.
 [V1.4 schematic](https://github.com/vcc-gnd/YD-ESP32-S3/blob/main/5-public-YD-ESP32-S3-Hardware%20info/YD-ESP32-S3-SCH-V1.4.pdf) · [U1 datasheet](https://www.xinglight.cn/uploadfile/202406/4c1ee57988f3bce.pdf)
 
@@ -173,6 +177,17 @@ inside one quoted argument. For N16R8, retain its memory overlay in that list.
 
 Use `xtensa-espressif_esp32s3_zephyr-elf` SDK 1.0.1 for either. This target is
 a bench configuration and is not part of the release matrix.
+
+Both board configurations pin the esptool flash size to the size their Devicetree
+declares (8 MB for the default build, 16 MB for N16R8), and `tools/verify.sh`
+asserts it, so `west flash` needs no `--flash-size` override.
+
+The S3 also raises Zephyr's Bluetooth long-workqueue stack from 1404 to 2048
+bytes: `@k?` measured 1200 bytes in use on this controller, leaving almost no
+margin. Run `@k?` after the board has carried traffic before resizing anything
+else. The measurement came from the N16R8 bench configuration, which is the one
+that enables `CONFIG_LINKR_BLE_BRIDGE_STACK_DIAGNOSTICS`; the default S3 build
+keeps the command and its stack fill out.
 
 Bee X1.0 additionally uses a 2 KiB main stack and a 1 KiB logging stack. Its
 Zephyr 4.5 diagnostic runs measured 1092 B and 732 B respectively during idle,
@@ -438,6 +453,11 @@ instead of disappearing:
 | `@r?`, `@r tx <addr>,<cmd>[,<repeats>]`, `@r rx on\|off`, `@r clear` | NEC IR receiver / transmitter |
 | `@r learn [<slot>]`, `@r learn stop`, `@r play [<slot>]`, `@r slots`, `@r delete <slot>` | raw IR learning, stored in NVS |
 
+`@l off` is an ordinary colour request, not a persistent switch: on boards
+whose pixel doubles as the status LED (X1.0 and the S3 bench build) it previews
+black for five seconds and then returns to the idle or connection colour.
+Nothing pins the pixel dark while the board is reporting state.
+
 Kconfig options (all default `y` only where the devicetree node exists):
 `CONFIG_LINKR_BLE_BRIDGE_RGB_STATUS_LED`,
 `CONFIG_LINKR_BLE_BRIDGE_RGB_ACTIVITY_COLOR`,
@@ -661,7 +681,10 @@ restores the old "held during the request" rule), so the key does not have to
 stay held. WROOM ships with `CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=n`, so no
 GPIO press is needed; if that option is enabled, GPIO4 is the pairing input.
 Existing bonds restore encryption without the pairing GPIO; replacing lost host
-keys requires a fresh press when the check is enabled. The default is eight bonds with no automatic
+keys requires a fresh press when the check is enabled. On an RGB board the
+status pixel breathes blue while that window is open, so the owner can see that
+the board is ready to pair; pairing completion, an accepted LAN or AI session,
+or the end of the window ends the animation. The default is eight bonds with no automatic
 eviction. A full table requires factory reset before adding more hosts. See
 [pairing and recovery](BLE_PAIRING.md).
 
@@ -728,8 +751,33 @@ All commands support short form (fits 20-byte BLE write before MTU exchange) and
 
 | Short Form | Long Form | Description |
 |------------|-----------|-------------|
-| `@i?` | `@linkr info?` | Read device diagnostics (firmware version, uptime, UART stats, WiFi state, WebDAV counters) |
+| `@i?` | `@linkr info?` | Read device diagnostics (firmware version, uptime, UART stats, PSRAM heap check, WiFi state, WebDAV counters) |
+| `@k?` | `@linkr stacks?` | Report each thread's stack high-water mark as used/size bytes (opt-in build option) |
 | `@h` | `@linkr help` | List available commands |
+
+On targets with PSRAM, the `sys` frame carries `ext_ram=<state>`: `ok` means
+the boot check found the shared heap inside the mapped region, while
+`overlap`, `overflow` and `unavailable` name the failure and `unchecked` means
+the check did not run. Targets without PSRAM omit the field.
+
+`@k?` answers with one `@stack <name> <used>/<size>` frame per live thread.
+The kernel counts the bytes at the bottom of the stack that still hold the
+0xaa fill pattern, so `used` is that thread's high-water mark since it was
+created. Spaces in thread names become `_` so the frame stays a token list.
+One management response is limited to 512 bytes, so a full page ends with
+`@stack more=<index>` (`@stack done` when the list is complete); `@k? <index>`
+continues from that index. The numbers only mean something after the firmware
+has run: a fresh boot reports idle threads at their entry point.
+
+The command is a build option, `CONFIG_LINKR_BLE_BRIDGE_STACK_DIAGNOSTICS`,
+off by default. A high-water mark is only readable when every stack was filled
+with `0xaa` at thread creation, and that fill cannot be added after the fact,
+so the option selects `CONFIG_INIT_STACKS` and pays one memset of each thread
+stack during boot (tens of KiB, once). The N16R8 bench configuration enables
+it. A build without the option omits `@k?` from `@h` and answers
+`ERR stacks unsupported`, so a client can distinguish a board that cannot
+measure from a typo. Treat it as a measuring instrument, not part of the
+product contract: enable it on the boards you are sizing.
 
 ### WiFi Commands
 
@@ -1712,6 +1760,7 @@ and 1440 px in English/Chinese and light/dark themes. The About page displays
 | Config Option | Default | Description |
 |---------------|---------|-------------|
 | `CONFIG_LINKR_BLE_BRIDGE_CONTROL_COMMANDS` | `y` | Enable management commands (`@u`, `@w`, `@d`, etc.) |
+| `CONFIG_LINKR_BLE_BRIDGE_STACK_DIAGNOSTICS` | `n` | Enable `@k?`; selects `CONFIG_INIT_STACKS` (one boot memset of every stack) |
 | `CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION` | `0.1.2` | Reported firmware version |
 
 ### Test Configuration

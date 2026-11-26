@@ -54,6 +54,8 @@ class FlashFirmwareTests(unittest.TestCase):
             ("esp32c3-devkitm", "esp32c3", "0x0"),
             ("esp32c3-devkitc", "esp32c3", "0x0"),
             ("esp32c5-devkitc", "esp32c5", "0x2000"),
+            ("esp32s3", "esp32s3", "0x0"),
+            ("esp32-s3", "esp32s3", "0x0"),
         ]:
             with self.subTest(slug=slug):
                 image = self.image(f"linkr-bee-{slug}.bin")
@@ -68,6 +70,11 @@ class FlashFirmwareTests(unittest.TestCase):
         self.assert_flash(self.run_script("--image", str(image), "--chip", "esp32"),
                           image, "esp32", "0x1000")
 
+    def test_explicit_esp32s3_supports_custom_image_name(self):
+        image = self.image("custom.bin")
+        self.assert_flash(self.run_script("--image", str(image), "--chip", "esp32s3"),
+                          image, "esp32s3", "0x0")
+
     def test_explicit_address_is_preserved(self):
         image = self.image("linkr-bee-esp32-wroom-32.bin")
         self.assert_flash(self.run_script("--image", str(image), "--address", "0x20000"),
@@ -75,7 +82,7 @@ class FlashFirmwareTests(unittest.TestCase):
 
     def test_unsupported_chip_never_invokes_esptool(self):
         image = self.image("custom.bin")
-        result = self.run_script("--image", str(image), "--chip", "esp32s3")
+        result = self.run_script("--image", str(image), "--chip", "esp32c6")
         self.assertEqual(result.returncode, 2)
         self.assertIn("Unsupported chip", result.stderr)
         self.assertFalse(self.log.exists())

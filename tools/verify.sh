@@ -122,12 +122,18 @@ for board in $boards; do
   # enlarged buffers. Check both so neither silently drifts.
   if grep -qx 'CONFIG_SOC_SERIES_ESP32S3=y' "$config"; then
     grep -qx 'CONFIG_LINKR_BLE_BRIDGE_RGB_STATUS_LED=y' "$config"
-    grep -qx 'CONFIG_LINKR_BLE_BRIDGE_RGB_MANUAL_ONLY=y' "$config"
+    grep -qx '# CONFIG_LINKR_BLE_BRIDGE_RGB_MANUAL_ONLY is not set' "$config"
     # Default variant: no external RAM, data buffers back in internal SRAM.
     grep -qx '# CONFIG_ESP_SPIRAM is not set' "$config"
     grep -qx '# CONFIG_RING_BUFFER_LARGE is not set' "$config"
     grep -qx 'CONFIG_LINKR_BLE_BRIDGE_UART_RX_BUFFER_SIZE=8192' "$config"
     grep -qx 'CONFIG_LINKR_BLE_BRIDGE_LOG_RING_SIZE=8192' "$config"
+    # @k? measured the BT long workqueue at 1200/1404; keep the raised size.
+    grep -qx 'CONFIG_BT_LONG_WQ_STACK_SIZE=2048' "$config"
+    # The devkit DTS describes an 8 MB part; the runner must not fall back to
+    # the 2 MB default and write a truncated image.
+    grep -qx 'CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y' "$config"
+    grep -qx 'CONFIG_ESPTOOLPY_FLASHSIZE="8MB"' "$config"
 
     # N16R8 variant: the extra fragments must produce the 8 MB octal part and
     # the enlarged PSRAM-resident buffers.
@@ -174,7 +180,52 @@ for board in $boards; do
     grep -qx 'CONFIG_LINKR_BLE_BRIDGE_PEER_TX_QUEUE_DEPTH=64' "$n16r8_config"
     grep -qx 'CONFIG_LINKR_BLE_BRIDGE_UART_RX_BUFFER_SIZE=24576' "$n16r8_config"
     grep -qx 'CONFIG_ESP_SPIRAM_HEAP_SIZE=8049120' "$n16r8_config"
+    grep -qx 'CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y' "$n16r8_config"
+    grep -qx 'CONFIG_ESPTOOLPY_FLASHSIZE="16MB"' "$n16r8_config"
+
+    # The bench board opts in to the stack high-water report; the option pulls
+    # in the 0xaa fill it needs, which cannot be enabled at runtime.
+    grep -qx 'CONFIG_LINKR_BLE_BRIDGE_STACK_DIAGNOSTICS=y' "$n16r8_config"
+    grep -qx 'CONFIG_INIT_STACKS=y' "$n16r8_config"
+
+    # Bench overlays are sold as options, so compile each one. A pin or
+    # property rename that breaks them would otherwise only surface on the
+    # bench board that has the alternate wiring.
+    west build -p always -d "$build_dir-uart0" -b "$board" "$repo_dir" -t app -- \
+      -DEXTRA_DTC_OVERLAY_FILE="$repo_dir/boards/yd_esp32s3_uart0.overlay"
+    uart0_dts="$build_dir-uart0/zephyr/zephyr.dts"
+    grep -Fq 'zephyr,linkr-ble-uart = &uart0;' "$uart0_dts"
+    sed -n '/uart1: /,/};/p' "$uart0_dts" | grep -Fq 'status = "disabled";'
+
+    west build -p always -d "$build_dir-rgbw" -b "$board" "$repo_dir" -t app -- \
+      -DEXTRA_DTC_OVERLAY_FILE="$repo_dir/boards/yd_esp32s3_rgbw.overlay"
+    sed -n '/linkr_rgb: linkr-rgb {/,/};/p' "$build_dir-rgbw/zephyr/zephyr.dts" |
+      grep -Fq 'channel-count = < 0x4 >;'
+
+    # The documented N16R8 recipe keeps the memory fragment in the list, so
+    # compile both bench overlays on top of it as well: an overlay that only
+    # works on the small build would otherwise fail on the bench board.
+    west build -p always -d "$build_dir-n16r8-bench" -b "$board" "$repo_dir" -t app -- \
+      -DEXTRA_CONF_FILE="$repo_dir/boards/esp32s3_devkitc_esp32s3_procpu_n16r8.conf" \
+      -DEXTRA_DTC_OVERLAY_FILE="$repo_dir/boards/esp32s3_devkitc_esp32s3_procpu_n16r8.overlay;$repo_dir/boards/yd_esp32s3_uart0.overlay;$repo_dir/boards/yd_esp32s3_rgbw.overlay"
+    bench_dts="$build_dir-n16r8-bench/zephyr/zephyr.dts"
+    grep -Fq 'zephyr,linkr-ble-uart = &uart0;' "$bench_dts"
+    sed -n '/uart1: /,/};/p' "$bench_dts" | grep -Fq 'status = "disabled";'
+    sed -n '/linkr_rgb: linkr-rgb {/,/};/p' "$bench_dts" |
+      grep -Fq 'channel-count = < 0x4 >;'
+    grep -qx 'CONFIG_ESPTOOLPY_FLASHSIZE="16MB"' "$build_dir-n16r8-bench/zephyr/.config"
+
+    # The scan watchdog runs from a timer and its own preemptible queue on this
+    # single-radio part, so a WiFi operation cannot hold the very queue the
+    # watchdog needs. The dedicated thread carries this name.
+    strings "$build_dir/zephyr/zephyr.elf" | grep -qx 'scan_watchdog'
   fi
+  # Per-thread stack high-water marks (@k?) are an opt-in build option: the
+  # 0xaa fill they need cannot be enabled at runtime. The plain build of every
+  # target proves the off path still compiles and that nothing turns the fill
+  # on by accident; the bench configuration above proves the on path.
+  grep -qx '# CONFIG_LINKR_BLE_BRIDGE_STACK_DIAGNOSTICS is not set' "$config"
+  grep -qx '# CONFIG_INIT_STACKS is not set' "$config"
   grep -qx 'CONFIG_BT_SMP_APP_PAIRING_ACCEPT=y' "$config"
   grep -qx 'CONFIG_BT_BONDING_REQUIRED=y' "$config"
   grep -qx 'CONFIG_BT_SETTINGS=y' "$config"

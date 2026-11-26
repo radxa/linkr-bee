@@ -18,7 +18,9 @@ and the individual platform guides.
    **GPIO1** and select **Connect** within 30 seconds, then accept the operating
    system's pairing prompt. The press opens a 30 s authorization window
    (`CONFIG_LINKR_BLE_BRIDGE_PAIRING_GRACE_MS`), so it does not have to be held
-   during pairing; press again if the window expired. If pairing is refused the
+   during pairing; on the Linkr Bee X1.0 the status pixel breathes blue while
+   that window is open and returns to the connection colour once pairing
+   completes. Press again if the window expired. If pairing is refused the
    terminal stops its automatic reconnect: press the key again and press
    **Connect** to start a new pairing. WROOM disables the physical check by
    default and needs no GPIO4 press. An existing bond does not need the key
@@ -103,10 +105,20 @@ The **Board** section appears for the Linkr Bee X1.0 accessory. It drives the
 board's own hardware over the same encrypted management channel as the serial
 settings; nothing here is written to the target's UART.
 
-- **Status LED** is blue with Bluetooth connected, white with WiFi associated,
-  and cyan during AI takeover, in that priority order. UART RX/TX blinks the
-  current colour (5 Hz under continuous traffic). With no connection it is dark;
-  UART activity still flashes. **Apply** and **Off** preview a colour or darkness
+- **Status LED** is white when idle (no client, WiFi not associated), amber with
+  WiFi associated but no client using it, blue with a Bluetooth client, green
+  with a LAN (WebSocket) client, and cyan during AI takeover, in that priority
+  order (AI > LAN > Bluetooth > WiFi > idle). "On the network, standing by" and
+  "in use" are therefore different colours, and a Bluetooth client is no longer
+  hidden by a WiFi link that is merely up. While the pairing window is open
+  (after pressing the pairing key) the pixel **breathes blue** — brightening and
+  dimming over two seconds — so a board waiting to be paired is recognisable
+  without a host. The invitation outranks the Bluetooth client colour, since
+  the link being paired is already up, but stays below LAN and AI so a console
+  in use keeps its colour; pairing completion or the end of the window hands
+  the pixel straight back to the connection state. UART RX/TX blinks the
+  current colour (5 Hz under continuous traffic); while idle that reads as
+  white blinking. **Apply** and **Off** preview a colour or darkness
   for five seconds, then automatic status resumes; AI takes priority over previews.
   The shared Web/mobile/HarmonyOS assistant reports its running state; older
   clients need the explicit AI notification protocol described in

@@ -108,15 +108,6 @@ static struct k_work wifi_scan_work;
 static struct k_mutex scan_lock;
 static struct k_mutex scan_cache_lock;
 static struct k_work_delayable wifi_retry_work;
-#if defined(CONFIG_SOC_SERIES_ESP32C5)
-/* Plain work, not delayable: the clock timer below submits it, and
- * k_work_cancel() asserts when the object carries K_WORK_DELAYABLE_BIT --
- * submitting a delayable object's embedded .work does not clear that flag. */
-static struct k_work scan_timeout_work;
-#else
-static struct k_work_delayable scan_timeout_work;
-#endif
-static struct k_work_delayable wifi_operation_timeout_work;
 
 /*
  * Scan watchdog placement.
@@ -129,14 +120,27 @@ static struct k_work_delayable wifi_operation_timeout_work;
  * out. There the timer runs from the kernel clock interrupt, which no thread can
  * block, and hands the job to a dedicated preemptible queue.
  *
- * No other target has shown that behaviour, so they keep the original
- * delayable-work watchdog rather than each pay for a thread and 768 B of stack.
+ * The S3 has the same single-radio BLE + WiFi coexistence and the same
+ * system-workqueue WiFi path, so it takes the timer and dedicated queue too
+ * rather than wait for the same stall to be reproduced on the bench board.
+ * Other targets keep the original delayable-work watchdog rather than each
+ * pay for a thread and its stack.
  */
-#if defined(CONFIG_SOC_SERIES_ESP32C5)
+#if defined(CONFIG_SOC_SERIES_ESP32C5) || defined(CONFIG_SOC_SERIES_ESP32S3)
 #define LINKR_SCAN_WD_OWN_QUEUE 1
 #else
 #define LINKR_SCAN_WD_OWN_QUEUE 0
 #endif
+
+#if LINKR_SCAN_WD_OWN_QUEUE
+/* Plain work, not delayable: the clock timer below submits it, and
+ * k_work_cancel() asserts when the object carries K_WORK_DELAYABLE_BIT --
+ * submitting a delayable object's embedded .work does not clear that flag. */
+static struct k_work scan_timeout_work;
+#else
+static struct k_work_delayable scan_timeout_work;
+#endif
+static struct k_work_delayable wifi_operation_timeout_work;
 
 #if LINKR_SCAN_WD_OWN_QUEUE
 static struct k_work_q scan_wq;

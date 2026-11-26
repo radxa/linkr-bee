@@ -343,6 +343,25 @@ config LINKR_BLE_BRIDGE_CONTROL_COMMANDS
 	  instead of forwarding them to UART. Supported commands include:
 	  "@linkr uart?" and "@linkr uart=<baud>,<data>,<parity>,<stop>,<flow>".
 
+config LINKR_BLE_BRIDGE_STACK_DIAGNOSTICS
+	bool "Enable @k? per-thread stack high-water diagnostics"
+	depends on LINKR_BLE_BRIDGE_CONTROL_COMMANDS
+	depends on THREAD_MONITOR && THREAD_STACK_INFO
+	select INIT_STACKS
+	help
+	  Add the on-demand "@k?" (long form "@linkr stacks?") command, which
+	  reports one "@stack <name> <used>/<size>" frame per live thread. The
+	  kernel can only measure a high-water mark when each stack was filled
+	  with 0xaa at thread creation, so this selects CONFIG_INIT_STACKS and
+	  pays a one-time memset of every thread stack during boot. That fill
+	  cannot be enabled after the fact, which is why the command is a build
+	  option rather than a runtime one.
+
+	  Default off: this is a debugging tool, not part of the product
+	  contract. Boards that want it (the bench configuration does) enable it
+	  explicitly. When off, "@k?" answers "ERR stacks unsupported" so a
+	  client can tell a board that cannot measure from a typo.
+
 config LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH
 	bool "Require GPIO button press for BLE pairing"
 	default n

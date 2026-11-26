@@ -1544,6 +1544,115 @@ static void heap_status_response(struct bt_conn *conn)
 }
 #endif
 
+/* Stack high-water marks. CONFIG_INIT_STACKS fills every stack with 0xaa when
+ * the thread is created, and k_thread_stack_space_get() counts the untouched
+ * bytes from the low end, so the worst case since boot is visible. Called on
+ * demand: walking every stack is cheap but not something @i? should do on
+ * every poll. Thread names become one token; unnamed threads stay "unnamed".
+ * Behind its own switch: the 0xaa fill has to happen when a thread is created,
+ * so this cannot be turned on at runtime. The option selects INIT_STACKS and
+ * depends on the thread monitors, so one symbol is the whole condition. */
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_STACK_DIAGNOSTICS)
+struct stack_report_ctx {
+	struct bt_conn *conn;
+	unsigned int start;
+	unsigned int seen;
+	unsigned int more;
+	bool stop;
+};
+
+static void stack_thread_name(char *out, size_t size,
+			      const struct k_thread *thread)
+{
+#if defined(CONFIG_THREAD_NAME)
+	const char *name = k_thread_name_get((k_tid_t)thread);
+#else
+	const char *name = NULL;
+#endif
+	size_t used = 0;
+
+	if (name == NULL || *name == '\0') {
+		name = "unnamed";
+	}
+	for (; *name != '\0' && used + 1 < size; name++) {
+		char ch = *name;
+
+		out[used++] = (ch <= ' ' || ch == '=') ? '_' : ch;
+	}
+	out[used] = '\0';
+}
+
+static void stack_report_thread(const struct k_thread *thread, void *user_data)
+{
+	struct stack_report_ctx *ctx = user_data;
+	char name[24];
+	char line[64];
+	size_t total = thread->stack_info.size;
+	size_t unused = 0;
+	size_t room;
+	int len;
+
+	if (ctx->stop) {
+		return;
+	}
+	unsigned int index = ctx->seen++;
+
+	if (index < ctx->start) {
+		return;
+	}
+	if (k_thread_stack_space_get(thread, &unused) != 0) {
+		return;
+	}
+	/* z_stack_space_get() skips the 4-byte sentinel, so exclude it here too
+	 * or the reported usage would include a byte the thread cannot use. */
+	if (IS_ENABLED(CONFIG_STACK_SENTINEL) && total > 4) {
+		total -= 4;
+	}
+	if (unused > total) {
+		unused = total;
+	}
+	stack_thread_name(name, sizeof(name), thread);
+	len = snprintk(line, sizeof(line), "@stack %s %u/%u\r\n", name,
+		       (unsigned int)(total - unused), (unsigned int)total);
+	if (len <= 0) {
+		return;
+	}
+	/* One management response is capped at LINKR_MGMT_MAX_PAYLOAD bytes and
+	 * an overflow replaces the whole reply with an error. Keep room for the
+	 * closing frame, and when this thread does not fit, report its index so
+	 * the caller can ask for the next page (the list is stable after boot).
+	 */
+	room = sizeof(mgmt_capture.data) - mgmt_capture.len;
+	/* 24 bytes also covers the "@stack more=<index>\r\n" closing frame, so
+	 * the page can always say where to continue instead of overflowing. */
+	if ((size_t)len + 1 + 24 > room) {
+		ctx->more = index;
+		ctx->stop = true;
+		return;
+	}
+	(void)send_control_response(ctx->conn, "%s", line);
+}
+
+static void stack_diagnostics_response(struct bt_conn *conn, unsigned int start)
+{
+	struct stack_report_ctx ctx = { .conn = conn, .start = start };
+
+	k_thread_foreach_unlocked(stack_report_thread, &ctx);
+	if (ctx.stop) {
+		(void)send_control_response(conn, "@stack more=%u\r\n",
+					    ctx.more);
+	} else {
+		(void)send_control_response(conn, "@stack done\r\n");
+	}
+}
+#else
+static void stack_diagnostics_response(struct bt_conn *conn, unsigned int start)
+{
+	ARG_UNUSED(start);
+	(void)send_control_response(conn, "ERR stacks unsupported\r\n");
+}
+#endif
+
 static void diagnostics_response(struct bt_conn *conn)
 {
 	char status[192];
@@ -1559,10 +1668,25 @@ static void diagnostics_response(struct bt_conn *conn)
 	(void)send_control_response(conn, "@info fw version=%s zephyr=%s\r\n",
 				    CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION,
 				    KERNEL_VERSION_STRING);
-	(void)send_control_response(conn,
-				    "@info sys uptime_ms=%lld owner=%u links=%d security=%u\r\n",
-				    (long long)k_uptime_get(), 0U, ble_link_count(),
-				    (unsigned int)security);
+	/* The PSRAM verdict rides on the system frame: it is boot health, and a
+	 * separate frame would eat the 512-byte management response budget that
+	 * @i? already spends on counters. "na" is true on every target without
+	 * PSRAM, so it is left out instead of spending bytes on the common case. */
+	const char *ext_ram = linkr_ext_ram_state_name();
+
+	if (strcmp(ext_ram, "na") != 0) {
+		(void)send_control_response(
+			conn,
+			"@info sys uptime_ms=%lld owner=%u links=%d security=%u ext_ram=%s\r\n",
+			(long long)k_uptime_get(), 0U, ble_link_count(),
+			(unsigned int)security, ext_ram);
+	} else {
+		(void)send_control_response(
+			conn,
+			"@info sys uptime_ms=%lld owner=%u links=%d security=%u\r\n",
+			(long long)k_uptime_get(), 0U, ble_link_count(),
+			(unsigned int)security);
+	}
 	(void)send_control_response(conn,
 				    "@info uart dropped=%u dropped_no_conn=%u buffer=%u/%u\r\n",
 				    dropped, dropped_no_conn, buffered, UART_RX_BUFFER_SIZE);
@@ -1630,7 +1754,8 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 		if (len == 2 && data[0] == '@' && data[1] == 'h') {
 			short_ch = 'h';
 		} else if (len >= 2 && data[0] == '@' &&
-			   (data[1] == 'c' || data[1] == 'i' || data[1] == 'u' || data[1] == 'w' ||
+			   (data[1] == 'c' || data[1] == 'i' || data[1] == 'k' ||
+			    data[1] == 'u' || data[1] == 'w' ||
 			    data[1] == 'd' || data[1] == 's' ||
 			    data[1] == 'a' || data[1] == 'n' ||
 			    data[1] == 'l' || data[1] == 'o' || data[1] == 'r' ||
@@ -1665,6 +1790,8 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 	bool readonly = !strcmp(body, "h") || !strcmp(body, "help") ||
 		!strcmp(body, "aux") ||
 		!strcmp(body, "i?") || !strcmp(body, "info?") ||
+		!strcmp(body, "k?") || !strcmp(body, "stacks?") ||
+		!strncmp(body, "k? ", 3) || !strncmp(body, "stacks? ", 8) ||
 		!strcmp(body, "u?") || !strcmp(body, "uart?") ||
 		!strcmp(body, "n?") || !strcmp(body, "name?") ||
 		!strcmp(body, "a?") || !strcmp(body, "autobaud?") ||
@@ -1716,7 +1843,11 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 		// replaced by "response too large". `@linkr aux` carries the board
 		// half, so both fit.
 		(void)send_control_response(conn,
-					     "OK cmds: @linkr bonds?|@linkr bonds name <label>|@linkr bonds names?|@linkr bonds label <type>/<address> [<hex>|clear]|@linkr bonds remove <type>/<address> @c?|@c claim|@c release|@c yield <peer> @i? @u?|@u=baud,data,par,stop,flow "
+					     "OK cmds: @linkr bonds?|@linkr bonds name <label>|@linkr bonds names?|@linkr bonds label <type>/<address> [<hex>|clear]|@linkr bonds remove <type>/<address> @c?|@c claim|@c release|@c yield <peer> @i? "
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_STACK_DIAGNOSTICS)
+					    "@k? "
+#endif
+					    "@u?|@u=baud,data,par,stop,flow "
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_NAME_FROM_MAC)
 					    "@n?|@n=<name>|@n default "
 #endif
@@ -1746,6 +1877,24 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 
 	if (!strcmp(body, "info?") || !strcmp(body, "i?")) {
 		diagnostics_response(conn);
+		return true;
+	}
+	/* Stack high-water marks are a separate, on-demand command: @i? stays
+	 * short enough for one poll and its existing groups keep their shape.
+	 * `@k? <n>` continues after the `@stack more=<n>` marker of a full page. */
+	if ((!strncmp(body, "k?", 2) && (body[2] == '\0' || body[2] == ' ')) ||
+	    (!strncmp(body, "stacks?", 7) &&
+	     (body[7] == '\0' || body[7] == ' '))) {
+		const char *arg = body + (body[0] == 'k' ? 2 : 7);
+		unsigned int start = 0;
+
+		while (*arg == ' ') {
+			arg++;
+		}
+		while (*arg >= '0' && *arg <= '9' && start < 100000U) {
+			start = start * 10U + (unsigned int)(*arg++ - '0');
+		}
+		stack_diagnostics_response(conn, start);
 		return true;
 	}
 

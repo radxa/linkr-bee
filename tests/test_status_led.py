@@ -51,8 +51,15 @@ class StatusLedTests(unittest.TestCase):
     def test_new_activity_before_expiry_work_keeps_blinking(self):
         self.check_scenario(4)
 
-    def test_ai_wifi_ble_priority_and_disconnect(self):
+    def test_ai_lan_ble_wifi_priority_and_disconnect(self):
         self.check_scenario(5)
+        self.check_scenario(14)
+
+    def test_lan_client_count_only_tracks_authenticated_clients(self):
+        self.check_scenario(15)
+
+    def test_pairing_invitation_breathes_below_lan_above_ble(self):
+        self.check_scenario(16)
 
     def test_lost_ai_heartbeat_expires(self):
         self.check_scenario(6)

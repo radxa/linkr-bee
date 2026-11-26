@@ -14,6 +14,7 @@
 #include "wifi.h"
 #include "serial_session.h"
 #include "ext_ram.h"
+#include "linkr_status_led.h"
 
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(linkr_ws, LOG_LEVEL_INF);
@@ -338,6 +339,10 @@ static int ws_token_resolve(void)
 static void ws_client_cleanup(struct ws_client *client)
 {
 	int sock;
+	/* Only a client that reached ACTIVE ever counted as a LAN user; one that
+	 * failed the token handshake must not move the pixel. */
+	bool was_active = atomic_get(&client->state) == WS_CLIENT_ACTIVE;
+
 	linkr_session_close(client);
 
 	atomic_set(&client->state, WS_CLIENT_CLOSING);
@@ -355,6 +360,11 @@ static void ws_client_cleanup(struct ws_client *client)
 	}
 
 	atomic_dec(&active_clients);
+	if (was_active) {
+		/* Amber takes over once the last authenticated client leaves, so the
+		 * pixel never keeps claiming the network is in use. */
+		linkr_status_led_lan_client(false);
+	}
 	/* Publishing FREE is the final teardown action. The persistent handler
 	 * thread loops back to start_sem, so neither its stack nor sync objects are
 	 * reinitialized while another context may still reference them. */
@@ -405,6 +415,9 @@ static bool ws_client_auth(struct ws_client *client, int slot)
 			return false;
 		}
 		atomic_set(&client->state, WS_CLIENT_ACTIVE);
+		/* A client that may now use the UART is what "the network is in
+		 * use" means: green from here until it leaves. */
+		linkr_status_led_lan_client(true);
 		return true;
 	}
 
@@ -451,6 +464,7 @@ static bool ws_client_auth(struct ws_client *client, int slot)
 	/* Fan-out only starts here: an unauthenticated socket must never be
 	 * eligible for UART bytes, and the handshake must stay the first frame. */
 	atomic_set(&client->state, WS_CLIENT_ACTIVE);
+	linkr_status_led_lan_client(true);
 	return true;
 }
 
@@ -652,7 +666,8 @@ static int linkr_ws_setup(int ws_socket, struct http_request_ctx *request_ctx,
 
 	atomic_inc(&active_clients);
 	/* The slot stays CLAIMED until the client thread authenticates it; only
-	 * ws_client_auth() publishes WS_CLIENT_ACTIVE. */
+	 * ws_client_auth() publishes WS_CLIENT_ACTIVE, and only then does the
+	 * status pixel turn green. */
 	k_sem_give(&client->start_sem);
 	return 0;
 }

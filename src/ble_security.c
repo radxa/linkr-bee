@@ -6,6 +6,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include "ble_security.h"
+#include "linkr_status_led.h"
 
 LOG_MODULE_REGISTER(linkr_ble_security, LOG_LEVEL_INF);
 
@@ -53,6 +54,40 @@ static struct k_spinlock pairing_press_lock;
 static int64_t pairing_pressed_at;
 static bool pairing_press_seen;
 
+/* Pairing invitation on the RGB pixel: breathing blue for as long as the
+ * window is open (key held, or within the grace period of a press). The work
+ * only starts and stops the animation; the fading itself runs inside the LED
+ * module's own 25 fps work.
+ *
+ * The work item is the only writer of the pairing colour. A press and a
+ * completed pairing both just change the flag and reschedule it, so the two
+ * cannot interleave and re-arm the animation after it was stopped. */
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH) && \
+	IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_RGB_STATUS_LED)
+#define PAIRING_LED_POLL_MS 250
+static bool pairing_led_done;
+static void pairing_led_poll(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(pairing_led_work, pairing_led_poll);
+
+static void pairing_led_notify(void)
+{
+	pairing_led_done = false;
+	(void)k_work_reschedule(&pairing_led_work, K_NO_WAIT);
+}
+
+static void pairing_led_stop(void)
+{
+	/* Do not touch the pixel from the Bluetooth thread: let the work item
+	 * see the flag and clear it, so it cannot be re-armed by a poll that was
+	 * already running with the old value. */
+	pairing_led_done = true;
+	(void)k_work_reschedule(&pairing_led_work, K_NO_WAIT);
+}
+#else
+static void pairing_led_notify(void) { }
+static void pairing_led_stop(void) { }
+#endif
+
 static void pairing_press_latch(void)
 {
 	k_spinlock_key_t key = k_spin_lock(&pairing_press_lock);
@@ -69,8 +104,10 @@ static void pairing_pressed(const struct device *port,
 	ARG_UNUSED(callback);
 	ARG_UNUSED(pins);
 
-	/* Interrupt context: only record when the press happened. */
+	/* Interrupt context: only record when the press happened; the breathing
+	 * animation is started from the work item. */
 	pairing_press_latch();
+	pairing_led_notify();
 }
 
 /* True while the pairing GPIO is held active, or within PAIRING_GRACE_MS of
@@ -102,6 +139,32 @@ static bool pairing_gpio_authorizes(void)
 	return authorized;
 }
 
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH) && \
+	IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_RGB_STATUS_LED)
+/* Re-check the window while the invitation is on screen, so the pixel stops
+ * breathing on its own when the grace period runs out or the key is released,
+ * and keeps breathing for as long as the key is held. Runs last: the pairing
+ * colour is only changed here. */
+static void pairing_led_poll(struct k_work *work)
+{
+	bool open;
+
+	ARG_UNUSED(work);
+	if (pairing_led_done) {
+		/* Paired already, or no invitation pending: clear the animation
+		 * and go back to the connection state without rescheduling. */
+		linkr_status_led_pairing(false);
+		return;
+	}
+	open = pairing_gpio_authorizes();
+	linkr_status_led_pairing(open);
+	if (open) {
+		(void)k_work_reschedule(&pairing_led_work,
+					K_MSEC(PAIRING_LED_POLL_MS));
+	}
+}
+#endif
+
 static enum bt_security_err pairing_accept(
 	struct bt_conn *conn, const struct bt_conn_pairing_feat *const feat)
 {
@@ -126,6 +189,9 @@ static void pairing_complete(struct bt_conn *conn, bool bonded)
 	}
 	/* Zephyr BT_SETTINGS persists the negotiated keys; never log them. */
 	LOG_INF("BLE pairing complete (bonded)");
+	/* The invitation has been accepted: stop breathing and show the client
+	 * colour, even though the authorization window is still open. */
+	pairing_led_stop();
 }
 
 static void pairing_failed(struct bt_conn *conn, enum bt_security_err reason)
@@ -179,6 +245,7 @@ int linkr_ble_security_init(void)
 		/* A key already held at init produces no edge; latch it here. */
 		if (gpio_pin_get_dt(&pairing_gpio) == 1) {
 			pairing_press_latch();
+			pairing_led_notify();
 		}
 	}
 	err = bt_conn_auth_cb_register(&auth_callbacks);
