@@ -141,7 +141,8 @@ pixel on GPIO48. Check the RGB solder link if the pixel stays dark.
 The pixel mirrors the bridge state at 30% brightness: idle white, a bare
 WiFi association amber, a BLE client blue, a LAN WebSocket client green and
 an AI session cyan (AI > LAN > BLE > WiFi > idle); `@l` shows a five-second
-preview.
+preview. When the pairing GPIO check is enabled, the same pixel breathes blue
+while the authorization window is open (AI > LAN > pairing > BLE > WiFi > idle).
 The driver generates the waveform from IRAM.
 [V1.4 schematic](https://github.com/vcc-gnd/YD-ESP32-S3/blob/main/5-public-YD-ESP32-S3-Hardware%20info/YD-ESP32-S3-SCH-V1.4.pdf) · [U1 datasheet](https://www.xinglight.cn/uploadfile/202406/4c1ee57988f3bce.pdf)
 
@@ -680,7 +681,10 @@ restores the old "held during the request" rule), so the key does not have to
 stay held. WROOM ships with `CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=n`, so no
 GPIO press is needed; if that option is enabled, GPIO4 is the pairing input.
 Existing bonds restore encryption without the pairing GPIO; replacing lost host
-keys requires a fresh press when the check is enabled. The default is eight bonds with no automatic
+keys requires a fresh press when the check is enabled. On an RGB board the
+status pixel breathes blue while that window is open, so the owner can see that
+the board is ready to pair; pairing completion, an accepted LAN or AI session,
+or the end of the window ends the animation. The default is eight bonds with no automatic
 eviction. A full table requires factory reset before adding more hosts. See
 [pairing and recovery](BLE_PAIRING.md).
 

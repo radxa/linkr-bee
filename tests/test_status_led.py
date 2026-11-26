@@ -58,6 +58,9 @@ class StatusLedTests(unittest.TestCase):
     def test_lan_client_count_only_tracks_authenticated_clients(self):
         self.check_scenario(15)
 
+    def test_pairing_invitation_breathes_below_lan_above_ble(self):
+        self.check_scenario(16)
+
     def test_lost_ai_heartbeat_expires(self):
         self.check_scenario(6)
 

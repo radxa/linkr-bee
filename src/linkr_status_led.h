@@ -33,11 +33,13 @@ void linkr_status_led_activity(void);
  * AI is a 15-second lease renewed by the current controller; false clears it.
  * wifi means the link is associated; lan_client is one event per authenticated
  * WebSocket client (true on attach, false when it leaves), so the board can
- * count them; priority is AI > lan > ble > wifi > idle. */
+ * count them; pairing breathes blue while the pairing window is open.
+ * Priority is AI > lan > pairing > ble > wifi > idle. */
 void linkr_status_led_ble(bool connected);
 void linkr_status_led_wifi(bool connected);
 void linkr_status_led_lan_client(bool attached);
 void linkr_status_led_ai(bool active);
+void linkr_status_led_pairing(bool active);
 
 /* Preview a colour for five seconds on RGB boards, then return to automatic
  * status. AI status has priority over the preview. On other boards, set the

@@ -131,7 +131,9 @@ VCC-GND YD-ESP32-S3 V1.4 默认用 UART1 连接目标设备。将 GPIO17（Bee T
 V1.4 原理图将 U1 标为 XL-5050RGBC-WS2812B，GPIO48 按 24 位 GRB 格式驱动。
 灯不亮时可检查 RGB 焊桥是否已连通。该灯以 30% 亮度跟随桥状态：空闲白、
 仅 WiFi 关联琥珀、BLE 客户端蓝、LAN（WebSocket）客户端绿、AI 会话青
-（AI > LAN > BLE > WiFi > 空闲）；`@l` 设色后显示 5 秒预览，驱动在 IRAM 中生成波形。[V1.4 原理图](https://github.com/vcc-gnd/YD-ESP32-S3/blob/main/5-public-YD-ESP32-S3-Hardware%20info/YD-ESP32-S3-SCH-V1.4.pdf) · [U1 数据手册](https://www.xinglight.cn/uploadfile/202406/4c1ee57988f3bce.pdf)
+（AI > LAN > BLE > WiFi > 空闲）；`@l` 设色后显示 5 秒预览，驱动在 IRAM 中生成波形。
+启用配对 GPIO 校验的板型在授权窗口打开期间还会让同一像素蓝色呼吸
+（AI > LAN > 配对 > BLE > WiFi > 空闲）。[V1.4 原理图](https://github.com/vcc-gnd/YD-ESP32-S3/blob/main/5-public-YD-ESP32-S3-Hardware%20info/YD-ESP32-S3-SCH-V1.4.pdf) · [U1 数据手册](https://www.xinglight.cn/uploadfile/202406/4c1ee57988f3bce.pdf)
 
 默认构建不假设存在 PSRAM，因此既能用于 8 MB flash、无 PSRAM 的模组，也能用于
 N16R8（此时 PSRAM 闲置不用）；2 MB 的 N8R2 模组同样使用默认构建，因为 PSRAM
@@ -493,6 +495,8 @@ board conf 默认 `CONFIG_LINKR_BLE_BRIDGE_PAIRING_GPIO_AUTH=n`，不需要按
 GPIO4；只有把该选项设为 `y` 时，GPIO4 才作为物理授权输入。已有绑定的加密
 重连无需操作配对 GPIO；新主机配对需在按下配对键后的 30 秒授权窗口内发起
 （`CONFIG_LINKR_BLE_BRIDGE_PAIRING_GRACE_MS`，设为 0 恢复“请求时必须按住”）。
+带 RGB 状态灯的板子在窗口打开期间让像素蓝色呼吸，提示“现在可以配对”；配对完成、
+LAN 或 AI 接管、或窗口结束都会停止动画。
 默认最多保存 8 台主机，不自动淘汰旧绑定；满后通过
 恢复出厂清空。接线、客户端操作和验收方法见[蓝牙配对](BLE_PAIRING.md)。
 

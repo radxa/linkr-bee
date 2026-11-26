@@ -43,8 +43,15 @@ static const struct linkr_rgb led_activity_color = {
  *
  * A client outranks a bare association, so "on the network, nobody using it"
  * and "someone is using it" are different colours, and a BLE client is no
- * longer hidden by a WiFi link that is merely up. AI > LAN > BLE > WiFi >
- * idle.
+ * longer hidden by a WiFi link that is merely up.
+ *
+ * A sixth indication sits on top of the colour, not beside it: while the
+ * pairing window is open (the key was pressed, or is still held) the pixel
+ * breathes blue. It outranks the BLE client because the link that is pairing
+ * is already up, and "someone touched the board, pairing is allowed" is the
+ * fact the user just asked to see. It stays below LAN and AI so a console
+ * that is genuinely in use keeps its own colour. Priority: AI > LAN >
+ * pairing > BLE > WiFi > idle.
  */
 #if !defined(CONFIG_LINKR_BLE_BRIDGE_RGB_MANUAL_ONLY)
 static const struct linkr_rgb led_blue = {0, 0, 32};
@@ -64,13 +71,19 @@ static const struct linkr_rgb led_green = {0, 32, 0};
 #define LED_BLINK_MS 100
 #define LED_PREVIEW_MS 5000
 #define LED_AI_LEASE_MS 15000
+/* One breath per period, dimmest at the start of each period. The LED work
+ * already caps output at 25 frames per second, so a 2 s period is smooth
+ * without adding a second timer. */
+#define LED_PAIRING_PERIOD_MS 2000
+#define LED_PAIRING_MIN_PERCENT 15
 static bool led_ready, led_ble_connected, led_wifi_connected;
-static bool led_lan_connected;
+static bool led_lan_connected, led_pairing;
 static unsigned int led_lan_clients;
 static const char *led_last_reason;
 static bool led_activity_active, led_last_valid;
 static int64_t led_activity_deadline, led_activity_start;
 static int64_t led_preview_deadline, led_ai_deadline, led_last_write;
+static int64_t led_pairing_start;
 static uint32_t led_revision;
 static struct linkr_rgb led_last_color;
 static struct k_spinlock led_lock;
@@ -115,6 +128,28 @@ static struct linkr_rgb led_color(int64_t now, const char **reason)
 		*reason = "lan";
 		return led_green;
 	}
+	if (led_pairing) {
+		/* Breathe blue while pairing is permitted: a triangle ramp between
+		 * LED_PAIRING_MIN_PERCENT and full logical blue. The output stage
+		 * scales the whole frame once, so the pixel really fades. */
+		int64_t phase = (now - led_pairing_start) % LED_PAIRING_PERIOD_MS;
+		uint32_t ramp;
+
+		if (phase < 0) phase += LED_PAIRING_PERIOD_MS;
+		if (phase < LED_PAIRING_PERIOD_MS / 2) {
+			ramp = (uint32_t)phase * 1000 / (LED_PAIRING_PERIOD_MS / 2);
+		} else {
+			ramp = (uint32_t)(LED_PAIRING_PERIOD_MS - phase) * 1000 /
+			       (LED_PAIRING_PERIOD_MS / 2);
+		}
+		uint32_t percent = LED_PAIRING_MIN_PERCENT +
+				   (100 - LED_PAIRING_MIN_PERCENT) * ramp / 1000;
+
+		*reason = "pairing";
+		return (struct linkr_rgb){
+			.r = 0, .g = 0, .b = (uint8_t)(led_blue.b * percent / 100),
+		};
+	}
 	if (led_ble_connected) {
 		*reason = "ble";
 		return led_blue;
@@ -141,8 +176,15 @@ static void led_apply(struct k_work *work)
 	uint32_t revision = led_revision;
 	const char *reason = "idle";
 	struct linkr_rgb color = led_color(now, &reason);
+
 	led_next(&next, led_ai_deadline, now);
 	led_next(&next, led_preview_deadline, now);
+	/* The breathing ramp is a colour change with no deadline of its own:
+	 * keep the work ticking while the invitation is up. Manual-only builds
+	 * hold one colour, so there is nothing to animate. */
+#if !defined(CONFIG_LINKR_BLE_BRIDGE_RGB_MANUAL_ONLY)
+	if (led_pairing) led_next(&next, now + LINKR_ACTIVITY_MS, now);
+#endif
 	led_activity_active = now < led_activity_deadline;
 	if (led_activity_active) {
 		int64_t phase = (now - led_activity_start) / LED_BLINK_MS;
@@ -255,6 +297,21 @@ void linkr_status_led_ai(bool active)
 	++led_revision;
 	k_spin_unlock(&led_lock, key);
 	if (led_ready) (void)k_work_reschedule(&led_apply_work, K_NO_WAIT);
+}
+
+/* The pairing window is a local, user-initiated invitation: the pixel breathes
+ * blue while it is open so the board says "pair me now" without a host. The
+ * breathing restarts at its dimmest point on every new window. */
+void linkr_status_led_pairing(bool active)
+{
+	k_spinlock_key_t key = k_spin_lock(&led_lock);
+	bool changed = led_pairing != active;
+
+	if (active && !led_pairing) led_pairing_start = k_uptime_get();
+	led_pairing = active;
+	if (changed) ++led_revision;
+	k_spin_unlock(&led_lock, key);
+	if (changed && led_ready) (void)k_work_reschedule(&led_apply_work, K_NO_WAIT);
 }
 
 void linkr_status_led_activity(void)
@@ -480,4 +537,5 @@ void linkr_status_led_ble(bool connected) { ARG_UNUSED(connected); }
 void linkr_status_led_wifi(bool connected) { ARG_UNUSED(connected); }
 void linkr_status_led_lan_client(bool attached) { ARG_UNUSED(attached); }
 void linkr_status_led_ai(bool active) { ARG_UNUSED(active); }
+void linkr_status_led_pairing(bool active) { ARG_UNUSED(active); }
 #endif

@@ -210,6 +210,21 @@ int main(int argc, char **argv)
         linkr_status_led_lan_client(false); advance(800); expect(0, 0, 10);
         linkr_status_led_ble(false); advance(900); expect(14, 5, 0);
         linkr_status_led_wifi(false); advance(1000); expect(77, 77, 77);
+    } else if (scenario == 16) {
+        /* The pairing invitation breathes blue from dim to full and back,
+         * outranks the BLE link that is being paired, stays below a live LAN
+         * client, and hands the pixel back to the link state when it closes.
+         * The prologue already advanced to 200 ms with a BLE client attached. */
+        linkr_status_led_pairing(true); advance(400); expect(0, 0, 3);
+        advance(900); expect(0, 0, 7);
+        advance(1400); expect(0, 0, 8);
+        advance(1900); expect(0, 0, 4);
+        /* The link that is pairing is already up; the invitation still wins. */
+        linkr_status_led_lan_client(true); advance(1950); expect(0, 10, 0);
+        linkr_status_led_lan_client(false); advance(2100); expect(0, 0, 2);
+        linkr_status_led_pairing(false); advance(2200); expect(0, 0, 10);
+        linkr_status_led_ble(false); advance(2300); expect(77, 77, 77);
+        advance(2700); expect(77, 77, 77);
     } else if (scenario == 6) {
         linkr_status_led_ai(true); advance(200); expect(0, 7, 7);
         advance(15199); expect(0, 7, 7);
