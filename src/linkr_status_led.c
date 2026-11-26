@@ -66,6 +66,7 @@ static const struct linkr_rgb led_green = {0, 32, 0};
 #define LED_AI_LEASE_MS 15000
 static bool led_ready, led_ble_connected, led_wifi_connected;
 static bool led_lan_connected;
+static unsigned int led_lan_clients;
 static const char *led_last_reason;
 static bool led_activity_active, led_last_valid;
 static int64_t led_activity_deadline, led_activity_start;
@@ -224,13 +225,22 @@ void linkr_status_led_wifi(bool connected)
 	if (changed && led_ready) (void)k_work_reschedule(&led_apply_work, K_NO_WAIT);
 }
 
-/* A LAN client attached (the WebSocket bridge) is a live user of the network,
- * not just an association: this is what turns the pixel green. The bridge
- * reports the count, so a second client connecting or one of two leaving does
- * not change the state colour. */
-void linkr_status_led_lan(bool connected)
+/* A LAN client that is actually attached and authenticated (the WebSocket
+ * bridge) is a live user of the network, not just an association: this is what
+ * turns the pixel green. The bridge reports one event per client, and the count
+ * lives here so the increment/decrement and the colour decision share one
+ * critical section: an authenticated client that appears while another is
+ * leaving cannot leave the pixel on a stale colour, and a client that never
+ * authenticated never counts. */
+void linkr_status_led_lan_client(bool attached)
 {
 	k_spinlock_key_t key = k_spin_lock(&led_lock);
+	if (attached) {
+		++led_lan_clients;
+	} else if (led_lan_clients > 0) {
+		--led_lan_clients;
+	}
+	bool connected = led_lan_clients > 0;
 	bool changed = led_lan_connected != connected;
 	led_lan_connected = connected;
 	if (changed) ++led_revision;
@@ -468,6 +478,6 @@ void linkr_status_led_blink(int count, int delay_ms)
 /* Connection colours are specific to the X1.0 RGB LED. */
 void linkr_status_led_ble(bool connected) { ARG_UNUSED(connected); }
 void linkr_status_led_wifi(bool connected) { ARG_UNUSED(connected); }
-void linkr_status_led_lan(bool connected) { ARG_UNUSED(connected); }
+void linkr_status_led_lan_client(bool attached) { ARG_UNUSED(attached); }
 void linkr_status_led_ai(bool active) { ARG_UNUSED(active); }
 #endif
