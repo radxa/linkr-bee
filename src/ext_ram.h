@@ -48,4 +48,11 @@
  */
 int linkr_ext_ram_verify_heap(void);
 
+/*
+ * Last result of linkr_ext_ram_verify_heap(), as a stable token for the
+ * diagnostics reply: "ok", "overlap", "overflow", "unavailable", "unchecked"
+ * (the check has not run), or "na" on targets without PSRAM.
+ */
+const char *linkr_ext_ram_state_name(void);
+
 #endif /* LINKR_EXT_RAM_H */

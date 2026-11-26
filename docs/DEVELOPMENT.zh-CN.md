@@ -164,6 +164,10 @@ west build -p always -b esp32s3_devkitc/esp32s3/procpu linkr-bee -- \
 8 MB，N16R8 为 16 MB），`tools/verify.sh` 会断言该值，因此 `west flash` 无需
 额外传 `--flash-size`。
 
+S3 还把 Zephyr 的蓝牙长工作任务队列栈从 1404 字节提高到 2048 字节：`@k?` 在这颗
+控制器上实测已用到 1200 字节，几乎没有余量。改其他栈之前，先让板子跑一段真实流量
+再用 `@k?` 看数据。
+
 Bee X1.0 另外将主线程栈设为 2 KiB、日志线程栈设为 1 KiB。Zephyr 4.5 诊断镜像在
 空闲、BLE 管理与数据收发、WiFi 扫描及 1500000 波特率 UART 回环中，分别测得
 1092 B 和 732 B 的栈峰值。板级定义启用 `trng0`，使用硬件熵源；计入活动灯状态开销和
@@ -533,8 +537,20 @@ UART RX 字节（SBC console 输出）会被缓存，并定期 HTTP PUT 到 `<we
 
 | 短形式 | 长形式 | 说明 |
 |--------|--------|------|
-| `@i?` | `@linkr info?` | 读取设备诊断信息（固件版本、运行时间、UART 统计、WiFi 状态、WebDAV 计数器） |
+| `@i?` | `@linkr info?` | 读取设备诊断信息（固件版本、运行时间、UART 统计、PSRAM 堆检查、WiFi 状态、WebDAV 计数器） |
+| `@k?` | `@linkr stacks?` | 以 used/size 字节读取每个线程的栈高水位 |
 | `@h` | `@linkr help` | 列出可用命令 |
+
+带 PSRAM 的目标会在 `sys` 帧里附带 `ext_ram=<状态>`：`ok` 表示启动检查确认
+共享堆落在映射区内，`overlap`、`overflow`、`unavailable` 是失败原因，
+`unchecked` 表示检查没有执行。没有 PSRAM 的目标不返回这个字段。
+
+`@k?` 为每个存活线程返回一帧 `@stack <名称> <used>/<size>`。内核统计栈底仍然
+保留 0xaa 填充值的字节数，因此 `used` 就是该线程创建以来的高水位。线程名里的
+空格会替换成 `_`，保证整帧仍是 token 列表。一条管理响应最多 512 字节，所以
+一页放满时末尾返回 `@stack more=<索引>`（全部列完则是 `@stack done`），再用
+`@k? <索引>` 从该处继续。刚启动时线程还没跑过，数字只反映入口点，跑一段时间
+后才有参考价值。
 
 ### WiFi 命令
 

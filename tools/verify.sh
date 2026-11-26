@@ -128,6 +128,8 @@ for board in $boards; do
     grep -qx '# CONFIG_RING_BUFFER_LARGE is not set' "$config"
     grep -qx 'CONFIG_LINKR_BLE_BRIDGE_UART_RX_BUFFER_SIZE=8192' "$config"
     grep -qx 'CONFIG_LINKR_BLE_BRIDGE_LOG_RING_SIZE=8192' "$config"
+    # @k? measured the BT long workqueue at 1200/1404; keep the raised size.
+    grep -qx 'CONFIG_BT_LONG_WQ_STACK_SIZE=2048' "$config"
     # The devkit DTS describes an 8 MB part; the runner must not fall back to
     # the 2 MB default and write a truncated image.
     grep -qx 'CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y' "$config"
@@ -213,6 +215,8 @@ for board in $boards; do
     # watchdog needs. The dedicated thread carries this name.
     strings "$build_dir/zephyr/zephyr.elf" | grep -qx 'scan_watchdog'
   fi
+  # @k? reports high-water marks, which need the 0xaa stack fill.
+  grep -qx 'CONFIG_INIT_STACKS=y' "$config"
   grep -qx 'CONFIG_BT_SMP_APP_PAIRING_ACCEPT=y' "$config"
   grep -qx 'CONFIG_BT_BONDING_REQUIRED=y' "$config"
   grep -qx 'CONFIG_BT_SETTINGS=y' "$config"

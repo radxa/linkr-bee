@@ -179,6 +179,11 @@ Both board configurations pin the esptool flash size to the size their Devicetre
 declares (8 MB for the default build, 16 MB for N16R8), and `tools/verify.sh`
 asserts it, so `west flash` needs no `--flash-size` override.
 
+The S3 also raises Zephyr's Bluetooth long-workqueue stack from 1404 to 2048
+bytes: `@k?` measured 1200 bytes in use on this controller, leaving almost no
+margin. Run `@k?` after the board has carried traffic before resizing anything
+else.
+
 Bee X1.0 additionally uses a 2 KiB main stack and a 1 KiB logging stack. Its
 Zephyr 4.5 diagnostic runs measured 1092 B and 732 B respectively during idle,
 BLE management/data traffic, WiFi scans and 1500000-baud UART loopback. The
@@ -738,8 +743,23 @@ All commands support short form (fits 20-byte BLE write before MTU exchange) and
 
 | Short Form | Long Form | Description |
 |------------|-----------|-------------|
-| `@i?` | `@linkr info?` | Read device diagnostics (firmware version, uptime, UART stats, WiFi state, WebDAV counters) |
+| `@i?` | `@linkr info?` | Read device diagnostics (firmware version, uptime, UART stats, PSRAM heap check, WiFi state, WebDAV counters) |
+| `@k?` | `@linkr stacks?` | Report each thread's stack high-water mark as used/size bytes |
 | `@h` | `@linkr help` | List available commands |
+
+On targets with PSRAM, the `sys` frame carries `ext_ram=<state>`: `ok` means
+the boot check found the shared heap inside the mapped region, while
+`overlap`, `overflow` and `unavailable` name the failure and `unchecked` means
+the check did not run. Targets without PSRAM omit the field.
+
+`@k?` answers with one `@stack <name> <used>/<size>` frame per live thread.
+The kernel counts the bytes at the bottom of the stack that still hold the
+0xaa fill pattern, so `used` is that thread's high-water mark since it was
+created. Spaces in thread names become `_` so the frame stays a token list.
+One management response is limited to 512 bytes, so a full page ends with
+`@stack more=<index>` (`@stack done` when the list is complete); `@k? <index>`
+continues from that index. The numbers only mean something after the firmware
+has run: a fresh boot reports idle threads at their entry point.
 
 ### WiFi Commands
 

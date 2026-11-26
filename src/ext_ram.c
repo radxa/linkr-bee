@@ -37,6 +37,35 @@ extern uint8_t _ext_ram_bss_start;
 extern uint8_t _ext_ram_bss_end;
 extern uint8_t _ext_ram_heap_end;
 
+/* Result of the one boot-time check, exposed for @i? diagnostics. The
+ * default says "not run yet" so a firmware that skips the call reports it
+ * instead of claiming success. */
+static int ext_ram_state = -EAGAIN;
+
+static int record_state(int state)
+{
+	ext_ram_state = state;
+	return state;
+}
+
+const char *linkr_ext_ram_state_name(void)
+{
+	switch (ext_ram_state) {
+	case 0:
+		return "ok";
+	case -EFAULT:
+		return "overlap";
+	case -ENOSPC:
+		return "overflow";
+	case -EIO:
+		return "unavailable";
+	case -EAGAIN:
+		return "unchecked";
+	default:
+		return "error";
+	}
+}
+
 int linkr_ext_ram_verify_heap(void)
 {
 	intptr_t vaddr = 0;
@@ -46,7 +75,7 @@ int linkr_ext_ram_verify_heap(void)
 	if (err != ESP_OK) {
 		LOG_ERR("PSRAM mapped region unavailable (%d); cannot verify that "
 			"the shared heap clears .ext_ram.bss", err);
-		return -EIO;
+		return record_state(-EIO);
 	}
 
 	if ((uintptr_t)vaddr < (uintptr_t)&_ext_ram_bss_end) {
@@ -56,7 +85,7 @@ int linkr_ext_ram_verify_heap(void)
 			(unsigned long)(uintptr_t)vaddr,
 			(unsigned long)(uintptr_t)&_ext_ram_bss_start,
 			(unsigned long)(uintptr_t)&_ext_ram_bss_end);
-		return -EFAULT;
+		return record_state(-EFAULT);
 	}
 
 	/* The linker heap window is fixed by CONFIG_ESP_SPIRAM_HEAP_SIZE, so
@@ -69,14 +98,14 @@ int linkr_ext_ram_verify_heap(void)
 			"or shrink .ext_ram.bss",
 			(unsigned long)(uintptr_t)&_ext_ram_heap_end,
 			(unsigned long)(uintptr_t)vaddr, (unsigned long)size);
-		return -ENOSPC;
+		return record_state(-ENOSPC);
 	}
 
 	LOG_INF("PSRAM shared heap 0x%08lx+0x%lx clears .ext_ram.bss "
 		"(ends 0x%08lx)",
 		(unsigned long)(uintptr_t)vaddr, (unsigned long)size,
 		(unsigned long)(uintptr_t)&_ext_ram_bss_end);
-	return 0;
+	return record_state(0);
 }
 
 #else
@@ -89,6 +118,11 @@ int linkr_ext_ram_verify_heap(void)
 int linkr_ext_ram_verify_heap(void)
 {
 	return 0;
+}
+
+const char *linkr_ext_ram_state_name(void)
+{
+	return "na";
 }
 
 #endif
