@@ -129,8 +129,8 @@ VCC-GND YD-ESP32-S3 V1.4 默认用 UART1 连接目标设备。将 GPIO17（Bee T
 指示灯使用 UART0（GPIO43/44）。按默认接线，Bee 复位时目标串口不会收到启动日志。
 
 V1.4 原理图将 U1 标为 XL-5050RGBC-WS2812B，GPIO48 按 24 位 GRB 格式驱动。
-灯不亮时可检查 RGB 焊桥是否已连通。该灯上电熄灭，通过 `@l` 设色后以 30%
-亮度保持，驱动在 IRAM 中生成波形。[V1.4 原理图](https://github.com/vcc-gnd/YD-ESP32-S3/blob/main/5-public-YD-ESP32-S3-Hardware%20info/YD-ESP32-S3-SCH-V1.4.pdf) · [U1 数据手册](https://www.xinglight.cn/uploadfile/202406/4c1ee57988f3bce.pdf)
+灯不亮时可检查 RGB 焊桥是否已连通。该灯以 30% 亮度跟随桥状态：空闲白、BLE 蓝、
+WiFi 绿、AI 会话青；`@l` 设色后显示 5 秒预览，驱动在 IRAM 中生成波形。[V1.4 原理图](https://github.com/vcc-gnd/YD-ESP32-S3/blob/main/5-public-YD-ESP32-S3-Hardware%20info/YD-ESP32-S3-SCH-V1.4.pdf) · [U1 数据手册](https://www.xinglight.cn/uploadfile/202406/4c1ee57988f3bce.pdf)
 
 默认构建不假设存在 PSRAM，因此既能用于 8 MB flash、无 PSRAM 的模组，也能用于
 N16R8（此时 PSRAM 闲置不用）；2 MB 的 N8R2 模组同样使用默认构建，因为 PSRAM

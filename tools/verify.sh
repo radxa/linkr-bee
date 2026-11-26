@@ -122,7 +122,7 @@ for board in $boards; do
   # enlarged buffers. Check both so neither silently drifts.
   if grep -qx 'CONFIG_SOC_SERIES_ESP32S3=y' "$config"; then
     grep -qx 'CONFIG_LINKR_BLE_BRIDGE_RGB_STATUS_LED=y' "$config"
-    grep -qx 'CONFIG_LINKR_BLE_BRIDGE_RGB_MANUAL_ONLY=y' "$config"
+    grep -qx '# CONFIG_LINKR_BLE_BRIDGE_RGB_MANUAL_ONLY is not set' "$config"
     # Default variant: no external RAM, data buffers back in internal SRAM.
     grep -qx '# CONFIG_ESP_SPIRAM is not set' "$config"
     grep -qx '# CONFIG_RING_BUFFER_LARGE is not set' "$config"
