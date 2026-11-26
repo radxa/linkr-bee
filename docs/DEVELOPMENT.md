@@ -182,7 +182,9 @@ asserts it, so `west flash` needs no `--flash-size` override.
 The S3 also raises Zephyr's Bluetooth long-workqueue stack from 1404 to 2048
 bytes: `@k?` measured 1200 bytes in use on this controller, leaving almost no
 margin. Run `@k?` after the board has carried traffic before resizing anything
-else.
+else. The measurement came from the N16R8 bench configuration, which is the one
+that enables `CONFIG_LINKR_BLE_BRIDGE_STACK_DIAGNOSTICS`; the default S3 build
+keeps the command and its stack fill out.
 
 Bee X1.0 additionally uses a 2 KiB main stack and a 1 KiB logging stack. Its
 Zephyr 4.5 diagnostic runs measured 1092 B and 732 B respectively during idle,
@@ -744,7 +746,7 @@ All commands support short form (fits 20-byte BLE write before MTU exchange) and
 | Short Form | Long Form | Description |
 |------------|-----------|-------------|
 | `@i?` | `@linkr info?` | Read device diagnostics (firmware version, uptime, UART stats, PSRAM heap check, WiFi state, WebDAV counters) |
-| `@k?` | `@linkr stacks?` | Report each thread's stack high-water mark as used/size bytes |
+| `@k?` | `@linkr stacks?` | Report each thread's stack high-water mark as used/size bytes (opt-in build option) |
 | `@h` | `@linkr help` | List available commands |
 
 On targets with PSRAM, the `sys` frame carries `ext_ram=<state>`: `ok` means
@@ -760,6 +762,16 @@ One management response is limited to 512 bytes, so a full page ends with
 `@stack more=<index>` (`@stack done` when the list is complete); `@k? <index>`
 continues from that index. The numbers only mean something after the firmware
 has run: a fresh boot reports idle threads at their entry point.
+
+The command is a build option, `CONFIG_LINKR_BLE_BRIDGE_STACK_DIAGNOSTICS`,
+off by default. A high-water mark is only readable when every stack was filled
+with `0xaa` at thread creation, and that fill cannot be added after the fact,
+so the option selects `CONFIG_INIT_STACKS` and pays one memset of each thread
+stack during boot (tens of KiB, once). The N16R8 bench configuration enables
+it. A build without the option omits `@k?` from `@h` and answers
+`ERR stacks unsupported`, so a client can distinguish a board that cannot
+measure from a typo. Treat it as a measuring instrument, not part of the
+product contract: enable it on the boards you are sizing.
 
 ### WiFi Commands
 
@@ -1742,6 +1754,7 @@ and 1440 px in English/Chinese and light/dark themes. The About page displays
 | Config Option | Default | Description |
 |---------------|---------|-------------|
 | `CONFIG_LINKR_BLE_BRIDGE_CONTROL_COMMANDS` | `y` | Enable management commands (`@u`, `@w`, `@d`, etc.) |
+| `CONFIG_LINKR_BLE_BRIDGE_STACK_DIAGNOSTICS` | `n` | Enable `@k?`; selects `CONFIG_INIT_STACKS` (one boot memset of every stack) |
 | `CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION` | `0.1.2` | Reported firmware version |
 
 ### Test Configuration

@@ -1548,9 +1548,11 @@ static void heap_status_response(struct bt_conn *conn)
  * the thread is created, and k_thread_stack_space_get() counts the untouched
  * bytes from the low end, so the worst case since boot is visible. Called on
  * demand: walking every stack is cheap but not something @i? should do on
- * every poll. Thread names become one token; unnamed threads stay "unnamed". */
-#if IS_ENABLED(CONFIG_THREAD_MONITOR) && IS_ENABLED(CONFIG_THREAD_STACK_INFO) && \
-	IS_ENABLED(CONFIG_INIT_STACKS)
+ * every poll. Thread names become one token; unnamed threads stay "unnamed".
+ * Behind its own switch: the 0xaa fill has to happen when a thread is created,
+ * so this cannot be turned on at runtime. The option selects INIT_STACKS and
+ * depends on the thread monitors, so one symbol is the whole condition. */
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_STACK_DIAGNOSTICS)
 struct stack_report_ctx {
 	struct bt_conn *conn;
 	unsigned int start;
@@ -1841,7 +1843,11 @@ static bool handle_control_command_complete(struct bt_conn *conn,
 		// replaced by "response too large". `@linkr aux` carries the board
 		// half, so both fit.
 		(void)send_control_response(conn,
-					     "OK cmds: @linkr bonds?|@linkr bonds name <label>|@linkr bonds names?|@linkr bonds label <type>/<address> [<hex>|clear]|@linkr bonds remove <type>/<address> @c?|@c claim|@c release|@c yield <peer> @i? @k? @u?|@u=baud,data,par,stop,flow "
+					     "OK cmds: @linkr bonds?|@linkr bonds name <label>|@linkr bonds names?|@linkr bonds label <type>/<address> [<hex>|clear]|@linkr bonds remove <type>/<address> @c?|@c claim|@c release|@c yield <peer> @i? "
+#if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_STACK_DIAGNOSTICS)
+					    "@k? "
+#endif
+					    "@u?|@u=baud,data,par,stop,flow "
 #if IS_ENABLED(CONFIG_LINKR_BLE_BRIDGE_BLE_NAME_FROM_MAC)
 					    "@n?|@n=<name>|@n default "
 #endif

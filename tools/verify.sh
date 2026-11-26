@@ -183,6 +183,11 @@ for board in $boards; do
     grep -qx 'CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y' "$n16r8_config"
     grep -qx 'CONFIG_ESPTOOLPY_FLASHSIZE="16MB"' "$n16r8_config"
 
+    # The bench board opts in to the stack high-water report; the option pulls
+    # in the 0xaa fill it needs, which cannot be enabled at runtime.
+    grep -qx 'CONFIG_LINKR_BLE_BRIDGE_STACK_DIAGNOSTICS=y' "$n16r8_config"
+    grep -qx 'CONFIG_INIT_STACKS=y' "$n16r8_config"
+
     # Bench overlays are sold as options, so compile each one. A pin or
     # property rename that breaks them would otherwise only surface on the
     # bench board that has the alternate wiring.
@@ -215,8 +220,12 @@ for board in $boards; do
     # watchdog needs. The dedicated thread carries this name.
     strings "$build_dir/zephyr/zephyr.elf" | grep -qx 'scan_watchdog'
   fi
-  # @k? reports high-water marks, which need the 0xaa stack fill.
-  grep -qx 'CONFIG_INIT_STACKS=y' "$config"
+  # Per-thread stack high-water marks (@k?) are an opt-in build option: the
+  # 0xaa fill they need cannot be enabled at runtime. The plain build of every
+  # target proves the off path still compiles and that nothing turns the fill
+  # on by accident; the bench configuration above proves the on path.
+  grep -qx '# CONFIG_LINKR_BLE_BRIDGE_STACK_DIAGNOSTICS is not set' "$config"
+  grep -qx '# CONFIG_INIT_STACKS is not set' "$config"
   grep -qx 'CONFIG_BT_SMP_APP_PAIRING_ACCEPT=y' "$config"
   grep -qx 'CONFIG_BT_BONDING_REQUIRED=y' "$config"
   grep -qx 'CONFIG_BT_SETTINGS=y' "$config"

@@ -166,7 +166,9 @@ west build -p always -b esp32s3_devkitc/esp32s3/procpu linkr-bee -- \
 
 S3 还把 Zephyr 的蓝牙长工作任务队列栈从 1404 字节提高到 2048 字节：`@k?` 在这颗
 控制器上实测已用到 1200 字节，几乎没有余量。改其他栈之前，先让板子跑一段真实流量
-再用 `@k?` 看数据。
+再用 `@k?` 看数据。这个数据来自 N16R8 台架配置，也只有它打开了
+`CONFIG_LINKR_BLE_BRIDGE_STACK_DIAGNOSTICS`；默认的 S3 构建不带这个命令，也不做
+填栈。
 
 Bee X1.0 另外将主线程栈设为 2 KiB、日志线程栈设为 1 KiB。Zephyr 4.5 诊断镜像在
 空闲、BLE 管理与数据收发、WiFi 扫描及 1500000 波特率 UART 回环中，分别测得
@@ -538,7 +540,7 @@ UART RX 字节（SBC console 输出）会被缓存，并定期 HTTP PUT 到 `<we
 | 短形式 | 长形式 | 说明 |
 |--------|--------|------|
 | `@i?` | `@linkr info?` | 读取设备诊断信息（固件版本、运行时间、UART 统计、PSRAM 堆检查、WiFi 状态、WebDAV 计数器） |
-| `@k?` | `@linkr stacks?` | 以 used/size 字节读取每个线程的栈高水位 |
+| `@k?` | `@linkr stacks?` | 以 used/size 字节读取每个线程的栈高水位（编译选项，默认关闭） |
 | `@h` | `@linkr help` | 列出可用命令 |
 
 带 PSRAM 的目标会在 `sys` 帧里附带 `ext_ram=<状态>`：`ok` 表示启动检查确认
@@ -551,6 +553,13 @@ UART RX 字节（SBC console 输出）会被缓存，并定期 HTTP PUT 到 `<we
 一页放满时末尾返回 `@stack more=<索引>`（全部列完则是 `@stack done`），再用
 `@k? <索引>` 从该处继续。刚启动时线程还没跑过，数字只反映入口点，跑一段时间
 后才有参考价值。
+
+这个命令是编译选项 `CONFIG_LINKR_BLE_BRIDGE_STACK_DIAGNOSTICS`，默认关闭。
+高水位只有在每个线程创建时把栈填成 0xaa 才能读出来，而这次填充事后补不了，
+所以该选项会 `select CONFIG_INIT_STACKS`，代价是启动时把每个线程栈各写一遍
+（几十 KB，一次性）。N16R8 台架配置打开了它。没有打开该选项的构建不会在
+`@h` 里列出 `@k?`，收到时回答 `ERR stacks unsupported`，客户端因此能区分
+“这块板量不了”和“打错了”。把它当量具，不要当产品契约：只在你确实要测的板子上开。
 
 ### WiFi 命令
 
@@ -1366,6 +1375,7 @@ BLE 回环、WiFi 扫描和 UART 线速接收测试；其他板型，以及 WiFi
 | 配置选项 | 默认值 | 说明 |
 |----------|--------|------|
 | `CONFIG_LINKR_BLE_BRIDGE_CONTROL_COMMANDS` | `y` | 启用管理命令（`@u`、`@w`、`@d` 等） |
+| `CONFIG_LINKR_BLE_BRIDGE_STACK_DIAGNOSTICS` | `n` | 启用 `@k?`；会选中 `CONFIG_INIT_STACKS`（启动时把每个栈填一遍） |
 | `CONFIG_LINKR_BLE_BRIDGE_FIRMWARE_VERSION` | `0.1.2` | 上报的固件版本 |
 
 ### 测试配置
