@@ -34,11 +34,17 @@ static const struct linkr_rgb led_activity_color = {
 };
 /* Dim colours keep the single pixel's power and glare low.
  *
- * The four states never stack, and each means one thing:
- *   white  - nothing attached, the board is up and healthy
+ * Five states, each one fact, in one priority order:
+ *   white  - nothing attached, not on WiFi: the board is up and healthy
+ *   amber  - WiFi is associated but no client is attached (online, idle)
  *   blue   - a BLE client is attached
- *   green  - WiFi is associated (it wins over BLE: the board is reachable)
+ *   green  - a LAN (WebSocket) client is attached: the network is in use
  *   cyan   - an AI session holds the console
+ *
+ * A client outranks a bare association, so "on the network, nobody using it"
+ * and "someone is using it" are different colours, and a BLE client is no
+ * longer hidden by a WiFi link that is merely up. AI > LAN > BLE > WiFi >
+ * idle.
  */
 #if !defined(CONFIG_LINKR_BLE_BRIDGE_RGB_MANUAL_ONLY)
 static const struct linkr_rgb led_blue = {0, 0, 32};
@@ -50,12 +56,16 @@ static const struct linkr_rgb led_blue = {0, 0, 32};
  * correction. */
 static const struct linkr_rgb led_white = {255, 255, 255};
 static const struct linkr_rgb led_cyan = {0, 24, 24};
+/* Amber for a bare WiFi association: red-dominant because the same efficient
+ * green die would otherwise turn an even mix yellow-green. */
+static const struct linkr_rgb led_amber = {48, 16, 0};
 static const struct linkr_rgb led_green = {0, 32, 0};
 #endif
 #define LED_BLINK_MS 100
 #define LED_PREVIEW_MS 5000
 #define LED_AI_LEASE_MS 15000
 static bool led_ready, led_ble_connected, led_wifi_connected;
+static bool led_lan_connected;
 static const char *led_last_reason;
 static bool led_activity_active, led_last_valid;
 static int64_t led_activity_deadline, led_activity_start;
@@ -98,15 +108,19 @@ static struct linkr_rgb led_color(int64_t now, const char **reason)
 		*reason = "preview";
 		return led_base;
 	}
-	/* WiFi association is the wider state: a board on the network is
-	 * reachable whether or not a BLE client also happens to be attached. */
-	if (led_wifi_connected) {
-		*reason = "wifi";
+	/* A client that is actually attached outranks a link that is merely up,
+	 * so WiFi association shows amber only when nothing is using it. */
+	if (led_lan_connected) {
+		*reason = "lan";
 		return led_green;
 	}
 	if (led_ble_connected) {
 		*reason = "ble";
 		return led_blue;
+	}
+	if (led_wifi_connected) {
+		*reason = "wifi";
+		return led_amber;
 	}
 	*reason = "idle";
 	return led_white;
@@ -205,6 +219,20 @@ void linkr_status_led_wifi(bool connected)
 	k_spinlock_key_t key = k_spin_lock(&led_lock);
 	bool changed = led_wifi_connected != connected;
 	led_wifi_connected = connected;
+	if (changed) ++led_revision;
+	k_spin_unlock(&led_lock, key);
+	if (changed && led_ready) (void)k_work_reschedule(&led_apply_work, K_NO_WAIT);
+}
+
+/* A LAN client attached (the WebSocket bridge) is a live user of the network,
+ * not just an association: this is what turns the pixel green. The bridge
+ * reports the count, so a second client connecting or one of two leaving does
+ * not change the state colour. */
+void linkr_status_led_lan(bool connected)
+{
+	k_spinlock_key_t key = k_spin_lock(&led_lock);
+	bool changed = led_lan_connected != connected;
+	led_lan_connected = connected;
 	if (changed) ++led_revision;
 	k_spin_unlock(&led_lock, key);
 	if (changed && led_ready) (void)k_work_reschedule(&led_apply_work, K_NO_WAIT);
@@ -440,5 +468,6 @@ void linkr_status_led_blink(int count, int delay_ms)
 /* Connection colours are specific to the X1.0 RGB LED. */
 void linkr_status_led_ble(bool connected) { ARG_UNUSED(connected); }
 void linkr_status_led_wifi(bool connected) { ARG_UNUSED(connected); }
+void linkr_status_led_lan(bool connected) { ARG_UNUSED(connected); }
 void linkr_status_led_ai(bool active) { ARG_UNUSED(active); }
 #endif

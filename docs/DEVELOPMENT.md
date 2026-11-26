@@ -138,8 +138,10 @@ reset leaves the target's serial input quiet.
 
 The V1.4 schematic identifies U1 as an XL-5050RGBC-WS2812B, a 24-bit GRB
 pixel on GPIO48. Check the RGB solder link if the pixel stays dark.
-The pixel mirrors the bridge state at 30% brightness: idle white, BLE blue,
-WiFi green and AI-session cyan; `@l` shows a five-second preview.
+The pixel mirrors the bridge state at 30% brightness: idle white, a bare
+WiFi association amber, a BLE client blue, a LAN WebSocket client green and
+an AI session cyan (AI > LAN > BLE > WiFi > idle); `@l` shows a five-second
+preview.
 The driver generates the waveform from IRAM.
 [V1.4 schematic](https://github.com/vcc-gnd/YD-ESP32-S3/blob/main/5-public-YD-ESP32-S3-Hardware%20info/YD-ESP32-S3-SCH-V1.4.pdf) · [U1 datasheet](https://www.xinglight.cn/uploadfile/202406/4c1ee57988f3bce.pdf)
 

@@ -166,11 +166,12 @@ int main(int argc, char **argv)
             expect(0, 0, 10);
         } else if (scenario == 3) {
             advance(220);
+            linkr_status_led_ble(false);
             linkr_status_led_wifi(true);
             advance(220);
             expect(0, 0, 0);
             advance(240);
-            expect(0, 10, 0);
+            expect(14, 5, 0);
         } else {
             advance(239);
             now_ms = 240; /* New RX arrives before the due work runs. */
@@ -181,11 +182,23 @@ int main(int argc, char **argv)
             expect(0, 0, 10);
         }
     } else if (scenario == 5) {
-        linkr_status_led_wifi(true); advance(200); expect(0, 10, 0);
+        /* BLE outranks a bare association; with BLE gone the association is
+         * amber, not green: nobody is using the network. */
+        linkr_status_led_wifi(true); advance(200); expect(0, 0, 10);
         advance(300); linkr_status_led_ai(true); advance(300); expect(0, 7, 7);
         advance(400); linkr_status_led_ble(false); advance(400); expect(0, 7, 7);
-        advance(500); linkr_status_led_ai(false); advance(500); expect(0, 10, 0);
+        advance(500); linkr_status_led_ai(false); advance(500); expect(14, 5, 0);
         advance(600); linkr_status_led_wifi(false); advance(600); expect(77, 77, 77);
+    } else if (scenario == 14) {
+        /* An attached LAN client is the green state and outranks BLE and a
+         * bare association; leaving falls back down the priority chain. */
+        linkr_status_led_wifi(true); advance(300); expect(0, 0, 10);
+        linkr_status_led_lan(true); advance(400); expect(0, 10, 0);
+        linkr_status_led_ai(true); advance(500); expect(0, 7, 7);
+        linkr_status_led_ai(false); advance(600); expect(0, 10, 0);
+        linkr_status_led_lan(false); advance(700); expect(0, 0, 10);
+        linkr_status_led_ble(false); advance(800); expect(14, 5, 0);
+        linkr_status_led_wifi(false); advance(900); expect(77, 77, 77);
     } else if (scenario == 6) {
         linkr_status_led_ai(true); advance(200); expect(0, 7, 7);
         advance(15199); expect(0, 7, 7);
