@@ -42,11 +42,12 @@ static const struct linkr_rgb led_activity_color = {
  */
 #if !defined(CONFIG_LINKR_BLE_BRIDGE_RGB_MANUAL_ONLY)
 static const struct linkr_rgb led_blue = {0, 0, 32};
-/* Idle white. Equal channels are not white on this part: its green die is
- * markedly more efficient, so {255,255,255} reads green even at full duty
- * (C31 is not fitted, so this is the die balance, not the data line). Green is
- * pulled down to balance it; the other states are single- or double-channel
- * and do not need the correction. */
+/* Idle white. Tuned on the X1.0 part, whose green die is the efficient one:
+ * at the 30% output scale a logical 32-64 lands at 10-19/255, where an
+ * equal-channel value reads green. Full scale lifts it to 77/255 and the same
+ * channels read white, so the value stays at the top instead of being pulled
+ * down. The other states are single- or double-channel and need no
+ * correction. */
 static const struct linkr_rgb led_white = {255, 255, 255};
 static const struct linkr_rgb led_cyan = {0, 24, 24};
 static const struct linkr_rgb led_green = {0, 32, 0};

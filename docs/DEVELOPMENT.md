@@ -443,6 +443,11 @@ instead of disappearing:
 | `@r?`, `@r tx <addr>,<cmd>[,<repeats>]`, `@r rx on\|off`, `@r clear` | NEC IR receiver / transmitter |
 | `@r learn [<slot>]`, `@r learn stop`, `@r play [<slot>]`, `@r slots`, `@r delete <slot>` | raw IR learning, stored in NVS |
 
+`@l off` is an ordinary colour request, not a persistent switch: on boards
+whose pixel doubles as the status LED (X1.0 and the S3 bench build) it previews
+black for five seconds and then returns to the idle or connection colour.
+Nothing pins the pixel dark while the board is reporting state.
+
 Kconfig options (all default `y` only where the devicetree node exists):
 `CONFIG_LINKR_BLE_BRIDGE_RGB_STATUS_LED`,
 `CONFIG_LINKR_BLE_BRIDGE_RGB_ACTIVITY_COLOR`,

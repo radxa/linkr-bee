@@ -43,7 +43,8 @@
  * CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY is set (see src/ext_ram.c).
  *
  * Returns 0 when clear or when the target has no PSRAM; -EFAULT when the pool
- * overlaps the section; -EIO when the region cannot be queried.
+ * overlaps the section; -ENOSPC when the linker heap window ends outside the
+ * mapped region; -EIO when the region cannot be queried.
  */
 int linkr_ext_ram_verify_heap(void);
 

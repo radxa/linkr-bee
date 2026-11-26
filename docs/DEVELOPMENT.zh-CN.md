@@ -328,6 +328,10 @@ Serial/JTAG console、UART0（GPIO20/21）作桥接口、SW1（GPIO3）作配对
 binding 在 `dts/bindings/linkr/`。没有对应节点的板子上这些源文件编译成桩，
 `@l`/`@o`/`@r` 命令返回 `ERR ... unsupported`，同一份固件树仍服务全部板型。
 
+`@l off` 只是和普通颜色一样的一次设色，不是常驻开关：在像素同时充当状态灯的
+板子上（X1.0 和 S3 台架构建），它会先显示 5 秒黑屏，然后回到空闲或连接状态色；
+固件没有“上报状态的同时把灯永久压黑”的命令。
+
 Kconfig：`CONFIG_LINKR_BLE_BRIDGE_RGB_STATUS_LED`、
 `CONFIG_LINKR_BLE_BRIDGE_RGB_ACTIVITY_COLOR`、
 `CONFIG_LINKR_BLE_BRIDGE_OPTO_SWITCH`、`CONFIG_LINKR_BLE_BRIDGE_IR`、

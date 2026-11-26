@@ -194,6 +194,24 @@ for board in $boards; do
       -DEXTRA_DTC_OVERLAY_FILE="$repo_dir/boards/yd_esp32s3_rgbw.overlay"
     sed -n '/linkr_rgb: linkr-rgb {/,/};/p' "$build_dir-rgbw/zephyr/zephyr.dts" |
       grep -Fq 'channel-count = < 0x4 >;'
+
+    # The documented N16R8 recipe keeps the memory fragment in the list, so
+    # compile both bench overlays on top of it as well: an overlay that only
+    # works on the small build would otherwise fail on the bench board.
+    west build -p always -d "$build_dir-n16r8-bench" -b "$board" "$repo_dir" -t app -- \
+      -DEXTRA_CONF_FILE="$repo_dir/boards/esp32s3_devkitc_esp32s3_procpu_n16r8.conf" \
+      -DEXTRA_DTC_OVERLAY_FILE="$repo_dir/boards/esp32s3_devkitc_esp32s3_procpu_n16r8.overlay;$repo_dir/boards/yd_esp32s3_uart0.overlay;$repo_dir/boards/yd_esp32s3_rgbw.overlay"
+    bench_dts="$build_dir-n16r8-bench/zephyr/zephyr.dts"
+    grep -Fq 'zephyr,linkr-ble-uart = &uart0;' "$bench_dts"
+    sed -n '/uart1: /,/};/p' "$bench_dts" | grep -Fq 'status = "disabled";'
+    sed -n '/linkr_rgb: linkr-rgb {/,/};/p' "$bench_dts" |
+      grep -Fq 'channel-count = < 0x4 >;'
+    grep -qx 'CONFIG_ESPTOOLPY_FLASHSIZE="16MB"' "$build_dir-n16r8-bench/zephyr/.config"
+
+    # The scan watchdog runs from a timer and its own preemptible queue on this
+    # single-radio part, so a WiFi operation cannot hold the very queue the
+    # watchdog needs. The dedicated thread carries this name.
+    strings "$build_dir/zephyr/zephyr.elf" | grep -qx 'scan_watchdog'
   fi
   grep -qx 'CONFIG_BT_SMP_APP_PAIRING_ACCEPT=y' "$config"
   grep -qx 'CONFIG_BT_BONDING_REQUIRED=y' "$config"
