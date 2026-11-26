@@ -175,6 +175,10 @@ inside one quoted argument. For N16R8, retain its memory overlay in that list.
 Use `xtensa-espressif_esp32s3_zephyr-elf` SDK 1.0.1 for either. This target is
 a bench configuration and is not part of the release matrix.
 
+Both board configurations pin the esptool flash size to the size their Devicetree
+declares (8 MB for the default build, 16 MB for N16R8), and `tools/verify.sh`
+asserts it, so `west flash` needs no `--flash-size` override.
+
 Bee X1.0 additionally uses a 2 KiB main stack and a 1 KiB logging stack. Its
 Zephyr 4.5 diagnostic runs measured 1092 B and 732 B respectively during idle,
 BLE management/data traffic, WiFi scans and 1500000-baud UART loopback. The

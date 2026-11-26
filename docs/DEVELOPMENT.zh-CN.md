@@ -160,6 +160,10 @@ west build -p always -b esp32s3_devkitc/esp32s3/procpu linkr-bee -- \
 两者都使用 SDK 1.0.1 的 `xtensa-espressif_esp32s3_zephyr-elf` 工具链。该目标是
 台架配置，不进入发布矩阵。
 
+两个板级配置都把 esptool 的 flash 大小固定为 Devicetree 声明的值（默认构建
+8 MB，N16R8 为 16 MB），`tools/verify.sh` 会断言该值，因此 `west flash` 无需
+额外传 `--flash-size`。
+
 Bee X1.0 另外将主线程栈设为 2 KiB、日志线程栈设为 1 KiB。Zephyr 4.5 诊断镜像在
 空闲、BLE 管理与数据收发、WiFi 扫描及 1500000 波特率 UART 回环中，分别测得
 1092 B 和 732 B 的栈峰值。板级定义启用 `trng0`，使用硬件熵源；计入活动灯状态开销和

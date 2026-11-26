@@ -128,6 +128,10 @@ for board in $boards; do
     grep -qx '# CONFIG_RING_BUFFER_LARGE is not set' "$config"
     grep -qx 'CONFIG_LINKR_BLE_BRIDGE_UART_RX_BUFFER_SIZE=8192' "$config"
     grep -qx 'CONFIG_LINKR_BLE_BRIDGE_LOG_RING_SIZE=8192' "$config"
+    # The devkit DTS describes an 8 MB part; the runner must not fall back to
+    # the 2 MB default and write a truncated image.
+    grep -qx 'CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y' "$config"
+    grep -qx 'CONFIG_ESPTOOLPY_FLASHSIZE="8MB"' "$config"
 
     # N16R8 variant: the extra fragments must produce the 8 MB octal part and
     # the enlarged PSRAM-resident buffers.
@@ -174,6 +178,22 @@ for board in $boards; do
     grep -qx 'CONFIG_LINKR_BLE_BRIDGE_PEER_TX_QUEUE_DEPTH=64' "$n16r8_config"
     grep -qx 'CONFIG_LINKR_BLE_BRIDGE_UART_RX_BUFFER_SIZE=24576' "$n16r8_config"
     grep -qx 'CONFIG_ESP_SPIRAM_HEAP_SIZE=8049120' "$n16r8_config"
+    grep -qx 'CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y' "$n16r8_config"
+    grep -qx 'CONFIG_ESPTOOLPY_FLASHSIZE="16MB"' "$n16r8_config"
+
+    # Bench overlays are sold as options, so compile each one. A pin or
+    # property rename that breaks them would otherwise only surface on the
+    # bench board that has the alternate wiring.
+    west build -p always -d "$build_dir-uart0" -b "$board" "$repo_dir" -t app -- \
+      -DEXTRA_DTC_OVERLAY_FILE="$repo_dir/boards/yd_esp32s3_uart0.overlay"
+    uart0_dts="$build_dir-uart0/zephyr/zephyr.dts"
+    grep -Fq 'zephyr,linkr-ble-uart = &uart0;' "$uart0_dts"
+    sed -n '/uart1: /,/};/p' "$uart0_dts" | grep -Fq 'status = "disabled";'
+
+    west build -p always -d "$build_dir-rgbw" -b "$board" "$repo_dir" -t app -- \
+      -DEXTRA_DTC_OVERLAY_FILE="$repo_dir/boards/yd_esp32s3_rgbw.overlay"
+    sed -n '/linkr_rgb: linkr-rgb {/,/};/p' "$build_dir-rgbw/zephyr/zephyr.dts" |
+      grep -Fq 'channel-count = < 0x4 >;'
   fi
   grep -qx 'CONFIG_BT_SMP_APP_PAIRING_ACCEPT=y' "$config"
   grep -qx 'CONFIG_BT_BONDING_REQUIRED=y' "$config"

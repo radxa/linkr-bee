@@ -35,6 +35,7 @@ LOG_MODULE_REGISTER(linkr_ext_ram, LOG_LEVEL_INF);
 
 extern uint8_t _ext_ram_bss_start;
 extern uint8_t _ext_ram_bss_end;
+extern uint8_t _ext_ram_heap_end;
 
 int linkr_ext_ram_verify_heap(void)
 {
@@ -56,6 +57,19 @@ int linkr_ext_ram_verify_heap(void)
 			(unsigned long)(uintptr_t)&_ext_ram_bss_start,
 			(unsigned long)(uintptr_t)&_ext_ram_bss_end);
 		return -EFAULT;
+	}
+
+	/* The linker heap window is fixed by CONFIG_ESP_SPIRAM_HEAP_SIZE, so
+	 * growing .ext_ram.bss or the setting can push its end past the mapped
+	 * part without changing the lower edge. sys_heap_init() would then write
+	 * its headers outside the mapped region. */
+	if ((uintptr_t)&_ext_ram_heap_end > (uintptr_t)vaddr + size) {
+		LOG_ERR("PSRAM heap window ends at 0x%08lx, past the mapped "
+			"region (0x%08lx+0x%lx): lower CONFIG_ESP_SPIRAM_HEAP_SIZE "
+			"or shrink .ext_ram.bss",
+			(unsigned long)(uintptr_t)&_ext_ram_heap_end,
+			(unsigned long)(uintptr_t)vaddr, (unsigned long)size);
+		return -ENOSPC;
 	}
 
 	LOG_INF("PSRAM shared heap 0x%08lx+0x%lx clears .ext_ram.bss "
